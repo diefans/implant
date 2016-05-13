@@ -1,4 +1,36 @@
 #!/usr/bin/env python3
+"""
+resources:
+- https://pymotw.com/3/asyncio/subprocesses.html
+- http://stackoverflow.com/questions/24435987/how-to-stream-stdout-stderr-from-a-child-process-using-asyncio-and-obtain-its-e
+- http://stackoverflow.com/questions/375427/non-blocking-read-on-a-subprocess-pipe-in-python/20697159#20697159
+
+
+How it should work
+
+
+class Project:
+    pass
+
+
+class Task:
+    pass
+
+
+class Slave:
+    pass
+
+
+
+async for task in project.tasks:
+
+    await result = slave.do(task)
+
+    await task.complete(result)
+
+
+
+"""
 
 import sys
 import functools
@@ -10,7 +42,8 @@ import shlex
 class PingProtocol(asyncio.SubprocessProtocol):
     FD_NAMES = ['stdin', 'stdout', 'stderr']
 
-    def __init__(self, done):
+    def __init__(self, loop, done):
+        self.loop = loop
         self.done = done
         self.buffer = bytearray()
         self.transport = None
@@ -46,6 +79,8 @@ class PingProtocol(asyncio.SubprocessProtocol):
 
             elif data == b'terminate':
                 self.stdin.write(b'exit')
+        else:
+            print(fd, data)
 
     def process_exited(self):
         print('process exited')
@@ -57,11 +92,11 @@ class PingProtocol(asyncio.SubprocessProtocol):
         else:
             results = []
         self.done.set_result((return_code, 'foo'))
+        # self.loop.stop()
 
 
-async def run_client(loop, command):
-    cmd_done = asyncio.Future(loop=loop)
-    factory = functools.partial(PingProtocol, cmd_done)
+async def run_client(loop, done, command):
+    factory = functools.partial(PingProtocol, loop, done)
 
     proc = loop.subprocess_exec(
         factory,
@@ -74,13 +109,21 @@ async def run_client(loop, command):
         print('launching process')
         transport, protocol = await proc
         print('waiting for process to complete')
-        await cmd_done
+        await done
 
     finally:
         transport.close()
 
 
+def get_python_source(obj):
+    import inspect
+    return inspect.getsource(obj)
+
+
 def main():
+    import receive
+
+    receive_source = get_python_source(receive).replace('"', '\\"').replace("'", "\\'")
 
     if sys.platform == "win32":
         loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
@@ -89,15 +132,27 @@ def main():
         loop = asyncio.get_event_loop()
 
     try:
-        returncode = loop.run_until_complete(
+        done = asyncio.Future(loop=loop)
+
+        command = """ssh localhost '/home/olli/.pyenv/versions/debellator3/bin/python -u -c "{}"'""".format(receive_source)
+        print(command)
+
+        returncode = loop.create_task(
             run_client(
                 loop,
-                """ssh localhost 'python -u /home/olli/code/da/debellator/receive.py'"""
+                done,
+                """ssh localhost '/home/olli/.pyenv/versions/debellator3/bin/python -u /home/olli/code/da/debellator3/receive.py'"""
+                # """ssh localhost 'python -c "{}"'""".format(receive_source)
+                # command
             )
         )
+        loop.run_until_complete(done)
     finally:
         loop.close()
 
 
 if __name__ == '__main__':
     main()
+
+    # asyncio.StreamReader
+    # asyncio.StreamReaderProtocol
