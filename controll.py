@@ -177,7 +177,11 @@ def main():
             "/home/olli/.pyenv/versions/debellator3/bin/python",
             "-u",
             "-c",
-            """'import base64; c = compile(base64.b64decode(b"{}"), "<string>", "exec"); exec(c)'""".format(receive_source_b64)
+            "'"
+            'import imp, base64; boot = imp.new_module("dbltr.boot");'
+            'c = compile(base64.b64decode(b"{}"), "<string>", "exec");'
+            'exec(c, boot.__dict__); boot.main(None);'
+            "'".format(receive_source_b64)
         ]
         command = [
             "/home/olli/.pyenv/versions/debellator3/bin/python",
