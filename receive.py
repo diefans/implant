@@ -12,7 +12,10 @@ see https://github.com/python/asyncio/issues/314 for Exception on exit
 """
 
 import sys
+import functools
 import asyncio
+import signal
+from collections import defaultdict
 
 
 class DataStreamReader(asyncio.StreamReader):
@@ -53,6 +56,96 @@ class AioStdinPipe:
             return val
 
 
+class Message:
+
+    """
+    A Message is a base64 encoded payload.
+    """
+
+    def __init__(self, uuid, payload):
+        self.uuid = uuid
+        self.payload = payload
+
+
+class MessageBuffer:
+
+    """
+    Buffers incomming data until complete and yields a Message
+    """
+
+    def __init__(self, loop):
+        self._loop = loop
+        self._waiter = None
+        self._channels = defaultdict(bytearray)
+
+    def feed_data(self, data):
+        """Append new data to the buffer.
+
+        Every data has following format: <uuid>:<base64><:?>\n
+        """
+
+        uuid, payload, *cont = data.split(b':')
+
+        self._channels[uuid].extand(payload)
+
+        # if we not have an ending colon, we are finished
+        if not cont:
+            # resolve future
+            self._resolve_message(Message(uuid, b''.join(self._channels[uuid])))
+
+    def _resolve_message(self, message):
+        """Finalize the waiter by providing a message."""
+
+        self._waiter.set_result(message)
+
+    async def _wait_for_data(self):
+        """Create a future and wait for its fruition."""
+
+        if self._waiter is not None:
+            raise RuntimeError("There is already a corroutine waiting for data on this transport")
+
+        self._waiter = asyncio.futures.Future(loop=self._loop)
+        try:
+            return await self._waiter
+        finally:
+            self._waiter = None
+
+    async def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        while True:
+            value = await self._wait_for_data()
+
+            if value == b'':
+                continue
+                # raise StopAsyncIteration
+            return value
+
+
+class MessageProtocol(asyncio.Protocol):
+
+    """
+    Just feed data to the buffer.
+    """
+
+    def __init__(self, buffer):
+        self._transport = None
+        self.buffer = buffer
+
+    def connection_made(self, transport):
+        self._transport = transport
+
+    def connection_lost(self, exc):
+        raise exc
+
+    def data_received(self, data):
+        self.buffer.feed_data(data)
+
+    def eof_received(self):
+        pass
+
+
 class Receiver(object):
 
     """
@@ -73,11 +166,20 @@ class Receiver(object):
                 if data == b'':
                     continue
 
+                await asyncio.sleep(1)
                 sys.stdout.buffer.write(data)
                 if data == b'terminate':
                     if self.done:
                         self.done.set_result(None)
                     return
+        except:
+            import traceback
+
+            with open("receive.log", "w") as log:
+                log.write(traceback.format_exc())
+
+            raise
+
         finally:
             # important for clean exit
             reader.close()
@@ -103,13 +205,24 @@ async def workaround():
 def main(args):
     # create loop
     if sys.platform == "win32":
-        loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
+        loop = asyncio.ProactorEventLoop()  # for subprocess pipes on Windows
         asyncio.set_event_loop(loop)
     else:
         loop = asyncio.get_event_loop()
 
+    done = asyncio.Future(loop=loop)
+    def ask_exit(signame):
+        print("got signal %s: exit" % signame)
+        done.set_result(None)
+        loop.stop()
+
+    # register shutdowen
+    for signame in ('SIGINT', 'SIGTERM'):
+        loop.add_signal_handler(
+            getattr(signal, signame),
+            functools.partial(ask_exit, signame)
+        )
     try:
-        done = asyncio.Future(loop=loop)
 
         receiver = Receiver(loop)
 

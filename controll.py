@@ -33,10 +33,13 @@ async for task in project.tasks:
 """
 
 import sys
+import signal
 import functools
 import asyncio
 from asyncio.subprocess import PIPE
 import shlex
+import base64
+import uuid
 
 
 class PingProtocol(asyncio.SubprocessProtocol):
@@ -63,24 +66,33 @@ class PingProtocol(asyncio.SubprocessProtocol):
         # initial start
         self.stdin.write(b'foo')
 
+    def pipe_connection_lost(self, fd, exc):
+        print("connection lost", fd, exc)
+
+    @staticmethod
+    def _create_message(data):
+        return b':'.join((bytes(uuid.uuid1().hex, 'ascii'), base64.b64encode(data)))
+
+    def send(self, data):
+        self.stdin.write(data)
+        # self.stdin.write(self._create_message(data))
+
     def pipe_data_received(self, fd, data):
         print('read {} bytes from {}'.format(len(data),
                                              self.FD_NAMES[fd]))
+        print("<", fd, data)
         if fd == 1:
-            print("<", data)
 
             self.buffer.extend(data)
 
             if data == b'foo':
-                self.stdin.write(b'bar')
+                self.send(b'bar')
 
             elif data == b'bar':
-                self.stdin.write(b'terminate')
+                self.send(b'terminate')
 
             elif data == b'terminate':
-                self.stdin.write(b'exit')
-        else:
-            print(fd, data)
+                self.send(b'exit')
 
     def process_exited(self):
         print('process exited')
@@ -95,12 +107,16 @@ class PingProtocol(asyncio.SubprocessProtocol):
         # self.loop.stop()
 
 
-async def run_client(loop, done, command):
+processes = set()
+
+
+async def run_client(loop, done, *command):
     factory = functools.partial(PingProtocol, loop, done)
 
+    asyncio.create_subprocess_exec
     proc = loop.subprocess_exec(
         factory,
-        *shlex.split(command),
+        *command,
         stdout=PIPE,
         stdin=PIPE
     )
@@ -108,7 +124,11 @@ async def run_client(loop, done, command):
     try:
         print('launching process')
         transport, protocol = await proc
-        print('waiting for process to complete')
+
+        print("register process")
+        processes.add(asyncio.subprocess.Process(transport, protocol, loop))
+
+        print('waiting for process to complete', transport, protocol)
         await done
 
     finally:
@@ -123,7 +143,8 @@ def get_python_source(obj):
 def main():
     import receive
 
-    receive_source = get_python_source(receive).replace('"', '\\"').replace("'", "\\'")
+    receive_source = get_python_source(receive).encode('utf-8')
+    receive_source_b64 = base64.b64encode(receive_source).decode('utf-8')
 
     if sys.platform == "win32":
         loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
@@ -131,19 +152,44 @@ def main():
     else:
         loop = asyncio.get_event_loop()
 
-    try:
-        done = asyncio.Future(loop=loop)
+    done = asyncio.Future(loop=loop)
 
-        command = """ssh localhost '/home/olli/.pyenv/versions/debellator3/bin/python -u -c "{}"'""".format(receive_source)
-        print(command)
+    def ask_exit(signame):
+        print("got signal %s: exit" % signame)
+        for proc in processes:
+            proc.send_signal(signal.SIGHUP)
+            proc.terminate()
+            print("Killing: ", proc)
+        loop.stop()
+        done.cancelled()
+
+    # register shutdowen
+    for signame in ('SIGINT', 'SIGTERM'):
+        loop.add_signal_handler(
+            getattr(signal, signame),
+            functools.partial(ask_exit, signame)
+        )
+
+    try:
+
+        ssh_command = [
+            "ssh", "localhost",
+            "/home/olli/.pyenv/versions/debellator3/bin/python",
+            "-u",
+            "-c",
+            """'import base64; c = compile(base64.b64decode(b"{}"), "<string>", "exec"); exec(c)'""".format(receive_source_b64)
+        ]
+        command = [
+            "/home/olli/.pyenv/versions/debellator3/bin/python",
+            "-u",
+            "-c", """import base64; c = compile(base64.b64decode(b"{}"), "<string>", "exec"); exec(c)""".format(receive_source_b64)
+        ]
 
         returncode = loop.create_task(
             run_client(
                 loop,
                 done,
-                """ssh localhost '/home/olli/.pyenv/versions/debellator3/bin/python -u /home/olli/code/da/debellator3/receive.py'"""
-                # """ssh localhost 'python -c "{}"'""".format(receive_source)
-                # command
+                *ssh_command
             )
         )
         loop.run_until_complete(done)
