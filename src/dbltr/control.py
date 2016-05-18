@@ -64,7 +64,8 @@ class PingProtocol(asyncio.SubprocessProtocol):
         self.stderr = transport.get_pipe_transport(2)
 
         # initial start
-        self.stdin.write(b'foo')
+        self.stdin.write(self._create_message(b'foo'))
+        # self.stdin.write(b'foo')
 
     def pipe_connection_lost(self, fd, exc):
         print("connection lost", fd, exc)
@@ -74,8 +75,8 @@ class PingProtocol(asyncio.SubprocessProtocol):
         return b':'.join((bytes(uuid.uuid1().hex, 'ascii'), base64.b64encode(data)))
 
     def send(self, data):
-        self.stdin.write(data)
-        # self.stdin.write(self._create_message(data))
+        # self.stdin.write(data)
+        self.stdin.write(self._create_message(data))
 
     def pipe_data_received(self, fd, data):
         print('read {} bytes from {}'.format(len(data),
@@ -118,6 +119,7 @@ async def run_client(loop, done, *command):
         factory,
         *command,
         stdout=PIPE,
+        stderr=PIPE,
         stdin=PIPE
     )
 

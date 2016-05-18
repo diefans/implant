@@ -12,10 +12,31 @@ see https://github.com/python/asyncio/issues/314 for Exception on exit
 """
 
 import sys
+import uuid
+import json
 import functools
 import asyncio
 import signal
 from collections import defaultdict
+
+
+def split_size(s, size=1024):
+    """Split a string into pieces."""
+
+    if size < 1:
+        raise ValueError('size must be greater than 0', size)
+
+    length = len(s)
+    remains = length % size
+
+    for i in (i * size for i in range(length // size)):
+        yield s[i: i + size]
+
+    if length < size:
+        yield s
+
+    elif remains:
+        yield s[i + size: i + size + remains]
 
 
 class DataStreamReader(asyncio.StreamReader):
@@ -62,9 +83,28 @@ class Message:
     A Message is a base64 encoded payload.
     """
 
-    def __init__(self, uuid, payload):
-        self.uuid = uuid
+    limit = 1024
+
+    def __init__(self, payload, uuid=None):
         self.payload = payload
+        self.uuid = uuid or uuid.uuid1()
+
+    @property
+    def jsonified(self):
+        return json.dumps(self.payload)
+
+    def encode(self):
+        """Create a serialized version of that message.
+
+        If the payload is greater than self.limit it is split at that boundary.
+        """
+        b64_jsonified = base64.b64encode(self.jsonified)
+
+        # for split_msg in split_size(b64_jsonified, self.limit):
+
+
+
+
 
 
 class MessageBuffer:
@@ -86,7 +126,7 @@ class MessageBuffer:
 
         uuid, payload, *cont = data.split(b':')
 
-        self._channels[uuid].extand(payload)
+        self._channels[uuid].extend(payload)
 
         # if we not have an ending colon, we are finished
         if not cont:
@@ -140,7 +180,12 @@ class MessageProtocol(asyncio.Protocol):
         raise exc
 
     def data_received(self, data):
-        self.buffer.feed_data(data)
+        try:
+            self.buffer.feed_data(data)
+            sys.stderr.buffer.write(b"Incomming message: " + data)
+
+        except ValueError:
+            sys.stderr.buffer.write(b"Bad message: " + data)
 
     def eof_received(self):
         pass
@@ -154,6 +199,15 @@ class Receiver(object):
     def __init__(self, loop, done=None):
         self.loop = loop
         self.done = done
+
+    async def messages(self):
+        buffer = MessageBuffer(self.loop)
+        protocol = MessageProtocol(buffer)
+        await self.loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+        async for message in buffer:
+            sys.stdout.buffer.write(message.payload)
+
 
     async def recv(self):
         reader = DataStreamReader()
@@ -230,7 +284,7 @@ def main(args):
 
         # loop.run_until_complete(done)
         # done.set_result(None)
-        loop.run_until_complete(receiver.recv())
+        loop.run_until_complete(receiver.messages())
 
     finally:
         loop.close()
