@@ -12,12 +12,31 @@ see https://github.com/python/asyncio/issues/314 for Exception on exit
 """
 
 import sys
+import base64
 import uuid
 import json
 import functools
 import asyncio
 import signal
-from collections import defaultdict
+
+import structlog
+
+
+log = structlog.get_logger()
+
+
+@functools.lru_cache(maxsize=1)
+def get_event_loop():
+    """:returns: platform specific event loop"""
+
+    # create loop
+    if sys.platform == "win32":
+        loop = asyncio.ProactorEventLoop()  # for subprocess pipes on Windows
+        asyncio.set_event_loop(loop)
+    else:
+        loop = asyncio.get_event_loop()
+
+    return loop
 
 
 def split_size(s, size=1024):
@@ -39,45 +58,7 @@ def split_size(s, size=1024):
         yield s[i + size: i + size + remains]
 
 
-class DataStreamReader(asyncio.StreamReader):
-    async def read_data(self):
-        # wait for data
-        if not self._buffer and not self._eof:
-            await self._wait_for_data('read_data')
-
-        data = bytes(self._buffer)
-        self._buffer.clear()
-
-        self._maybe_resume_transport()
-        return data
-
-    def close(self):
-        self._transport.close()
-
-
-class AioStdinPipe:
-
-    def __init__(self, loop=None):
-        self.loop = loop or asyncio.get_event_loop()
-        self.reader = DataStreamReader()
-
-    def get_reader(self):
-        return asyncio.StreamReaderProtocol(self.reader)
-
-    async def __aiter__(self):
-        await self.loop.connect_read_pipe(self.get_reader, sys.stdin)
-        return self
-
-    async def __anext__(self):
-        while True:
-            val = await self.reader.read_data()
-            if val == b'':
-                continue
-                # raise StopAsyncIteration
-            return val
-
-
-class Message:
+class Message(bytes):
 
     """
     A Message is a base64 encoded payload.
@@ -85,9 +66,19 @@ class Message:
 
     limit = 1024
 
-    def __init__(self, payload, uuid=None):
-        self.payload = payload
-        self.uuid = uuid or uuid.uuid1()
+    def __new__(cls, payload, uid=None, complete=True):
+        return super(Message, cls).__new__(cls, payload)
+
+    def __init__(self, payload, uid=None, complete=True):
+        super(Message, self).__init__()
+        self.uid = uid or uuid.uuid1()
+        self.complete = complete
+
+    def __hash__(self):
+        return self.uid.int
+
+    def __eq__(self, msg):
+        return hash(self) == hash(msg)
 
     @property
     def jsonified(self):
@@ -103,169 +94,158 @@ class Message:
         # for split_msg in split_size(b64_jsonified, self.limit):
 
 
+class MessageStreamReader(asyncio.StreamReader):
+    async def readline(self):
+        if self._exception is not None:
+            raise self._exception
+
+        line = bytearray()
+        not_enough = True
+
+        while not_enough:
+            while self._buffer and not_enough:
+                ichar = self._buffer.find(b'\n')
+                if ichar < 0:
+                    line.extend(self._buffer)
+                    self._buffer.clear()
+                else:
+                    ichar += 1
+                    line.extend(self._buffer[:ichar])
+                    del self._buffer[:ichar]
+                    not_enough = False
+
+                if len(line) > self._limit:
+                    self._maybe_resume_transport()
+                    raise ValueError('Line is too long')
+
+            if self._eof:
+                break
+
+            if not_enough:
+                await self._wait_for_data('readline')
+
+        self._maybe_resume_transport()
+        # we return the Message here
+        if line:
+            uid, payload, *complete = line[:-1].split(b':')
+            return Message(
+                base64.b64decode(payload),
+                uid=uuid.UUID(bytes(uid).decode()),
+                complete=complete
+            )
 
 
-
-
-class MessageBuffer:
-
-    """
-    Buffers incomming data until complete and yields a Message
-    """
-
-    def __init__(self, loop):
-        self._loop = loop
-        self._waiter = None
-        self._channels = defaultdict(bytearray)
-
-    def feed_data(self, data):
-        """Append new data to the buffer.
-
-        Every data has following format: <uuid>:<base64><:?>\n
-        """
-
-        uuid, payload, *cont = data.split(b':')
-
-        self._channels[uuid].extend(payload)
-
-        # if we not have an ending colon, we are finished
-        if not cont:
-            # resolve future
-            self._resolve_message(Message(uuid, b''.join(self._channels[uuid])))
-
-    def _resolve_message(self, message):
-        """Finalize the waiter by providing a message."""
-
-        self._waiter.set_result(message)
-
-    async def _wait_for_data(self):
-        """Create a future and wait for its fruition."""
-
-        if self._waiter is not None:
-            raise RuntimeError("There is already a corroutine waiting for data on this transport")
-
-        self._waiter = asyncio.futures.Future(loop=self._loop)
-        try:
-            return await self._waiter
-        finally:
-            self._waiter = None
+class MessageReaderProtocol(asyncio.StreamReaderProtocol):
 
     async def __aiter__(self):
         return self
 
     async def __anext__(self):
-        while True:
-            value = await self._wait_for_data()
+        msg = await self._stream_reader.readline()
 
-            if value == b'':
-                continue
-                # raise StopAsyncIteration
-            return value
+        if msg is None:
+            # eof
+            raise StopAsyncIteration
+
+        return msg
 
 
-class MessageProtocol(asyncio.Protocol):
-
+class Messenger:
     """
-    Just feed data to the buffer.
+    A `Messenger` provides an iterator for incomming message chunks
     """
 
-    def __init__(self, buffer):
-        self._transport = None
-        self.buffer = buffer
+    def __init__(self, loop=None):
+        self._loop = loop or asyncio.get_event_loop()
 
-    def connection_made(self, transport):
-        self._transport = transport
+        self._reader = MessageStreamReader(loop=self._loop)
+        self._protocol = MessageReaderProtocol(self._reader)
 
-    def connection_lost(self, exc):
-        raise exc
+        self._receiver = {}
+        """Holds receiver instances for each `Message.uid`"""
 
-    def data_received(self, data):
+    async def __aenter__(self):
+        _, protocol = await self._loop.connect_read_pipe(lambda: self._protocol, sys.stdin)
+        return protocol
+
+    async def __aexit__(self, type, value, traceback):
+        if type:
+            raise value
+
+    async def receive(self):
+        async with self as stream:
+            async for msg in stream:
+                print("received:", msg.uid, msg)
+
+                # find receiver
+                if msg.uid in self._receiver:
+                    receiver = self._receiver[msg.uid]
+                else:
+                    receiver = ControlMessageReceiver()
+                    self._receiver[msg.uid] = receiver
+
+                    def _finalize():
+                        log.info('finalize receiver', uuid=id(msg))
+                        del self._receiver[msg.uid]
+
+                    self._loop.create_task(receiver.complete(_finalize))
+
+                receiver.message_received(msg)
+
+
+class MessageReceiver:
+
+    """Base class for message receiving."""
+
+    def __init__(self):
+        self._waiter = asyncio.Future()
+
+    def message_received(self, msg):
+        """Handle an incomming message."""
+
+        self.add_payload(msg)
+
+        if msg.complete:
+            self._waiter.set_result(msg.uid)
+
+    def add_payload(self, payload):
+        """Add payload to complete the message."""
+
+    async def complete(self, finish_cb=None):
+        """Process all the message payload."""
+
         try:
-            self.buffer.feed_data(data)
-            sys.stderr.buffer.write(b"Incomming message: " + data)
+            log.info("wait for completed message")
+            uid = await self._waiter
+            log.info("completed message", uuid=uid)
 
-        except ValueError:
-            sys.stderr.buffer.write(b"Bad message: " + data)
+        finally:
+            if finish_cb:
+                finish_cb()
 
-    def eof_received(self):
+
+class CompleteMessageReceiver(MessageReceiver):
+
+    """Collect all parts of that message."""
+
+    def __init__(self):
         pass
 
 
-class Receiver(object):
+class ControlMessageReceiver(MessageReceiver):
 
-    """
-    Remote control.
-    """
-    def __init__(self, loop, done=None):
-        self.loop = loop
-        self.done = done
-
-    async def messages(self):
-        buffer = MessageBuffer(self.loop)
-        protocol = MessageProtocol(buffer)
-        await self.loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
-        async for message in buffer:
-            sys.stdout.buffer.write(message.payload)
-
-
-    async def recv(self):
-        reader = DataStreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await self.loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
-        try:
-            while True:
-                data = await reader.read_data()
-                if data == b'':
-                    continue
-
-                await asyncio.sleep(1)
-                sys.stdout.buffer.write(data)
-                if data == b'terminate':
-                    if self.done:
-                        self.done.set_result(None)
-                    return
-        except:
-            import traceback
-
-            with open("receive.log", "w") as log:
-                log.write(traceback.format_exc())
-
-            raise
-
-        finally:
-            # important for clean exit
-            reader.close()
-
-    async def receive(self):
-        async for line in AioStdinPipe():
-            sys.stdout.buffer.write(line)
-            if line == b'terminate':
-                if self.done:
-                    self.done.set_result(None)
-                self.loop.stop()
-                return
-                # break
-
-        if self.done:
-            await self.done
-
-
-async def workaround():
-    await asyncio.sleep(0)
+    """Collects control messages and enqueues them."""
 
 
 def main(args):
-    # create loop
-    if sys.platform == "win32":
-        loop = asyncio.ProactorEventLoop()  # for subprocess pipes on Windows
-        asyncio.set_event_loop(loop)
-    else:
-        loop = asyncio.get_event_loop()
+
+    loop = get_event_loop()
 
     done = asyncio.Future(loop=loop)
+
     def ask_exit(signame):
+        """stop loop on exit."""
+
         print("got signal %s: exit" % signame)
         done.set_result(None)
         loop.stop()
@@ -277,18 +257,13 @@ def main(args):
             functools.partial(ask_exit, signame)
         )
     try:
-
-        receiver = Receiver(loop)
-
-        # returncode = loop.create_task(receiver.receive())
-
-        # loop.run_until_complete(done)
-        # done.set_result(None)
-        loop.run_until_complete(receiver.messages())
+        msgr = Messenger(loop)
+        loop.run_until_complete(msgr.receive())
 
     finally:
         loop.close()
 
 
 if __name__ == '__main__':
+    print('foo')
     main(sys.argv)

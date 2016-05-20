@@ -41,6 +41,8 @@ import shlex
 import base64
 import uuid
 
+from dbltr import receive
+
 
 class PingProtocol(asyncio.SubprocessProtocol):
     FD_NAMES = ['stdin', 'stdout', 'stderr']
@@ -64,24 +66,29 @@ class PingProtocol(asyncio.SubprocessProtocol):
         self.stderr = transport.get_pipe_transport(2)
 
         # initial start
-        self.stdin.write(self._create_message(b'foo'))
-        # self.stdin.write(b'foo')
+        self.send(b'foo')
+        # self.stdin.write(self._create_message(b'foo'))
+        # self.stdin.write(b'foo\n')
 
     def pipe_connection_lost(self, fd, exc):
         print("connection lost", fd, exc)
 
-    @staticmethod
-    def _create_message(data):
-        return b':'.join((bytes(uuid.uuid1().hex, 'ascii'), base64.b64encode(data)))
-
     def send(self, data):
-        # self.stdin.write(data)
-        self.stdin.write(self._create_message(data))
+        uid = bytes(uuid.uuid1().hex, 'ascii')
+        data = list(receive.split_size(data, 2))
+        length = len(data)
+
+        for i, chunk in enumerate(data):
+            if i + 1 < length:
+                self.stdin.write(b':'.join((uid, base64.b64encode(chunk))) + b'\n')
+
+            else:
+                self.stdin.write(b':'.join((uid, base64.b64encode(chunk), b'\n')))
 
     def pipe_data_received(self, fd, data):
         print('read {} bytes from {}'.format(len(data),
                                              self.FD_NAMES[fd]))
-        print("<", fd, data)
+        print("<", fd, data.decode())
         if fd == 1:
 
             self.buffer.extend(data)
@@ -143,7 +150,6 @@ def get_python_source(obj):
 
 
 def main():
-    import receive
 
     receive_source = get_python_source(receive).encode('utf-8')
     receive_source_b64 = base64.b64encode(receive_source).decode('utf-8')
