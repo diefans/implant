@@ -121,7 +121,7 @@ processes = set()
 async def run_client(loop, done, *command):
     factory = functools.partial(PingProtocol, loop, done)
 
-    asyncio.create_subprocess_exec
+    # asyncio.create_subprocess_exec
     proc = loop.subprocess_exec(
         factory,
         *command,
@@ -190,11 +190,6 @@ def main():
             'c = compile(base64.b64decode(b"{}"), "<string>", "exec");'
             'exec(c, boot.__dict__); boot.main(None);'
             "'".format(receive_source_b64)
-        ]
-        command = [
-            "/home/olli/.pyenv/versions/debellator3/bin/python",
-            "-u",
-            "-c", """import base64; c = compile(base64.b64decode(b"{}"), "<string>", "exec"); exec(c)""".format(receive_source_b64)
         ]
 
         returncode = loop.create_task(

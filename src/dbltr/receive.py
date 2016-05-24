@@ -19,24 +19,9 @@ import functools
 import asyncio
 import signal
 
-import structlog
 
-
-log = structlog.get_logger()
-
-
-@functools.lru_cache(maxsize=1)
-def get_event_loop():
-    """:returns: platform specific event loop"""
-
-    # create loop
-    if sys.platform == "win32":
-        loop = asyncio.ProactorEventLoop()  # for subprocess pipes on Windows
-        asyncio.set_event_loop(loop)
-    else:
-        loop = asyncio.get_event_loop()
-
-    return loop
+def log(msg, **kwargs):
+    print("{msg}{kwargs}".format(msg=msg, kwargs=kwargs), file=sys.stderr, flush=True)
 
 
 def split_size(s, size=1024):
@@ -127,12 +112,32 @@ class MessageStreamReader(asyncio.StreamReader):
         self._maybe_resume_transport()
         # we return the Message here
         if line:
-            uid, payload, *complete = line[:-1].split(b':')
-            return Message(
-                base64.b64decode(payload),
-                uid=uuid.UUID(bytes(uid).decode()),
-                complete=complete
-            )
+            try:
+                uid, payload, *complete = line[:-1].split(b':')
+                log("\nuid: {}".format(uid).encode())
+                uid = uuid.UUID(bytes(uid).decode())
+
+            except ValueError:
+                log("\nline: {}".format(line).encode())
+                # not enough colons
+                uid = None
+                payload = line[:-1]
+                complete = True
+
+            else:
+                complete = bool(complete)
+
+            try:
+                # optimistic aproach
+                message = Message(
+                    base64.b64decode(payload),
+                    uid=uid,
+                    complete=complete
+                )
+            except base64.binascii.Error:
+                message = Message(payload, complete=True)
+
+            return message
 
 
 class MessageReaderProtocol(asyncio.StreamReaderProtocol):
@@ -175,7 +180,7 @@ class Messenger:
     async def receive(self):
         async with self as stream:
             async for msg in stream:
-                print("received:", msg.uid, msg)
+                log("received: {} {}".format(msg.uid, msg).encode())
 
                 # find receiver
                 if msg.uid in self._receiver:
@@ -185,7 +190,7 @@ class Messenger:
                     self._receiver[msg.uid] = receiver
 
                     def _finalize():
-                        log.info('finalize receiver', uuid=id(msg))
+                        log('finalize receiver', uuid=id(msg))
                         del self._receiver[msg.uid]
 
                     self._loop.create_task(receiver.complete(_finalize))
@@ -215,9 +220,9 @@ class MessageReceiver:
         """Process all the message payload."""
 
         try:
-            log.info("wait for completed message")
+            log("wait for completed message")
             uid = await self._waiter
-            log.info("completed message", uuid=uid)
+            log("completed message", uuid=uid)
 
         finally:
             if finish_cb:
@@ -239,7 +244,7 @@ class ControlMessageReceiver(MessageReceiver):
 
 def main(args):
 
-    loop = get_event_loop()
+    loop = asyncio.get_event_loop()
 
     done = asyncio.Future(loop=loop)
 
@@ -265,5 +270,4 @@ def main(args):
 
 
 if __name__ == '__main__':
-    print('foo')
     main(sys.argv)
