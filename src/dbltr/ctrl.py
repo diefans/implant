@@ -47,9 +47,6 @@ from dbltr import receive
 log = receive.log
 
 
-processes = set()
-
-
 def get_python_source(obj):
     import inspect
     return inspect.getsource(obj)
@@ -129,6 +126,12 @@ class Remote(asyncio.subprocess.Process):
     Embodies a remote python process.
     """
 
+    bootstrap = (
+        'import imp, base64; boot = imp.new_module("dbltr.boot");'
+        'c = compile(base64.b64decode(b"{code}"), "<string>", "exec");'
+        'exec(c, boot.__dict__); boot.main(None);'
+    )
+
     @classmethod
     async def launch(cls, host, user=None, python_bin=None, code=None, loop=None, **kwargs):
         """Create a remote process."""
@@ -148,20 +151,35 @@ class Remote(asyncio.subprocess.Process):
         if isinstance(code, types.ModuleType):
             code = get_python_source(receive).encode()
 
-        command = (
+        # TODO
+        # we need ' on ssh connections
+        command = ''.join((
+            "'",
+            cls.bootstrap,
             "'"
-            'import imp, base64; boot = imp.new_module("dbltr.boot");'
-            'c = compile(base64.b64decode(b"{code}"), "<string>", "exec");'
-            'exec(c, boot.__dict__); boot.main(None);'
-            "'"
-        ).format(code=base64.b64encode(code).decode())
+        )).format(code=base64.b64encode(code).decode())
+
+        command_args = [
+            # login
+            'ssh',
+            # '-l', 'olli',
+            host,
+
+            # become different user
+            'sudo', '-u', 'olli',
+
+            # python bootstrap
+            python_bin, '-u', '-c',
+            # """'import time;time.sleep(35);print("foo");time.sleep(5)'"""
+            command,
+        ]
 
         # asyncio.create_subprocess_exec
         print('launching process')
 
         transport, _ = await loop.subprocess_exec(
             lambda: protocol,
-            'ssh', host, python_bin, '-u', '-c', command,
+            *command_args,
             stdin=PIPE, stdout=PIPE, stderr=PIPE,
             **kwargs
         )
@@ -176,8 +194,14 @@ class Remote(asyncio.subprocess.Process):
         return self
 
     async def __aexit__(self, exc_type, value, traceback):
-        self.terminate()
         print('terminate process')
+
+        try:
+            self.terminate()
+
+        except PermissionError:
+            # seems we are not able to terminate
+            log("Unable to terminate process", pid=self.pid)
 
     async def work(self, queue):
         """Process the queue."""
@@ -261,15 +285,12 @@ def main():
     else:
         loop = asyncio.get_event_loop()
 
+    loop.set_debug(True)
 
     done = asyncio.Future(loop=loop)
 
     def ask_exit(signame):
         print("got signal %s: exit" % signame)
-        for proc in processes:
-            proc.send_signal(signal.SIGHUP)
-            proc.terminate()
-            print("Killing: ", proc)
         loop.stop()
         done.cancelled()
 
@@ -289,6 +310,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-    # asyncio.StreamReader
-    # asyncio.StreamReaderProtocol
