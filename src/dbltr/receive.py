@@ -21,7 +21,11 @@ import signal
 
 
 def log(msg, **kwargs):
-    print("{msg}{kwargs}".format(msg=msg, kwargs=kwargs), file=sys.stderr, flush=True)
+    if kwargs:
+        print("{msg} {kwargs}".format(msg=msg, kwargs=kwargs), file=sys.stderr, flush=True)
+
+    else:
+        print("{msg}".format(msg=msg), file=sys.stderr, flush=True)
 
 
 def split_size(s, size=1024):
@@ -51,32 +55,77 @@ class Message(bytes):
 
     limit = 1024
 
-    def __new__(cls, payload, uid=None, complete=True):
+    def __new__(cls, payload, channel=None, uid=None, complete=True):
         return super(Message, cls).__new__(cls, payload)
 
-    def __init__(self, payload, uid=None, complete=True):
+    def __init__(self, payload, channel=None, uid=None, complete=True):
         super(Message, self).__init__()
+
+        # enforce None for empty strings
+        self.channel = channel or None
         self.uid = uid or uuid.uuid1()
         self.complete = complete
 
     def __hash__(self):
         return self.uid.int
 
-    def __eq__(self, msg):
-        return hash(self) == hash(msg)
+    def __eq__(self, other):
+        if isinstance(other, Message):
+            return hash(self) == hash(other)
 
-    @property
-    def jsonified(self):
-        return json.dumps(self.payload)
+        return bytes(self) == other
 
-    def encode(self):
-        """Create a serialized version of that message.
+    def __repr__(self):
+        return b':'.join((
+            self.channel or b'',
+            self.uid.hex.encode(),
+            bytes(self)
+        )).decode()
 
-        If the payload is greater than self.limit it is split at that boundary.
+    def send(self, fd=sys.stdout):
+        """Encode message to be send to stdout"""
+
+        print(repr(self), file=fd, flush=True)
+
+    @classmethod
+    def from_line(cls, line):
+        """Create a message from a protocol line.
+
+        incomplete message: <channel>:<uid>:<payload>\n
+        complete message: <channel>:<uid>:<payload>:\n
+
         """
-        b64_jsonified = base64.b64encode(self.jsonified)
 
-        # for split_msg in split_size(b64_jsonified, self.limit):
+        try:
+            channel, uid, payload, *complete = line[:-1].split(b':')
+            uid = uuid.UUID(bytes(uid).decode())
+
+        except ValueError:
+            # not enough colons
+            log("\nbroken message protocol!", line=line)
+            uid = None
+            channel = None
+            payload = line[:-1]
+            complete = True
+
+        else:
+            complete = bool(complete)
+            channel = bytes(channel)
+
+        try:
+            # optimistic aproach
+            message = Message(
+                base64.b64decode(payload),
+                channel=channel,
+                uid=uid,
+                complete=complete
+            )
+
+        except base64.binascii.Error:
+            # payload is not encoded
+            message = Message(payload, complete=True)
+
+        return message
 
 
 class MessageStreamReader(asyncio.StreamReader):
@@ -112,30 +161,7 @@ class MessageStreamReader(asyncio.StreamReader):
         self._maybe_resume_transport()
         # we return the Message here
         if line:
-            try:
-                uid, payload, *complete = line[:-1].split(b':')
-                log("\nuid: {}".format(uid).encode())
-                uid = uuid.UUID(bytes(uid).decode())
-
-            except ValueError:
-                log("\nline: {}".format(line).encode())
-                # not enough colons
-                uid = None
-                payload = line[:-1]
-                complete = True
-
-            else:
-                complete = bool(complete)
-
-            try:
-                # optimistic aproach
-                message = Message(
-                    base64.b64decode(payload),
-                    uid=uid,
-                    complete=complete
-                )
-            except base64.binascii.Error:
-                message = Message(payload, complete=True)
+            message = Message.from_line(line)
 
             return message
 
@@ -155,7 +181,48 @@ class MessageReaderProtocol(asyncio.StreamReaderProtocol):
         return msg
 
 
+class Channel:
+
+    """A `Channel` receives certain messages dedicated to it."""
+
+    def __init__(self, receiver_factory, loop=None):
+        self._loop = loop or asyncio.get_event_loop()
+
+        self._receiver_factory = receiver_factory
+        self._receiver = {}
+        """Holds receiver instances for each `Message.uid`"""
+
+    async def finalize(self, uid, receiver):
+        log('finalize receiver', uid=uid)
+
+        # remove receiver instance
+        del self._receiver[uid]
+
+    async def receive(self, msg):
+        # find receiver
+        if msg.uid in self._receiver:
+            receiver = self._receiver[msg.uid]
+        else:
+            receiver = self._receiver_factory(loop=self._loop)
+            self._receiver[msg.uid] = receiver
+
+            # wait for completed message
+            self._loop.create_task(receiver.complete(self.finalize))
+
+        await receiver.message_received(msg)
+
+
+class PingChannel(Channel):
+
+    async def finalize(self, uid, receiver):
+        log("data", data=receiver.data())
+
+        msg = Message(receiver.data(), uid=uid)
+        msg.send()
+
+
 class Messenger:
+
     """
     A `Messenger` provides an iterator for incomming message chunks
     """
@@ -165,6 +232,10 @@ class Messenger:
 
         self._reader = MessageStreamReader(loop=self._loop)
         self._protocol = MessageReaderProtocol(self._reader)
+
+        self._channels = {
+            None: PingChannel(JoinMessageReceiver, loop=self._loop)
+        }
 
         self._receiver = {}
         """Holds receiver instances for each `Message.uid`"""
@@ -178,63 +249,78 @@ class Messenger:
             raise value
 
     async def receive(self):
+        """Main loop for receiving messages."""
+
         async with self as stream:
             async for msg in stream:
-                log("received: {} {}".format(msg.uid, msg).encode())
+                log("received: {}".format(repr(msg)))
 
-                # find receiver
-                if msg.uid in self._receiver:
-                    receiver = self._receiver[msg.uid]
-                else:
-                    receiver = ControlMessageReceiver()
-                    self._receiver[msg.uid] = receiver
+                # find channel
+                if msg.channel not in self._channels:
+                    # no channel found
+                    log("No channel found, ignoring...", message=msg)
+                    continue
 
-                    def _finalize():
-                        log('finalize receiver', uuid=id(msg))
-                        del self._receiver[msg.uid]
+                channel = self._channels[msg.channel]
 
-                    self._loop.create_task(receiver.complete(_finalize))
-
-                receiver.message_received(msg)
+                await channel.receive(msg)
 
 
 class MessageReceiver:
 
     """Base class for message receiving."""
 
-    def __init__(self):
-        self._waiter = asyncio.Future()
+    def __init__(self, loop=None):
+        self._loop = loop or asyncio.get_event_loop()
+        self._waiter = asyncio.Future(loop=self._loop)
 
-    def message_received(self, msg):
+    async def message_received(self, msg):
         """Handle an incomming message."""
 
-        self.add_payload(msg)
+        await self.add_payload(msg)
 
         if msg.complete:
-            self._waiter.set_result(msg.uid)
+            self._waiter.set_result(msg)
 
-    def add_payload(self, payload):
+    async def add_payload(self, payload):
         """Add payload to complete the message."""
+
+    def data(self):
+        """:returns: the data, the reciver has to expose."""
 
     async def complete(self, finish_cb=None):
         """Process all the message payload."""
 
         try:
             log("wait for completed message")
-            uid = await self._waiter
-            log("completed message", uuid=uid)
+            msg = await self._waiter
+            log("completed message", uuid=msg.uid)
 
         finally:
             if finish_cb:
-                finish_cb()
+                await finish_cb(msg.uid, self)
 
 
-class CompleteMessageReceiver(MessageReceiver):
+class JoinMessageReceiver(MessageReceiver):
 
-    """Collect all parts of that message."""
+    """Collect all parts of that message and exposes their data."""
 
-    def __init__(self):
-        pass
+    def __init__(self, loop=None):
+        super(JoinMessageReceiver, self).__init__(loop=loop)
+
+        self._messages = []
+
+    async def add_payload(self, msg):
+        log("append", id=id(self), data=msg)
+        self._messages.append(msg)
+
+    def data(self):
+        data = bytearray()
+        log("collect", data=self._messages)
+        for msg in self._messages:
+            data.extend(msg)
+
+        return data
 
 
 class ControlMessageReceiver(MessageReceiver):

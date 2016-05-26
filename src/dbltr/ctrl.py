@@ -44,80 +44,7 @@ from subprocess import Popen, PIPE
 
 from dbltr import receive
 
-
-def log(msg):
-    print(msg, file=sys.stderr, flush=True)
-
-
-class PingProtocol(asyncio.SubprocessProtocol):
-    FD_NAMES = ['stdin', 'stdout', 'stderr']
-
-    def __init__(self, loop, done):
-        self.loop = loop
-        self.done = done
-        self.buffer = bytearray()
-        self.transport = None
-        self.stdin = None
-        self.stdout = None
-        self.stderr = None
-        super().__init__()
-
-    def connection_made(self, transport):
-        log('process started {}'.format(transport.get_pid()))
-        self.transport = transport
-
-        self.stdin = transport.get_pipe_transport(0)
-        self.stdout = transport.get_pipe_transport(1)
-        self.stderr = transport.get_pipe_transport(2)
-
-        # initial start
-        self.send(b'foo')
-        # self.stdin.write(self._create_message(b'foo'))
-        # self.stdin.write(b'foo\n')
-
-    def pipe_connection_lost(self, fd, exc):
-        print("connection lost", fd, exc)
-
-    def send(self, data):
-        uid = bytes(uuid.uuid1().hex, 'ascii')
-        data = list(receive.split_size(data, 2))
-        length = len(data)
-
-        for i, chunk in enumerate(data):
-            if i + 1 < length:
-                self.stdin.write(b':'.join((uid, base64.b64encode(chunk))) + b'\n')
-
-            else:
-                self.stdin.write(b':'.join((uid, base64.b64encode(chunk), b'\n')))
-
-    def pipe_data_received(self, fd, data):
-        print('read {} bytes from {}'.format(len(data),
-                                             self.FD_NAMES[fd]))
-        print("<", fd, data.decode())
-        if fd == 1:
-
-            self.buffer.extend(data)
-
-            if data == b'foo':
-                self.send(b'bar')
-
-            elif data == b'bar':
-                self.send(b'terminate')
-
-            elif data == b'terminate':
-                self.send(b'exit')
-
-    def process_exited(self):
-        print('process exited')
-        return_code = self.transport.get_returncode()
-        print('return code {}'.format(return_code))
-        if not return_code:
-            cmd_output = bytes(self.buffer).decode()
-            # results = self._parse_results(cmd_output)
-        else:
-            results = []
-        self.done.set_result((return_code, 'foo'))
-        # self.loop.stop()
+log = receive.log
 
 
 processes = set()
@@ -163,19 +90,20 @@ class SubprocessMessageStreamProtocol(asyncio.subprocess.SubprocessStreamProtoco
 
         super(SubprocessMessageStreamProtocol, self).pipe_data_received(fd, data)
 
-    def send(self, data):
-        log(">>> Sending: {}".format(data))
+    def send(self, data, channel=None):
+        channel = channel or b''
         uid = bytes(uuid.uuid1().hex, 'ascii')
+        log(">>> Sending: {}".format(b':'.join((channel, uid, data)).decode()))
+
         data = list(receive.split_size(data, 2))
         length = len(data)
 
         for i, chunk in enumerate(data):
             if i + 1 < length:
-                self.stdin.write(b':'.join((uid, base64.b64encode(chunk))) + b'\n')
+                self.stdin.write(b':'.join((channel, uid, base64.b64encode(chunk))) + b'\n')
 
             else:
-                self.stdin.write(b':'.join((uid, base64.b64encode(chunk), b'\n')))
-
+                self.stdin.write(b':'.join((channel, uid, base64.b64encode(chunk), b'\n')))
 
 
 async def create_subprocess_exec(program, *args, stdin=None, stdout=None,
@@ -202,7 +130,7 @@ class Remote(asyncio.subprocess.Process):
     """
 
     @classmethod
-    async def launch(cls, host, python_bin=None, code=None, loop=None, **kwargs):
+    async def launch(cls, host, user=None, python_bin=None, code=None, loop=None, **kwargs):
         """Create a remote process."""
 
         if loop is None:
@@ -231,33 +159,16 @@ class Remote(asyncio.subprocess.Process):
         # asyncio.create_subprocess_exec
         print('launching process')
 
-        transport, protocol = await loop.subprocess_exec(
+        transport, _ = await loop.subprocess_exec(
             lambda: protocol,
             'ssh', host, python_bin, '-u', '-c', command,
             stdin=PIPE, stdout=PIPE, stderr=PIPE,
             **kwargs
         )
 
-        return cls(transport, protocol, loop)
+        process = cls(transport, protocol, loop)
 
-    async def _launch_process(self):
-        command = (
-            "'"
-            'import imp, base64; boot = imp.new_module("dbltr.boot");'
-            'c = compile(base64.b64decode(b"{}"), "<string>", "exec");'
-            'exec(c, boot.__dict__); boot.main(None);'
-            "'"
-        ).format(base64.b64encode(self._code).decode())
-
-        # asyncio.create_subprocess_exec
-        print('launching process')
-
-        process = await create_subprocess_exec(
-            'ssh', self._host, self._python_bin, '-u', '-c', command,
-            stdin=PIPE,
-            stdout=PIPE,
-            stderr=PIPE
-        )
+        log("process", pid=process.pid)
 
         return process
 
@@ -281,6 +192,7 @@ class Remote(asyncio.subprocess.Process):
             # TODO evaluate result
 
             queue.task_done()
+            print("done", result, queue, queue.qsize())
 
 
 async def ping(remote):
@@ -293,6 +205,9 @@ async def ping(remote):
         async for msg in process.stdout:
             if msg is None:
                 break
+
+            if msg == b'foo':
+                return msg
 
 
 class Debellator:
@@ -323,7 +238,7 @@ class Debellator:
             asyncio.Task(remote.work(queue))
 
             # queue remote queue
-            await self.expand(queue.join())
+            await self.expand(await queue.join())
 
         # wait for master queue to finish
         print("wait for master queue", self._queue.qsize())
@@ -333,8 +248,9 @@ class Debellator:
     async def expand(self, queue):
         async def _wait_for_queue():
             await queue.join()
+            print("queue finished")
 
-        await self._queue.put(_wait_for_queue())
+        await self._queue.put(queue)
 
 
 def main():
