@@ -18,21 +18,6 @@ def log(_msg, **kwargs):
         print("{msg}".format(msg=_msg), file=sys.stderr, flush=True)
 
 
-# global loop
-def create_loop():
-    if sys.platform == 'win32':
-        loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
-        asyncio.set_event_loop(loop)
-
-    else:
-        loop = asyncio.get_event_loop()
-
-    loop.set_debug(True)
-    return loop
-
-loop = create_loop()
-
-
 class Message(bytes):
 
     """
@@ -141,7 +126,6 @@ class Message(bytes):
                 yield b':'.join((channel, uid, base64.b64encode(chunk), b'\n'))
 
 
-# global messenger
 class Messenger:
     def __init__(self, loop=None):
         self._loop = loop or asyncio.get_event_loop()
@@ -149,15 +133,13 @@ class Messenger:
         self.tx = asyncio.Queue(loop=self._loop)
         self.ex = asyncio.Queue(loop=self._loop)
 
-        self._shutdown = asyncio.Future(loop=self._loop)
-
     async def connect_stdin(self):
         """Transform each line in stdin into a `Message`"""
 
         reader = asyncio.StreamReader(loop=self._loop)
         protocol = asyncio.StreamReaderProtocol(reader)
 
-        transport, _ = await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+        transport, _ = await self._loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
         try:
             while True:
@@ -182,13 +164,11 @@ class Messenger:
             while True:
                 data = await self.tx.get()
 
+                log("stdout:", msg=data)
                 if isinstance(data, Message):
-                    log("stdout:", msg=data)
                     for line in data.iter_lines():
                         sys.stdout.buffer.write(line)
-
                 else:
-                    log("stdout:", msg=data)
                     sys.stdout.buffer.write(data)
 
                 self.tx.task_done()
@@ -206,18 +186,49 @@ class Messenger:
         except asyncio.CancelledError:
             pass
 
-    def exit(self):
-        self._shutdown.set_result(None)
-        for task in asyncio.Task.all_tasks():
-            task.cancel()
+    def receive(self):
+        future = asyncio.gather(
+            self.connect_stdin(),
+            self.connect_stdout(),
+            self.connect_stderr(),
+        )
+
+        return future
 
 
 async def echo(messenger):
-    while True:
-        message = await messenger.rx.get()
-        await messenger.tx.put(message)
-        messenger.rx.task_done()
-        # log("echo", tx=messenger.tx.qsize())
+    try:
+        while True:
+            message = await messenger.rx.get()
+            await messenger.tx.put(message)
+            messenger.rx.task_done()
+            # log("echo", tx=messenger.tx.qsize())
+    except asyncio.CancelledError:
+        log('shutdown echo')
+
+
+def cancel_tasks():
+    for task in asyncio.Task.all_tasks():
+        task.cancel()
+
+
+def create_loop():
+    if sys.platform == 'win32':
+        loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
+        asyncio.set_event_loop(loop)
+
+    else:
+        loop = asyncio.get_event_loop()
+
+    loop.set_debug(True)
+
+    for signame in ('SIGINT', 'SIGTERM'):
+        loop.add_signal_handler(
+            getattr(signal, signame),
+            cancel_tasks
+        )
+
+    return loop
 
 
 def main(*args, **kwargs):
@@ -227,26 +238,13 @@ def main(*args, **kwargs):
     loop = create_loop()
 
     try:
-        done = asyncio.Future(loop=loop)
-
         messenger = Messenger(loop)
-        for signame in ('SIGINT', 'SIGTERM'):
-            loop.add_signal_handler(
-                getattr(signal, signame),
-                messenger.exit
-                # functools.partial(shutdown, loop, signame)
-            )
-        future = asyncio.gather(
-            messenger.connect_stdin(),
-            messenger.connect_stdout(),
-            messenger.connect_stderr(),
-        )
-        # connect stdin, stdout, stderr to messenger
-        task_echo = loop.create_task(
+
+        loop.create_task(
             echo(messenger)
         )
 
-        loop.run_until_complete(future)
+        loop.run_until_complete(messenger.receive())
 
     except asyncio.CancelledError as ex:
         pass
