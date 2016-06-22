@@ -31,6 +31,8 @@ import signal
 import types
 from collections import namedtuple
 
+__all__ = ['loop', 'stdin', 'stdout', 'stderr']
+
 
 def cancel_tasks():
     for task in asyncio.Task.all_tasks():
@@ -61,8 +63,73 @@ def create_loop(*, debug=False):
     return loop
 
 
+async def write_data_queue(loop, transport, data):
+    if isinstance(data, Message):
+        for line in data.iter_lines():
+            transport.write(line)
+    else:
+        transport.write(data)
+
+
+async def read_data_queue(loop, transport, data):
+    message = Message.from_line(data)
+
+    return data
+
+
+async def queue_write_pipe(loop, fd, queue, message_processor):
+    transport, _ = await loop.connect_write_pipe(lambda: asyncio.Protocol(), fd)
+
+    try:
+        while True:
+            data = await queue.get()
+            await message_processor(loop, transport, data)
+            queue.task_done()
+
+    except asyncio.CancelledError:
+        transport.close()
+
+
+async def queue_read_pipe(loop, fd, queue, message_processor):
+    reader = asyncio.StreamReader(loop=loop)
+    protocol = asyncio.StreamReaderProtocol(reader)
+
+    transport, _ = await loop.connect_read_pipe(lambda: protocol, fd)
+
+    try:
+        while True:
+            line = await reader.readline()
+
+            if line is b'':
+                # eof
+                break
+
+            # put message into rx queue
+            data = message_processor(loop, tramsport, line)
+            await queue.put(data)
+
+    except asyncio.CancelledError:
+        transport.close()
+
+
 # loop is global
 loop = create_loop(debug=True)
+
+# pipes are global so we have global queues
+stdin = asyncio.Queue(loop=loop)
+stdout = asyncio.Queue(loop=loop)
+stderr = asyncio.Queue(loop=loop)
+
+
+# initialize queues
+def setup_queues(loop):
+    future = asyncio.gather(
+        queue_read_pipe(loop, sys.stdin, stdin, read_data_queue),
+        queue_write_pipe(loop, sys.stdout, stdout, write_data_queue),
+        queue_write_pipe(loop, sys.stderr, stderr, write_data_queue),
+        loop=loop
+    )
+    return future
 
 
 def log(_msg, **kwargs):
@@ -479,6 +546,7 @@ def main(master=True):
 
             asyncio.ensure_future(echo(messenger), loop=loop)
 
+        # loop.run_until_complete(messenger.receive())
         loop.run_until_complete(messenger.receive())
 
     except asyncio.CancelledError as ex:
