@@ -21,6 +21,7 @@ resources:
 ? <- queue in       <---       <- pipe out <- queue out
 """
 
+import os
 import atexit
 import sys
 import base64
@@ -31,7 +32,22 @@ import signal
 import types
 from collections import namedtuple
 
+
 __all__ = ['loop', 'stdin', 'stdout', 'stderr']
+
+
+def log(_msg, **kwargs):
+    colors = {
+        'color': '\033[01;31m',
+        'nocolor': '\033[0m'
+    }
+    if kwargs:
+        error_msg = "{color}{msg} {kwargs}{nocolor}".format(msg=_msg, kwargs=kwargs, **colors)
+
+    else:
+        error_msg = "{color}{msg}{nocolor}".format(msg=_msg, **colors)
+
+    print(error_msg, file=sys.stderr, flush=True)
 
 
 def cancel_tasks():
@@ -63,55 +79,6 @@ def create_loop(*, debug=False):
     return loop
 
 
-async def write_data_queue(loop, transport, data):
-    if isinstance(data, Message):
-        for line in data.iter_lines():
-            transport.write(line)
-    else:
-        transport.write(data)
-
-
-async def read_data_queue(loop, transport, data):
-    message = Message.from_line(data)
-
-    return data
-
-
-async def queue_write_pipe(loop, fd, queue, message_processor):
-    transport, _ = await loop.connect_write_pipe(lambda: asyncio.Protocol(), fd)
-
-    try:
-        while True:
-            data = await queue.get()
-            await message_processor(loop, transport, data)
-            queue.task_done()
-
-    except asyncio.CancelledError:
-        transport.close()
-
-
-async def queue_read_pipe(loop, fd, queue, message_processor):
-    reader = asyncio.StreamReader(loop=loop)
-    protocol = asyncio.StreamReaderProtocol(reader)
-
-    transport, _ = await loop.connect_read_pipe(lambda: protocol, fd)
-
-    try:
-        while True:
-            line = await reader.readline()
-
-            if line is b'':
-                # eof
-                break
-
-            # put message into rx queue
-            data = message_processor(loop, tramsport, line)
-            await queue.put(data)
-
-    except asyncio.CancelledError:
-        transport.close()
-
-
 # loop is global
 loop = create_loop(debug=True)
 
@@ -121,23 +88,62 @@ stdout = asyncio.Queue(loop=loop)
 stderr = asyncio.Queue(loop=loop)
 
 
-# initialize queues
-def setup_queues(loop):
+async def setup_stdio(loop):
+    stdin_reader = asyncio.StreamReader(loop=loop)
+    stdin_protocol = asyncio.StreamReaderProtocol(stdin_reader)
+
+    stdin_transport, _ = await loop.connect_read_pipe(
+        lambda: stdin_protocol, os.fdopen(sys.stdin.fileno(), 'r')
+    )
+
+    stdout_transport, stdout_protocol = await loop.connect_write_pipe(
+        asyncio.streams.FlowControlMixin, os.fdopen(sys.stdout.fileno(), 'wb')
+    )
+    stdout_writer = asyncio.streams.StreamWriter(stdout_transport, stdout_protocol, None, loop)
+
+    async def queue_read_pipe(queue, reader):
+        try:
+            while True:
+                line = await reader.readline()
+                log("<<< lin", line=line)
+                if line is b'':
+                    break
+                await queue.put(line)
+
+        except asyncio.CancelledError:
+            reader._transport.close()
+
+    async def queue_write_pipe(queue, writer):
+        try:
+            while True:
+                data = await queue.get()
+                writer.write(data)
+                await writer.drain()
+                queue.task_done()
+
+        except asyncio.CancelledError:
+            writer.close()
+
+    async def queue_write_stderr(loop, queue):
+        try:
+            while True:
+                data = await queue.get()
+                # use simple print here
+                print(data.decode(), file=sys.stderr)
+                queue.task_done()
+
+        except asyncio.CancelledError:
+            pass
+
+
     future = asyncio.gather(
-        queue_read_pipe(loop, sys.stdin, stdin, read_data_queue),
-        queue_write_pipe(loop, sys.stdout, stdout, write_data_queue),
-        queue_write_pipe(loop, sys.stderr, stderr, write_data_queue),
+        queue_read_pipe(stdin, stdin_reader),
+        queue_write_pipe(stdout, stdout_writer),
+        queue_write_stderr(loop, stderr),
+        # log("setup queues"),
         loop=loop
     )
-    return future
-
-
-def log(_msg, **kwargs):
-    if kwargs:
-        print("{msg} {kwargs}".format(msg=_msg, kwargs=kwargs), file=sys.stderr, flush=True)
-
-    else:
-        print("{msg}".format(msg=_msg), file=sys.stderr, flush=True)
+    await future
 
 
 class Message(bytes):
@@ -272,7 +278,6 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
         def _gen():
             # ssh
             if self.host is not None:
-                log("user ssh", host=self.host, user=self.user)
                 yield 'ssh'
                 # optionally with user
                 if self.user is not None:
@@ -282,7 +287,6 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
             # sudo
             if self.sudo is not None:
-                log("user sudo", sudo=self.sudo)
                 yield 'sudo'
                 # optionally with user
                 if self.sudo is not True:
@@ -290,9 +294,8 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
                     yield self.sudo
 
             # python exec
-            log('user python', python=python_bin)
             yield from shlex.split(python_bin)
-            yield '-u'
+            # yield '-u'
             yield '-c'
 
             if self.host is not None:
@@ -340,9 +343,11 @@ class Remote(asyncio.subprocess.Process):
         if isinstance(code, types.ModuleType):
             code = get_python_source(code).encode()
 
+        command_args = target.command_args(code, python_bin=python_bin)
+
         transport, _ = await loop.subprocess_exec(
             lambda: protocol,
-            *target.command_args(code, python_bin=python_bin),
+            *command_args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -350,7 +355,9 @@ class Remote(asyncio.subprocess.Process):
         )
         process = cls(transport, protocol, loop)
 
-        log('launched process', pid=process.pid)
+        log('launched process', pid=process.pid
+                   # , args=command_args
+                   )
 
         # connect pipes
         asyncio.ensure_future(process.receive(), loop=loop)
@@ -385,8 +392,9 @@ class Remote(asyncio.subprocess.Process):
         try:
             async for line in self.stdout:
                 message = Message.from_line(line)
-                log("out", message=message, line=line)
+                log(">>> remote out", message=message, line=line)
                 await self.rx.put(message)
+                log('*** remote incomming queue size', size=self.rx.qsize())
         except asyncio.CancelledError:
             self.stdout._transport.close()
 
@@ -395,7 +403,6 @@ class Remote(asyncio.subprocess.Process):
 
         try:
             async for message in self.stderr:
-                log("err", message=message)
                 await self.ex.put(message)
         except asyncio.CancelledError:
             self.stderr._transport.close()
@@ -417,98 +424,17 @@ class Remote(asyncio.subprocess.Process):
         self.ex = asyncio.Queue(loop=self._loop)
 
 
-class Messenger:
-    def __init__(self, loop=None):
-        self._loop = loop or asyncio.get_event_loop()
-        self.rx = asyncio.Queue(loop=self._loop)
-        self.tx = asyncio.Queue(loop=self._loop)
-        self.ex = asyncio.Queue(loop=self._loop)
-
-    async def _connect_stdin(self):
-        """Transform each line in stdin into a `Message`"""
-
-        reader = asyncio.StreamReader(loop=self._loop)
-        protocol = asyncio.StreamReaderProtocol(reader)
-
-        transport, _ = await self._loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
-        try:
-            while True:
-                line = await reader.readline()
-
-                if line is b'':
-                    # eof
-                    break
-                # put message into rx queue
-                message = Message.from_line(line)
-
-                await self.rx.put(message)
-                log("in:", line=line, message=message, size=self.rx.qsize())
-
-        except asyncio.CancelledError:
-            transport.close()
-
-    async def send(self, data):
-
-        pass
-
-    async def log(self, log):
-        pass
-
-    async def _connect_stdout(self):
-        """Transform each `Message` in tx into one or more lines to stdout."""
-        transport, _ = await self._loop.connect_write_pipe(lambda: asyncio.Protocol(), sys.stdout)
-
-        try:
-            while True:
-                data = await self.tx.get()
-
-                log("stdout:", msg=data)
-                if isinstance(data, Message):
-                    for line in data.iter_lines():
-                        transport.write(line)
-                        # sys.stdout.buffer.write(line)
-                else:
-                    transport.write(data)
-                    # sys.stdout.buffer.write(data)
-
-                self.tx.task_done()
-        except asyncio.CancelledError:
-            transport.close()
-
-    async def _connect_stderr(self):
-        """Stream ex queue to stderr."""
-
-        try:
-            while True:
-                data = await self.ex.get()
-                sys.stderr.buffer.write(data)
-                self.ex.task_done()
-        except asyncio.CancelledError:
-            pass
-
-    def receive(self):
-        future = asyncio.gather(
-            self._connect_stdin(),
-            self._connect_stdout(),
-            self._connect_stderr(),
-        )
-
-        return future
-
-
-async def echo(messenger):
+async def echo():
     try:
         while True:
-            message = await messenger.rx.get()
-            await messenger.tx.put(message)
-            messenger.rx.task_done()
-            # log("echo", tx=messenger.tx.qsize())
+            message = await stdin.get()
+            await stdout.put(message)
+            stdin.task_done()
     except asyncio.CancelledError:
-        log('shutdown echo')
+        log('*** shutdown echo')
 
 
-async def echo_remote(loop, messenger, target):
+async def send_stdin_to_remote(loop, target):
     """Take a message and send it to a remote."""
     remotes = {}
 
@@ -519,38 +445,27 @@ async def echo_remote(loop, messenger, target):
 
             else:
                 remote = remotes[target] = await Remote.launch(
-                    target, loop=loop, python_bin='/home/olli/.pyenv/versions/debellator3/bin/python'
+                    target, loop=loop, python_bin=sys.executable #'/home/olli/.pyenv/versions/debellator3/bin/python'
                 )
 
-            message = await messenger.rx.get()
+            message = await stdin.get()
 
-            log("processing remote", message=message)
+            log("*** processing remote", message=message)
+            # await log("size", size=stderr.qsize())
             await remote.tx.put(message)
-            messenger.rx.task_done()
+            stdin.task_done()
 
-            # log("echo", tx=messenger.tx.qsize())
     except asyncio.CancelledError:
-        log('shutdown echo_remote')
+        log('*** shutdown echo_remote')
 
 
 def main(master=True):
     # TODO evaluate args
     # print(sys.argv)
+    if master:
+        asyncio.ensure_future(send_stdin_to_remote(loop, Target()), loop=loop)
+    else:
+        asyncio.ensure_future(echo(), loop=loop)
 
-    try:
-        messenger = Messenger(loop)
-
-        if master:
-            asyncio.ensure_future(echo_remote(loop, messenger, Target()), loop=loop)
-        else:
-
-            asyncio.ensure_future(echo(messenger), loop=loop)
-
-        # loop.run_until_complete(messenger.receive())
-        loop.run_until_complete(messenger.receive())
-
-    except asyncio.CancelledError as ex:
-        pass
-
-    finally:
-        loop.close()
+    # loop.run_until_complete(setup_queues(loop))
+    loop.run_until_complete(setup_stdio(loop))
