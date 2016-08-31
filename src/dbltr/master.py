@@ -6,6 +6,8 @@ import shlex
 import base64
 import types
 import uuid
+import functools
+import concurrent.futures
 
 from collections import namedtuple
 
@@ -255,15 +257,33 @@ async def feed_stdin_to_remotes(messenger):
         # remote.terminate()
 
 
+class ExecutorConsoleHandler(core.logging.StreamHandler):
+
+    """Run logging in a separate executor, to not block on console output."""
+
+    def __init__(self, executor):
+        self.executor = executor
+
+        super(ExecutorConsoleHandler, self).__init__()
+
+    def emit(self, record):
+        core.loop.run_in_executor(self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record))
+
+
 def main():
-    messenger = core.Messenger(core.loop)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as logging_executor:
+        logging_handler = ExecutorConsoleHandler(logging_executor)
+        core.logger.propagate = False
+        core.logger.addHandler(logging_handler)
 
-    try:
-        core.loop.run_until_complete(
-            messenger.run(
-                feed_stdin_to_remotes(messenger)
+        messenger = core.Messenger(core.loop)
+
+        try:
+            core.loop.run_until_complete(
+                messenger.run(
+                    feed_stdin_to_remotes(messenger)
+                )
             )
-        )
 
-    finally:
-        core.loop.close()
+        finally:
+            core.loop.close()
