@@ -9,9 +9,11 @@ import uuid
 import functools
 import concurrent.futures
 
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 
 from dbltr import core
+
+from logging import StreamHandler
 
 log = core.log
 
@@ -95,6 +97,15 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         # a future indicating a receiving remote
         self.receiving = None
+
+        # we distribute channels from stdout
+        self.control = core.Control(loop=self._loop)
+
+        # the channel to send everything
+        self.default_channel = core.JsonChannel(queue=self.queue_in, loop=self._loop)
+
+        # collect finished commands
+        self._commands_pending = defaultdict(lambda: asyncio.Future(loop=self._loop))
 
     def connection_made(self, transport):
         super(Remote, self).connection_made(transport)
@@ -182,7 +193,8 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         async for line in self.stdout:
             chunk = core.Chunk.decode(line)
             log("remote stdout", pid=self.pid, line=line, chunk=chunk, data=chunk.data)
-            await self.queue_out.put(line)
+
+            await self.control.distribute(chunk)
 
     async def _connect_stderr(self):
         """Collect error messages from remote in stderr queue."""
@@ -191,11 +203,39 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             log("remote stderr {}: {}".format(self.pid, line[:-1].decode()))
             await self.queue_err.put(line)
 
+    async def _resolve_control_replies(self):
+        """Completes an RPC style command."""
+
+        async for message in self.control.default:
+            future = self._commands_pending[message.uid]
+            future.set_result(message)
+
+    async def command(self, name, *args, **kwargs):
+        """Send a command to remote default channel and wait for returing a result."""
+
+        uid = uuid.uuid1().hex.encode()
+        msg = {
+            'command': name,
+            'args': args,
+            'kwargs': kwargs,
+        }
+        async with self.default_channel.message(uid) as send:
+            await send(msg)
+
+        try:
+            result = await self._commands_pending[uid]
+            core.logger.info("result: %s", result)
+            return result
+
+        finally:
+            del self._commands_pending[uid]
+
     async def receive(self):
         receiving = asyncio.gather(
             asyncio.ensure_future(self._connect_stdin()),
             asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
+            asyncio.ensure_future(self._resolve_control_replies()),
             loop=self._loop
         )
 
@@ -214,11 +254,19 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             self._transport.close()
 
 
+def parse_command(line):
+    """Parse a command from line."""
+
+    # TODO
+
+
 async def feed_stdin_to_remotes(messenger):
     remote = await Remote.launch(code=core, loop=core.loop)
     remote_channel_ctrl = core.JsonChannel(queue=remote.queue_in, loop=core.loop)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
+    await messenger.queue_out.put(" >xasas ".encode())
+    core.logger.info("fooo")
     try:
         while True:
             line = await messenger.queue_in.get()
@@ -229,15 +277,11 @@ async def feed_stdin_to_remotes(messenger):
 
             if remote.returncode is None:
                 uid = uuid.uuid1().hex.encode()
-                command = line[:-1].decode()
-                msg = {
-                    'command': command,
-                    'payload': 10000 * command
-                }
-                async with remote_channel_ctrl.message(uid) as send:
-                    await send(msg)
-                # chunk = core.Chunk(line[:-1])
-                # await remote.queue_in.put(chunk.encode(True))
+                command_name = line[:-1].decode()
+                result = await remote.command(command_name, 1, 2, 3, foo='bar')
+
+                await messenger.queue_out.put("< {}\n > ".format(result).encode())
+
             else:
                 await remote.wait()
                 break
@@ -257,7 +301,7 @@ async def feed_stdin_to_remotes(messenger):
         # remote.terminate()
 
 
-class ExecutorConsoleHandler(core.logging.StreamHandler):
+class ExecutorConsoleHandler(StreamHandler):
 
     """Run logging in a separate executor, to not block on console output."""
 
@@ -266,15 +310,18 @@ class ExecutorConsoleHandler(core.logging.StreamHandler):
 
         super(ExecutorConsoleHandler, self).__init__()
 
-    def emit(self, record):
+    # TODO FIXME it still occurs...
+
+    def _emit(self, record):
         core.loop.run_in_executor(self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record))
 
 
 def main():
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as logging_executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
         logging_handler = ExecutorConsoleHandler(logging_executor)
         core.logger.propagate = False
         core.logger.addHandler(logging_handler)
+        # core.logger.setLevel('INFO')
 
         messenger = core.Messenger(core.loop)
 
