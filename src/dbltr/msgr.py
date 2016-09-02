@@ -23,6 +23,7 @@ resources:
 
 import os
 import atexit
+import functools
 import sys
 import base64
 import uuid
@@ -30,10 +31,42 @@ import asyncio
 import shlex
 import signal
 import types
+import logging
+
 from collections import namedtuple
 
 
-__all__ = ['loop', 'stdin', 'stdout', 'stderr']
+__all__ = ['loop', 'stdin', 'stdout']
+
+
+logging.basicConfig()
+LOG = logging.getLogger(__name__)
+LOG.setLevel(logging.DEBUG)
+
+
+LOG.debug('init')
+
+
+class AsyncOut:
+    def __init__(self):
+        self._buffer = bytearray()
+        self._new_data = None
+
+    def _wakeup_new_data(self):
+        future = self._new_data
+        if future is not None:
+            self._new_data = None
+            if not future.cancelled():
+                future.set_result(None)
+
+    def write(self, data):
+        if isinstance(data, bytes):
+            self._buffer.extend(data)
+        else:
+            self._buffer.extend(data.encode())
+
+        self._wakeup_new_data()
+
 
 
 def log(_msg, **kwargs):
@@ -47,12 +80,11 @@ def log(_msg, **kwargs):
     else:
         error_msg = "{color}{msg}{nocolor}".format(msg=_msg, **colors)
 
-    print(error_msg, file=sys.stderr, flush=True)
+    # print(error_msg, file=sys.stderr, flush=True)
+    LOG.debug(error_msg)
 
 
-def cancel_tasks():
-    for task in asyncio.Task.all_tasks():
-        task.cancel()
+shutdown_tasks = set()
 
 
 def create_loop(*, debug=False):
@@ -67,13 +99,6 @@ def create_loop(*, debug=False):
 
     loop.set_debug(debug)
 
-    # cancel tasks on exit
-    for signame in ('SIGINT', 'SIGTERM'):
-        loop.add_signal_handler(
-            getattr(signal, signame),
-            cancel_tasks
-        )
-
     # close loop on exit
     atexit.register(loop.close)
     return loop
@@ -87,20 +112,26 @@ stdin = asyncio.Queue(loop=loop)
 stdout = asyncio.Queue(loop=loop)
 stderr = asyncio.Queue(loop=loop)
 
+# we trigger exit by future
+wants_exit = asyncio.Future(loop=loop)
+
+
+# cancel tasks on exit
+def cancel_tasks(future):
+    # for task in asyncio.Task.all_tasks():
+    for task in shutdown_tasks:
+        task.cancel()
+wants_exit.add_done_callback(cancel_tasks)
+
+# exit on sigterm or sigint
+for signame in ('SIGINT', 'SIGTERM'):
+    loop.add_signal_handler(
+        getattr(signal, signame),
+        functools.partial(wants_exit.set_result, None)
+    )
+
 
 async def setup_stdio(loop):
-    stdin_reader = asyncio.StreamReader(loop=loop)
-    stdin_protocol = asyncio.StreamReaderProtocol(stdin_reader)
-
-    stdin_transport, _ = await loop.connect_read_pipe(
-        lambda: stdin_protocol, os.fdopen(sys.stdin.fileno(), 'r')
-    )
-
-    stdout_transport, stdout_protocol = await loop.connect_write_pipe(
-        asyncio.streams.FlowControlMixin, os.fdopen(sys.stdout.fileno(), 'wb')
-    )
-    stdout_writer = asyncio.streams.StreamWriter(stdout_transport, stdout_protocol, None, loop)
-
     async def queue_read_pipe(queue, reader):
         try:
             while True:
@@ -117,33 +148,49 @@ async def setup_stdio(loop):
         try:
             while True:
                 data = await queue.get()
-                writer.write(data)
+                writer.write(b"write..." + data)
                 await writer.drain()
                 queue.task_done()
 
         except asyncio.CancelledError:
             writer.close()
 
-    async def queue_write_stderr(loop, queue):
-        try:
-            while True:
-                data = await queue.get()
-                # use simple print here
-                print(data.decode(), file=sys.stderr)
-                queue.task_done()
-
-        except asyncio.CancelledError:
-            pass
-
-
-    future = asyncio.gather(
-        queue_read_pipe(stdin, stdin_reader),
-        queue_write_pipe(stdout, stdout_writer),
-        queue_write_stderr(loop, stderr),
-        # log("setup queues"),
-        loop=loop
+    # first connect writer
+    stdout_transport, stdout_protocol = await loop.connect_write_pipe(
+        asyncio.streams.FlowControlMixin, os.fdopen(sys.stdin.fileno(), 'wb')
     )
-    await future
+    stdout_writer = asyncio.streams.StreamWriter(stdout_transport, stdout_protocol, None, loop)
+
+    # connect reader
+    stdin_reader = asyncio.StreamReader(loop=loop)
+    stdin_protocol = asyncio.StreamReaderProtocol(stdin_reader)
+
+    stdin_transport, _ = await loop.connect_read_pipe(
+        lambda: stdin_protocol, os.fdopen(sys.stdin.fileno(), 'r')
+    )
+
+    # stdio_tasks = [
+    asyncio.ensure_future(queue_read_pipe(stdin, stdin_reader)),
+    asyncio.ensure_future(queue_write_pipe(stdout, stdout_writer)),
+    # ]
+
+    # only make stderr async if no tty
+    if not sys.stderr.isatty():
+        stderr_transport, stderr_protocol = await loop.connect_write_pipe(
+            asyncio.streams.FlowControlMixin, os.fdopen(sys.stderr.fileno(), 'wb')
+        )
+        stderr_writer = asyncio.streams.StreamWriter(stderr_transport, stderr_protocol, None, loop)
+
+        # stdio_tasks.append(
+        asyncio.ensure_future(queue_write_pipe(stderr, stderr_writer))
+        # )
+
+    # future = asyncio.gather(
+    #     *stdio_tasks,
+    #     loop=loop
+    # )
+    # shutdown_tasks.add(future)
+    # await future
 
 
 class Message(bytes):
@@ -403,16 +450,19 @@ class Remote(asyncio.subprocess.Process):
 
         try:
             async for message in self.stderr:
+                log(">>> remote error", message=message)
                 await self.ex.put(message)
         except asyncio.CancelledError:
             self.stderr._transport.close()
 
     def receive(self):
         future = asyncio.gather(
-            self._connect_stdin(),
-            self._connect_stdout(),
-            self._connect_stderr(),
+            asyncio.ensure_future(self._connect_stdin()),
+            asyncio.ensure_future(self._connect_stdout()),
+            asyncio.ensure_future(self._connect_stderr()),
+            loop=loop
         )
+        shutdown_tasks.add(future)
 
         return future
 
@@ -451,6 +501,7 @@ async def send_stdin_to_remote(loop, target):
             message = await stdin.get()
 
             log("*** processing remote", message=message)
+            await stdout.put(message)
             # await log("size", size=stderr.qsize())
             await remote.tx.put(message)
             stdin.task_done()
@@ -459,13 +510,27 @@ async def send_stdin_to_remote(loop, target):
         log('*** shutdown echo_remote')
 
 
+async def run(master=True):
+    stdio_task = asyncio.ensure_future(setup_stdio(loop), loop=loop)
+    shutdown_tasks.add(stdio_task)
+
+    if master:
+        send_stdin_task = asyncio.ensure_future(send_stdin_to_remote(loop, Target()), loop=loop)
+        shutdown_tasks.add(send_stdin_task)
+    else:
+        echo_task = asyncio.ensure_future(echo(), loop=loop)
+        shutdown_tasks.add(echo_task)
+
+    await wants_exit
+
+
 def main(master=True):
     # TODO evaluate args
     # print(sys.argv)
-    if master:
-        asyncio.ensure_future(send_stdin_to_remote(loop, Target()), loop=loop)
-    else:
-        asyncio.ensure_future(echo(), loop=loop)
 
     # loop.run_until_complete(setup_queues(loop))
-    loop.run_until_complete(setup_stdio(loop))
+    loop.run_until_complete(run(master))
+
+    # see http://stackoverflow.com/questions/27796294/when-using-asyncio-how-do-you-allow-all-running-tasks-to-finish-before-shutting
+    pending = asyncio.Task.all_tasks()
+    loop.run_until_complete(asyncio.gather(*pending))

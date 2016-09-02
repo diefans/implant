@@ -7,33 +7,21 @@ resources:
 - https://github.com/python/asyncio/blob/master/examples/child_process.py
 
 
-How it should work
 
+      ctrl         <---->               rcvr
+? -> queue out      --->       -> pipe in -> queue in
+                                               |
+                                               +--> channeller
+                                                      |
+                                                      +--> channel 1 queue
+                                                      |
+                                                      +--> channel x queue
 
-class Project:
-    pass
-
-
-class Task:
-    pass
-
-
-class Slave:
-    pass
-
-
-
-async for task in project.tasks:
-
-    await result = slave.do(task)
-
-    await task.complete(result)
-
-
-
+? <- queue in       <---       <- pipe out <- queue out
 """
 
 import sys
+import shlex
 import types
 import signal
 import functools
@@ -41,8 +29,9 @@ import asyncio
 import base64
 import uuid
 from subprocess import Popen, PIPE
+from collections import namedtuple
 
-from dbltr import receive
+from dbltr import receive, msgr
 
 log = receive.log
 
@@ -60,7 +49,7 @@ class SubprocessMessageStreamProtocol(asyncio.subprocess.SubprocessStreamProtoco
         )
 
     def connection_made(self, transport):
-        log("connection made")
+        log('connection made')
         self._transport = transport
 
         stdout_transport = transport.get_pipe_transport(1)
@@ -83,14 +72,14 @@ class SubprocessMessageStreamProtocol(asyncio.subprocess.SubprocessStreamProtoco
                                               loop=self._loop)
 
     def pipe_data_received(self, fd, data):
-        log("<<< {} {}".format(fd, data.decode()))
+        log('<<< {} {}'.format(fd, data.decode()))
 
         super(SubprocessMessageStreamProtocol, self).pipe_data_received(fd, data)
 
     def send(self, data, channel=None):
         channel = channel or b''
         uid = bytes(uuid.uuid1().hex, 'ascii')
-        log(">>> Sending: {}".format(b':'.join((channel, uid, data)).decode()))
+        log('>>> Sending: {}'.format(b':'.join((channel, uid, data)).decode()))
 
         data = list(receive.split_size(data, 2))
         length = len(data)
@@ -101,23 +90,6 @@ class SubprocessMessageStreamProtocol(asyncio.subprocess.SubprocessStreamProtoco
 
             else:
                 self.stdin.write(b':'.join((channel, uid, base64.b64encode(chunk), b'\n')))
-
-
-async def create_subprocess_exec(program, *args, stdin=None, stdout=None,
-                                 stderr=None, loop=None,
-                                 limit=asyncio.streams._DEFAULT_LIMIT, **kwds):
-    if loop is None:
-        loop = asyncio.get_event_loop()
-    protocol = SubprocessMessageStreamProtocol(limit=limit,
-                                               loop=loop)
-
-    transport, protocol = await loop.subprocess_exec(
-        lambda: protocol,
-        program, *args,
-        stdin=stdin, stdout=stdout,
-        stderr=stderr, **kwds
-    )
-    return asyncio.subprocess.Process(transport, protocol, loop)
 
 
 class Remote(asyncio.subprocess.Process):
@@ -133,7 +105,10 @@ class Remote(asyncio.subprocess.Process):
     )
 
     @classmethod
-    async def launch(cls, host, user=None, python_bin=None, code=None, loop=None, **kwargs):
+    async def launch(cls,
+                     host=None, user=None, sudo=None,
+                     python_bin='/usr/bin/python3', code=None,
+                     loop=None, **kwargs):
         """Create a remote process."""
 
         if loop is None:
@@ -142,51 +117,60 @@ class Remote(asyncio.subprocess.Process):
         protocol = SubprocessMessageStreamProtocol(limit=asyncio.streams._DEFAULT_LIMIT, loop=loop)
 
         # FIXME remove testing python bin
-        python_bin = python_bin or "/home/olli/.pyenv/versions/debellator3/bin/python"
+        # python_bin = python_bin or "/home/olli/.pyenv/versions/debellator3/bin/python"
 
         if code is None:
             # our default receiver
-            code = receive
+            code = msgr
 
         if isinstance(code, types.ModuleType):
-            code = get_python_source(receive).encode()
+            code = get_python_source(code).encode()
 
-        # TODO
-        # we need ' on ssh connections
-        command = ''.join((
-            "'",
-            cls.bootstrap,
-            "'"
-        )).format(code=base64.b64encode(code).decode())
+        def _command_args():
+            """generates the command args."""
 
-        command_args = [
-            # login
-            'ssh',
-            # '-l', 'olli',
-            host,
+            # ssh
+            if host is not None:
+                log("user ssh", host=host, user=user)
+                yield 'ssh'
+                # optionally with user
+                if user is not None:
+                    yield '-l'
+                    yield user
+                yield host
 
-            # become different user
-            'sudo', '-u', 'olli',
+            # sudo
+            if sudo is not None:
+                log("user sudo", sudo=sudo)
+                yield 'sudo'
+                # optionally with user
+                if sudo is not True:
+                    yield '-u'
+                    yield sudo
 
-            # python bootstrap
-            python_bin, '-u', '-c',
-            # """'import time;time.sleep(35);print("foo");time.sleep(5)'"""
-            command,
-        ]
+            # python exec
+            log('user python', python=python_bin)
+            yield from shlex.split(python_bin)
+            yield '-u'
+            yield '-c'
 
-        # asyncio.create_subprocess_exec
-        print('launching process')
+            if host is not None:
+                bootstrap = ''.join(("'", cls.bootstrap, "'"))
+            else:
+                bootstrap = cls.bootstrap
+
+            yield bootstrap.format(code=base64.b64encode(code).decode())
 
         transport, _ = await loop.subprocess_exec(
             lambda: protocol,
-            *command_args,
+            *list(_command_args()),
             stdin=PIPE, stdout=PIPE, stderr=PIPE,
             **kwargs
         )
 
         process = cls(transport, protocol, loop)
 
-        log("process", pid=process.pid)
+        log('launched process', pid=process.pid)
 
         return process
 
@@ -201,7 +185,7 @@ class Remote(asyncio.subprocess.Process):
 
         except PermissionError:
             # seems we are not able to terminate
-            log("Unable to terminate process", pid=self.pid)
+            log('Unable to terminate process', pid=self.pid)
 
     async def work(self, queue):
         """Process the queue."""
@@ -216,7 +200,7 @@ class Remote(asyncio.subprocess.Process):
             # TODO evaluate result
 
             queue.task_done()
-            print("done", result, queue, queue.qsize())
+            print('done', result, queue, queue.qsize())
 
 
 async def ping(remote):
@@ -234,9 +218,48 @@ async def ping(remote):
                 return msg
 
 
+class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
+
+    """A unique representation of a Remote."""
+
+    def __new__(cls, host=None, user=None, sudo=None):
+        return super(Target, cls).__new__(cls, host, user, sudo)
+
+
+class Strategy:
+
+    """A `Strategy` is the rolling plan to fulfill debellation of remote targets."""
+
+    def __init__(self, parallel=1, loop=None):
+        self._loop = loop or asyncio.get_event_loop()
+
+        self.parallel = parallel
+
+        self._scheduled_queue = asyncio.Queue(maxsize=parallel)
+        """A queue for all remotes."""
+
+    async def add_target(self, target):
+        await self._scheduled_queue.put(target)
+
+    async def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        msg = await self._stream_reader.readline()
+
+        if msg is None:
+            # eof
+            raise StopAsyncIteration
+
+        return msg
+
+
+
+
 class Debellator:
     remotes = {
-        ('localhost', 'olli', receive): asyncio.Queue()
+        ('localhost', None, '/home/olli/.pyenv/versions/debellator3/bin/python', msgr): asyncio.Queue(),
+        # ('ms', 'root', None, receive): asyncio.Queue()
     }
 
     tasks = [
@@ -248,6 +271,7 @@ class Debellator:
         self._queue = asyncio.Queue()
 
     async def be(self):
+        """Schedules a strategy for each target remote."""
 
         for access, queue in self.remotes.items():
 
@@ -256,8 +280,8 @@ class Debellator:
                 await queue.put(task)
 
             # create remote
-            host, user, code = access
-            remote = await Remote.launch(host, code=code, loop=self._loop)
+            host, user, python_bin, code = access
+            remote = await Remote.launch(host, user=user, code=code, python_bin=python_bin, loop=self._loop)
 
             asyncio.Task(remote.work(queue))
 
@@ -265,21 +289,21 @@ class Debellator:
             await self.expand(await queue.join())
 
         # wait for master queue to finish
-        print("wait for master queue", self._queue.qsize())
+        print('wait for master queue', self._queue.qsize())
         await self._queue.join()
-        print("finished master queue")
+        print('finished master queue')
 
     async def expand(self, queue):
         async def _wait_for_queue():
             await queue.join()
-            print("queue finished")
+            print('queue finished')
 
         await self._queue.put(queue)
 
 
 def main():
 
-    if sys.platform == "win32":
+    if sys.platform == 'win32':
         loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
         asyncio.set_event_loop(loop)
     else:
@@ -290,7 +314,7 @@ def main():
     done = asyncio.Future(loop=loop)
 
     def ask_exit(signame):
-        print("got signal %s: exit" % signame)
+        print('got signal %s: exit' % signame)
         loop.stop()
         done.cancelled()
 

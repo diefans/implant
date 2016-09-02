@@ -84,6 +84,7 @@ setup(
     entry_points="",
 
     install_requires=[
+        'click',
     ],
 
     tests_require=['tox'],
