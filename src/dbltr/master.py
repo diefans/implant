@@ -138,12 +138,12 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.receiving = None
 
         # we distribute channels from stdout
-        self.control = core.Control(loop=self._loop)
+        self.channels = core.Channels(loop=self._loop)
 
         # the channel to send everything
         self.default_channel = core.JsonChannel(queue=self.queue_in, loop=self._loop)
 
-        self._commander = Commander(self.default_channel, self.control.default, self._loop)
+        self._commander = Commander(self.default_channel, self.channels.default, self._loop)
 
     @utils.reify
     def execute(self):
@@ -236,7 +236,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             chunk = core.Chunk.decode(line)
             log("remote stdout", pid=self.pid, chunk=chunk, data=chunk.data)
 
-            await self.control.distribute(chunk)
+            await self.channels.distribute(chunk)
 
     async def _connect_stderr(self):
         """Collect error messages from remote in stderr queue."""

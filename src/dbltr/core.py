@@ -91,6 +91,9 @@ class Messenger:
         # holds a future indicating that the Messenger is running
         self.running = None
 
+    async def distribute_incomming_chunks(self):
+        pass
+
     async def connect_stdio(self):
         """Connect stdio to queues.
 
@@ -427,16 +430,16 @@ class JsonChannel(ChunkChannel):
         return _context(self)
 
 
-class Control:
+class Channels:
 
-    """Distributes arbitrary channels to queues.
+    """Distributes arbitrary chunks to channels.
 
     The empty channel is used to send Commands."""
 
     def __init__(self, loop=None):
         self._loop = loop or asyncio.get_event_loop()
 
-        self.channels = {}
+        self._channels = {}
         self.add_channel(JsonChannel(loop=self._loop))
 
         self.default = self[DEFAULT_CHANNEL_NAME]
@@ -444,35 +447,35 @@ class Control:
     async def __call__(self, queue):
         logger.info("Starting channel distribution...")
         channel = ChunkChannel(queue=queue, loop=self._loop)
+
         async for uid, chunk in channel:
             await self.distribute(chunk)
 
     async def distribute(self, chunk):
         channel = chunk.channel
-        if channel not in self.channels:
+        if channel not in self._channels:
             logger.error('Channel `%s` not found for Chunk %s', channel, chunk)
-            # self.channels[channel] = asyncio.Queue(loop=self._loop)
 
-        await self.channels[channel].inject_chunk(chunk)
+        await self._channels[channel].inject_chunk(chunk)
         logger.info("Chunk %s distributed to Channel `%s`", chunk, channel)
 
     def __getitem__(self, channel_name):
         try:
-            return self.channels[channel_name]
+            return self._channels[channel_name]
 
         except KeyError:
             raise KeyError("Channel `{}` not found!".format(channel_name))
 
     def __setitem__(self, channel_name, channel):
-        if channel_name in self.channels:
+        if channel_name in self._channels:
             logger.warning('Overriding existing channel `%s`', channel_name)
 
-        self.channels[channel_name] = channel
+        self._channels[channel_name] = channel
 
     def __delitem__(self, channel_name):
         try:
             logger.info('Removing channel `%s`', channel_name)
-            del self.channels[channel_name]
+            del self._channels[channel_name]
 
         except KeyError:
             raise KeyError("Channel `{}` not found!".format(channel_name))
@@ -514,15 +517,15 @@ class Commander:
 def main(*args, **kwargs):
     messenger = Messenger(loop)
 
-    control = Control(loop)
+    channels = Channels(loop)
 
     commander = Commander(loop)
 
     try:
         loop.run_until_complete(
             messenger.run(
-                control(messenger.queue_in),
-                commander.execute_messages(control.default, messenger.queue_out)
+                channels(messenger.queue_in),
+                commander.execute_messages(channels.default, messenger.queue_out)
             )
         )
 
