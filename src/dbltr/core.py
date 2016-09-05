@@ -273,6 +273,9 @@ class Chunk:
 
         return b''.join(_gen()).decode()
 
+    @property
+    def is_eom(self):
+        return self.data == b''
 
 class ChunkChannel:
 
@@ -365,7 +368,7 @@ class JsonChannel(ChunkChannel):
                 self.buffer[uid] = bytearray()
 
             # message completed -> return json decoded chunks
-            if not len(chunk.data):
+            if chunk.is_eom:
                 return uid, self._pop_json_from_buffer(uid)
 
             # append data to buffer
