@@ -229,9 +229,10 @@ class Chunk:
         uid_view = raw_view[channel_end + 1:uid_end]
         data_view = raw_view[uid_end + 1:raw_end]
 
-        uncompressed = lzma.uncompress(data_view)
+        decoded_data = base64.b64decode(data_view)
+        decompressed = lzma.decompress(decoded_data)
 
-        return cls(base64.b64decode(uncompressed), channel=channel_view.tobytes(), uid=uid_view.tobytes())
+        return cls(decompressed, channel=channel_view.tobytes(), uid=uid_view.tobytes())
 
     def encode(self, eol=True):
         """Encode the chunk into a bytes string."""
@@ -241,8 +242,8 @@ class Chunk:
             yield self.separator
             yield self.uid or b''
             yield self.separator
-            yield lzma.compress(self.data or b'')
-            # yield base64.b64encode(self.data or b'')
+            compressed = lzma.compress(self.data or b'')
+            yield base64.b64encode(compressed)
             if eol:
                 yield b'\n'
 
