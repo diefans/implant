@@ -279,29 +279,31 @@ async def feed_stdin_to_remotes(messenger):
     remote = await Remote.launch(code=core, loop=core.loop)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
-    await messenger.queue_out.put(" >xasas ".encode())
     core.logger.info("fooo")
     try:
-        while True:
-            line = await messenger.queue_in.get()
+        async with core.Incomming(pipe=sys.stdin) as reader:
+            while True:
+                line = await reader.readline()
 
-            # line = await stdin_reader.readline()
-            if line is b'':
-                break
+                core.logger.debug("sending: %s", line)
 
-            if remote.returncode is None:
-                command_name = line[:-1].decode()
-                result = await remote.execute(command_name, 1, 2, 3, foo='bar')
+                # line = await stdin_reader.readline()
+                if line is b'':
+                    break
 
-                await messenger.queue_out.put("< {}\n > ".format(result).encode())
+                if remote.returncode is None:
+                    command_name = line[:-1].decode()
+                    result = await remote.execute(command_name, 1, 2, 3, foo='bar')
 
-            else:
+                    print("< {}\n > ".format(result), end='')
+
+                else:
+                    await remote.wait()
+                    break
+
+            if not remote_task.done():
+                remote_task.cancel()
                 await remote.wait()
-                break
-
-        if not remote_task.done():
-            remote_task.cancel()
-            await remote.wait()
 
     except asyncio.CancelledError:
         # wait for remote to complete

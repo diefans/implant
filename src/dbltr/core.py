@@ -8,6 +8,7 @@ import functools
 import os
 import base64
 import json
+import lzma
 import logging
 
 
@@ -56,25 +57,78 @@ def create_loop(*, debug=False):
 loop = create_loop(debug=True)
 
 
-async def queue_read_pipe(queue, reader):
-    """Queue lines from reader."""
+class Incomming:
 
-    while True:
-        line = await reader.readline()
-        if line is b'':
-            break
+    """A context for an incomming pipe."""
 
-        await queue.put(line)
+    def __init__(self, *, loop=None, pipe=sys.stdin):
+        self._loop = loop or asyncio.get_event_loop()
+        self.pipe = pipe
+        self.transport = None
+
+    async def __aenter__(self):
+        reader = asyncio.StreamReader(loop=self._loop)
+        protocol = asyncio.StreamReaderProtocol(reader)
+
+        self.transport, _ = await self._loop.connect_read_pipe(
+            lambda: protocol,
+            # sys.stdin
+            os.fdopen(self.pipe.fileno(), 'r')
+        )
+        return reader
+
+    async def __aexit__(self, exc_type, value, tb):
+        self.transport.close()
 
 
-async def queue_write_pipe(queue, writer):
-    """Write data from queue to writer."""
+class Outgoing:
 
-    while True:
-        data = await queue.get()
-        writer.write(data)
-        await writer.drain()
-        queue.task_done()
+    """A context for an outgoing pipe."""
+
+    def __init__(self, *, loop=None, pipe=sys.stdout):
+        self._loop = loop or asyncio.get_event_loop()
+        self.pipe = pipe
+        self.transport = None
+
+    async def __aenter__(self):
+        self.transport, protocol = await self._loop.connect_write_pipe(
+            asyncio.streams.FlowControlMixin,
+            # sys.stdout
+            os.fdopen(self.pipe.fileno(), 'wb')
+        )
+        writer = asyncio.streams.StreamWriter(self.transport, protocol, None, self._loop)
+
+        return writer
+
+    async def __aexit__(self, exc_type, value, tb):
+        self.transport.close()
+
+
+async def send_outgoing_queue(queue, pipe=sys.stdout):
+    """Write data from queue to stdout."""
+
+    async with Outgoing(pipe=pipe) as writer:
+        while True:
+            data = await queue.get()
+            writer.write(data)
+            await writer.drain()
+            queue.task_done()
+
+
+async def distribute_incomming_chunks(channels, pipe=sys.stdin):
+    """Distribute all chunks from stdin to channels."""
+
+    async with Incomming(pipe=pipe) as reader:
+        while True:
+            line = await reader.readline()
+            if line is b'':
+                break
+
+            logger.debug("line: %s", line)
+            chunk = Chunk.decode(line)
+            logger.debug('Chunk received: %s', chunk)
+
+            await channels.distribute(chunk)
 
 
 class Messenger:
@@ -84,89 +138,8 @@ class Messenger:
     def __init__(self, loop=None):
         self._loop = loop or asyncio.get_event_loop()
 
-        self.queue_in = asyncio.Queue(loop=self._loop)
-        self.queue_out = asyncio.Queue(loop=self._loop)
-        self.queue_err = asyncio.Queue(loop=self._loop)
-
         # holds a future indicating that the Messenger is running
         self.running = None
-
-    async def distribute_incomming_chunks(self):
-        pass
-
-    async def connect_stdio(self):
-        """Connect stdio to queues.
-
-        If stdout and stderr is a tty, it will not be connected.
-        This keeps logging intact.
-
-        https://www.mail-archive.com/python-tulip@googlegroups.com/msg00428.html
-        """
-
-        stdio_tasks = []
-        stdio_cleanup = []
-
-        # first connect writer
-        if not sys.stdout.isatty():
-            stdout_transport, stdout_protocol = await loop.connect_write_pipe(
-                asyncio.streams.FlowControlMixin,
-                # sys.stdout
-                os.fdopen(sys.stdout.fileno(), 'wb')
-            )
-            stdout_writer = asyncio.streams.StreamWriter(stdout_transport, stdout_protocol, None, self._loop)
-
-            stdio_tasks.append(
-                asyncio.ensure_future(queue_write_pipe(self.queue_out, stdout_writer), loop=self._loop),
-            )
-            stdio_cleanup.append(lambda: stdout_transport.close())
-
-            if os.fstat(sys.stderr.fileno()) != os.fstat(sys.stdout.fileno()):
-                stderr_transport, stderr_protocol = await loop.connect_write_pipe(
-                    asyncio.streams.FlowControlMixin,
-                    # sys.stderr
-                    os.fdopen(sys.stderr.fileno(), 'wb')
-                )
-                stderr_writer = asyncio.streams.StreamWriter(stderr_transport, stderr_protocol, None, self._loop)
-
-                stdio_tasks.append(
-                    asyncio.ensure_future(queue_write_pipe(self.queue_err, stderr_writer), loop=self._loop),
-                )
-                stdio_cleanup.append(lambda: stderr_transport.close())
-
-            else:
-                # redirect stderr to stdout
-                stdio_tasks.append(
-                    asyncio.ensure_future(queue_write_pipe(self.queue_err, stdout_writer), loop=self._loop),
-                )
-
-        # connect reader
-        stdin_reader = asyncio.StreamReader(loop=self._loop)
-        stdin_protocol = asyncio.StreamReaderProtocol(stdin_reader)
-
-        stdin_transport, _ = await loop.connect_read_pipe(
-            lambda: stdin_protocol,
-            # sys.stdin
-            os.fdopen(sys.stdin.fileno(), 'r')
-        )
-        stdio_tasks.append(
-            asyncio.ensure_future(queue_read_pipe(self.queue_in, stdin_reader), loop=self._loop),
-        )
-        stdio_cleanup.append(lambda: stdin_transport.close())
-
-        future = asyncio.gather(*stdio_tasks, loop=self._loop)
-
-        try:
-            await future
-
-        except asyncio.CancelledError:
-            for cleanup in stdio_cleanup:
-                cleanup()
-
-    def exit(self, result=None):
-        if not self.running:
-            raise RuntimeError('{} is not running!'.format(self))
-
-        self.running.set_result(result)
 
     async def run(self, *tasks):
         """Schedules all tasks and wait for running is done or canceled"""
@@ -175,9 +148,6 @@ class Messenger:
         running = asyncio.Future(loop=self._loop)
 
         shutdown_tasks = []
-
-        # connect stdio
-        shutdown_tasks.append(asyncio.ensure_future(self.connect_stdio(), loop=loop))
 
         for task in tasks:
             fut = asyncio.ensure_future(task, loop=self._loop)
@@ -259,7 +229,9 @@ class Chunk:
         uid_view = raw_view[channel_end + 1:uid_end]
         data_view = raw_view[uid_end + 1:raw_end]
 
-        return cls(base64.b64decode(data_view), channel=channel_view.tobytes(), uid=uid_view.tobytes())
+        uncompressed = lzma.uncompress(data_view)
+
+        return cls(base64.b64decode(uncompressed), channel=channel_view.tobytes(), uid=uid_view.tobytes())
 
     def encode(self, eol=True):
         """Encode the chunk into a bytes string."""
@@ -269,7 +241,8 @@ class Chunk:
             yield self.separator
             yield self.uid or b''
             yield self.separator
-            yield base64.b64encode(self.data or b'')
+            yield lzma.compress(self.data or b'')
+            # yield base64.b64encode(self.data or b'')
             if eol:
                 yield b'\n'
 
@@ -515,17 +488,21 @@ class Commander:
 
 
 def main(*args, **kwargs):
+    logger.debug("__name__ = %s", __name__)
     messenger = Messenger(loop)
 
     channels = Channels(loop)
+    queue_out = asyncio.Queue(loop=loop)
 
     commander = Commander(loop)
 
     try:
         loop.run_until_complete(
             messenger.run(
-                channels(messenger.queue_in),
-                commander.execute_messages(channels.default, messenger.queue_out)
+                send_outgoing_queue(queue_out, sys.stdout),
+                distribute_incomming_chunks(channels, sys.stdin),
+                # channels(messenger.queue_in),
+                commander.execute_messages(channels.default, queue_out)
             )
         )
 
