@@ -88,8 +88,8 @@ class Commander:
     async def __call__(self):
         """Completes all RPC style commands by resolving a future per message uid."""
 
-        async for message in self.channel_in:
-            future = self._commands_pending[message.uid]
+        async for uid, message in self.channel_in:
+            future = self._commands_pending[uid]
             future.set_result(message)
 
     async def execute(self, name, *args, **kwargs):
