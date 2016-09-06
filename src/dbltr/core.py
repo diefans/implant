@@ -8,7 +8,8 @@ import functools
 import os
 import base64
 import json
-import lzma
+import uuid
+from collections import defaultdict
 import logging
 
 
@@ -196,6 +197,7 @@ class Chunk:
     """We split messages into chunks to allow parallel communication of messages."""
 
     separator = b'|'
+    compressor = False
 
     def __init__(self, data=None, *, channel=None, uid=None):
         self.data = data
@@ -203,7 +205,19 @@ class Chunk:
         self.uid = uid
 
     @classmethod
-    def decode(cls, raw):
+    def set_compressor(cls, compressor):
+        if compressor in ('gzip', 'lzma'):
+            try:
+                compressor = __import__(compressor)
+                logger.info("Using compression: %s", compressor)
+                cls.compressor = compressor
+
+            except ImportError:
+                import traceback
+                logger.error('Importing compressor failed: %s', traceback.format_exc())
+
+    @classmethod
+    def decode(cls, raw, *, compressor=False):
         """Decodes a bytes string with or without ending \n into a Chunk."""
 
         raw_view = memoryview(raw)
@@ -229,12 +243,13 @@ class Chunk:
         uid_view = raw_view[channel_end + 1:uid_end]
         data_view = raw_view[uid_end + 1:raw_end]
 
-        decoded_data = base64.b64decode(data_view)
-        decompressed = lzma.decompress(decoded_data)
+        data = base64.b64decode(data_view)
+        if cls.compressor:
+            data = cls.compressor.decompress(data)
 
-        return cls(decompressed, channel=channel_view.tobytes(), uid=uid_view.tobytes())
+        return cls(data, channel=channel_view.tobytes(), uid=uid_view.tobytes())
 
-    def encode(self, eol=True):
+    def encode(self, eol=True, *, compressor=False):
         """Encode the chunk into a bytes string."""
 
         def _gen_parts():
@@ -242,8 +257,12 @@ class Chunk:
             yield self.separator
             yield self.uid or b''
             yield self.separator
-            compressed = lzma.compress(self.data or b'')
-            yield base64.b64encode(compressed)
+
+            data = self.data or b''
+            if self.compressor:
+                data = self.compressor.compress(data)
+            yield base64.b64encode(data)
+
             if eol:
                 yield b'\n'
 
@@ -277,16 +296,18 @@ class Chunk:
     def is_eom(self):
         return self.data == b''
 
+
 class ChunkChannel:
 
     """Iterator over a queues own chunks."""
 
     max_size = 10240
 
-    def __init__(self, name=DEFAULT_CHANNEL_NAME, *, queue=None, loop=None):
+    def __init__(self, name=DEFAULT_CHANNEL_NAME, *, queue=None, loop=None, compressor=False):
         self.name = name
         self._loop = loop or asyncio.get_event_loop()
         self.queue = queue or asyncio.Queue(loop=loop)
+        self.compressor = compressor
 
     async def __aiter__(self):
         return self
@@ -300,7 +321,7 @@ class ChunkChannel:
         line = await self.queue.get()
 
         try:
-            chunk = Chunk.decode(line)
+            chunk = Chunk.decode(line, compressor=self.compressor)
             logger.debug('Chunk received at %s: %s', self, chunk)
             return chunk.uid, chunk
 
@@ -310,7 +331,7 @@ class ChunkChannel:
     async def inject_chunk(self, chunk):
         """Allows forwarding of a chunk as is into the queue."""
 
-        await self.queue.put(chunk.encode())
+        await self.queue.put(chunk.encode(compressor=self.compressor))
 
     async def send(self, data, *, uid=None):
         """Create a chunk from data and uid and send it to the queue of this channel."""
@@ -328,7 +349,7 @@ class ChunkChannel:
 
         chunk = Chunk(None, channel=self.name, uid=uid)
 
-        await self.queue.put(chunk.encode())
+        await self.queue.put(chunk.encode(compressor=self.compressor))
 
 
 def split_data(data, size=1024):
@@ -413,11 +434,12 @@ class Channels:
 
     The empty channel is used to send Commands."""
 
-    def __init__(self, loop=None):
+    def __init__(self, *, loop=None, compressor=False):
         self._loop = loop or asyncio.get_event_loop()
+        self.compressor = compressor
 
         self._channels = {}
-        self.add_channel(JsonChannel(loop=self._loop))
+        self.add_channel(JsonChannel(loop=self._loop, compressor=self.compressor))
 
         self.default = self[DEFAULT_CHANNEL_NAME]
 
@@ -469,17 +491,48 @@ class Commander:
     and return a result by replying in the same channel and with the same uid.
     """
 
-    # TODO command registration
+    def __init__(self, channel_out, channel_in, loop=None):
+        self._loop = loop or asyncio.get_event_loop()
 
-    def __init__(self, loop=None):
-        self.loop = loop or asyncio.get_event_loop()
+        self.channel_out = channel_out
+        self.channel_in = channel_in
 
-    async def execute_messages(self, channel_in, queue):
+        # collect finished commands
+        self._commands_pending = defaultdict(lambda: asyncio.Future(loop=self._loop))
+
+    async def __call__(self):
+        """Completes all RPC style commands by resolving a future per message uid."""
+
+        async for uid, message in self.channel_in:
+            future = self._commands_pending[uid]
+            future.set_result(message)
+
+    async def execute(self, name, *args, **kwargs):
+        """Send a command to channel_out and wait for returing a result at channel_in."""
+
+        uid = uuid.uuid1().hex.encode()
+        msg = {
+            'command': name,
+            'args': args,
+            'kwargs': kwargs,
+        }
+        async with self.channel_out.message(uid) as send:
+            await send(msg)
+
+        try:
+            result = await self._commands_pending[uid]
+            logger.info("result: %s", result)
+            return result
+
+        finally:
+            del self._commands_pending[uid]
+
+    async def receive(self):
+        """The remote part of execute method."""
+
         logger.info("Retrieving commands...")
 
-        channel_out = JsonChannel(channel_in.name, queue=queue)
-
-        async for uid, message in channel_in:
+        async for uid, message in self.channel_in:
             logger.info("retrieved command: %s", message)
 
             # do something and return result
@@ -487,31 +540,41 @@ class Commander:
                 'foo': message
             }
 
-            async with channel_out.message(uid) as send:
+            async with self.channel_out.message(uid) as send:
                 await send(result)
 
 
-def main(*args, **kwargs):
-    logger.debug("__name__ = %s", __name__)
+def main(compressor=False, **kwargs):
+    if compressor:
+        Chunk.set_compressor(compressor)
+
     messenger = Messenger(loop)
 
-    channels = Channels(loop)
+    channels = Channels(loop=loop, compressor=compressor)
     queue_out = asyncio.Queue(loop=loop)
+    channel_out = JsonChannel(channels.default.name, queue=queue_out, compressor=compressor)
 
-    commander = Commander(loop)
+    commander = Commander(channel_out, channels.default, loop=loop)
 
     try:
         loop.run_until_complete(
             messenger.run(
                 send_outgoing_queue(queue_out, sys.stdout),
                 distribute_incomming_chunks(channels, sys.stdin),
-                # channels(messenger.queue_in),
-                commander.execute_messages(channels.default, queue_out)
+                commander.receive()
             )
         )
 
     finally:
         loop.close()
+
+
+def decode_options(b64):
+    return json.loads(base64.b64decode(b64).decode())
+
+
+def encode_options(**options):
+    return base64.b64encode(json.dumps(options).encode()).decode()
 
 
 if __name__ == '__main__':

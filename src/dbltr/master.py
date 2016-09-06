@@ -8,6 +8,7 @@ import types
 import uuid
 import functools
 import concurrent.futures
+import json
 
 from collections import namedtuple, defaultdict
 
@@ -28,16 +29,21 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
     """A unique representation of a Remote."""
 
     bootstrap = (
-        'import imp, base64; boot = imp.new_module("dbltr.msgr");'
+        'import imp, base64, json; boot = imp.new_module("dbltr.msgr");'
         'c = compile(base64.b64decode(b"{code}"), "<string>", "exec");'
-        'exec(c, boot.__dict__); boot.main(False);'
+        'exec(c, boot.__dict__); boot.main(**boot.decode_options(b"{options}"));'
     )
 
     def __new__(cls, host=None, user=None, sudo=None):
         return super(Target, cls).__new__(cls, host, user, sudo)
 
-    def command_args(self, code, python_bin=sys.executable):
+    def command_args(self, code, options=None, python_bin=sys.executable):
         """generates the command argsuments to execute a python process"""
+
+        if options is None:
+            options = {}
+
+        assert isinstance(options, dict), 'options must be a dict'
 
         def _gen():
             # ssh
@@ -67,50 +73,14 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
             else:
                 bootstrap = self.bootstrap
 
-            yield bootstrap.format(code=base64.b64encode(code).decode())
+            yield bootstrap.format(
+                code=base64.b64encode(code).decode(),
+                options=core.encode_options(**options),
+            )
 
         command_args = list(_gen())
 
         return command_args
-
-
-class Commander:
-
-    def __init__(self, channel_out, channel_in, loop=None):
-        self._loop = loop or asyncio.get_event_loop()
-
-        self.channel_out = channel_out
-        self.channel_in = channel_in
-
-        # collect finished commands
-        self._commands_pending = defaultdict(lambda: asyncio.Future(loop=self._loop))
-
-    async def __call__(self):
-        """Completes all RPC style commands by resolving a future per message uid."""
-
-        async for uid, message in self.channel_in:
-            future = self._commands_pending[uid]
-            future.set_result(message)
-
-    async def execute(self, name, *args, **kwargs):
-        """Send a command to channel_out and wait for returing a result at channel_in."""
-
-        uid = uuid.uuid1().hex.encode()
-        msg = {
-            'command': name,
-            'args': args,
-            'kwargs': kwargs,
-        }
-        async with self.channel_out.message(uid) as send:
-            await send(msg)
-
-        try:
-            result = await self._commands_pending[uid]
-            core.logger.info("result: %s", result)
-            return result
-
-        finally:
-            del self._commands_pending[uid]
 
 
 class Remote(asyncio.subprocess.SubprocessStreamProtocol):
@@ -122,7 +92,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     targets = {}
     """caches all remotes."""
 
-    def __init__(self, loop=None):
+    def __init__(self, *, loop=None, compressor=False, **options):
         if loop is None:
             loop = asyncio.get_event_loop()
 
@@ -138,12 +108,11 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.receiving = None
 
         # we distribute channels from stdout
-        self.channels = core.Channels(loop=self._loop)
+        self.channels = core.Channels(loop=self._loop, compressor=compressor)
 
         # the channel to send everything
-        self.default_channel = core.JsonChannel(queue=self.queue_in, loop=self._loop)
-
-        self._commander = Commander(self.default_channel, self.channels.default, self._loop)
+        self.channel_out = core.JsonChannel(queue=self.queue_in, loop=self._loop, compressor=compressor)
+        self._commander = core.Commander(self.channel_out, self.channels.default, self._loop)
 
     @utils.reify
     def execute(self):
@@ -184,7 +153,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
                      target=None,
                      # host=None, user=None, sudo=None,
                      python_bin=sys.executable, code=None,
-                     loop=None, **kwargs):
+                     loop=None, options=None, **kwargs):
         """Create a remote process."""
 
         if target is None:
@@ -200,9 +169,9 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         if isinstance(code, types.ModuleType):
             code = get_python_source(code).encode()
 
-        command_args = target.command_args(code, python_bin=python_bin)
+        command_args = target.command_args(code, options=options, python_bin=python_bin)
 
-        remote = cls(loop=loop)
+        remote = cls(loop=loop, **options)
         await loop.subprocess_exec(
             lambda: remote,
             *command_args,
@@ -275,8 +244,8 @@ def parse_command(line):
     # TODO
 
 
-async def feed_stdin_to_remotes(messenger):
-    remote = await Remote.launch(code=core, loop=core.loop)
+async def feed_stdin_to_remotes(**options):
+    remote = await Remote.launch(code=core, loop=core.loop, options=options)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
     core.logger.info("fooo")
@@ -332,6 +301,9 @@ class ExecutorConsoleHandler(StreamHandler):
 
 
 def main():
+    compressor = 'gzip'
+    core.Chunk.set_compressor(compressor)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
         logging_handler = ExecutorConsoleHandler(logging_executor)
         core.logger.propagate = False
@@ -343,7 +315,7 @@ def main():
         try:
             core.loop.run_until_complete(
                 messenger.run(
-                    feed_stdin_to_remotes(messenger)
+                    feed_stdin_to_remotes(compressor=compressor)
                 )
             )
 
