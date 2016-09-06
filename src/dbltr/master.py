@@ -5,12 +5,11 @@ import asyncio
 import shlex
 import base64
 import types
-import uuid
 import functools
 import concurrent.futures
-import json
+import inspect
 
-from collections import namedtuple, defaultdict
+from collections import namedtuple
 
 from dbltr import core, utils
 
@@ -20,7 +19,6 @@ log = core.log
 
 
 def get_python_source(obj):
-    import inspect
     return inspect.getsource(obj)
 
 
