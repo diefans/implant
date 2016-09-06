@@ -1,3 +1,4 @@
+import pkg_resources
 from functools import update_wrapper
 
 
@@ -43,3 +44,13 @@ class reify(object):
         val = self.wrapped(inst)
         setattr(inst, self.wrapped.__name__, val)
         return val
+
+
+PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
+
+
+def load_plugins():
+    return {
+        entry_point.name: entry_point.load()
+        for entry_point in pkg_resources.iter_entry_points(group=PLUGINS_ENTRY_POINT_GROUP, name=None)
+    }

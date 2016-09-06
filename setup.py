@@ -81,7 +81,11 @@ setup(
         'src',
         exclude=["tests*"]
     ),
-    entry_points="",
+    entry_points={
+        'dbltr.plugins': [
+            'core=dbltr.plugins.core'
+        ]
+    },
 
     install_requires=[
         'click',

@@ -485,6 +485,8 @@ class Commander:
     and return a result by replying in the same channel and with the same uid.
     """
 
+    commands = {}
+
     def __init__(self, channel_out, channel_in, loop=None):
         self._loop = loop or asyncio.get_event_loop()
 
@@ -536,6 +538,31 @@ class Commander:
 
             async with self.channel_out.message(uid) as send:
                 await send(result)
+
+    @classmethod
+    def command(cls, name=None):
+        """Decorates a command."""
+
+        command_name = name
+
+        def decorator(func):
+
+            if command_name is None:
+                name = func.__name__
+
+            else:
+                name = command_name
+
+            cls.commands[name] = func
+
+            return func
+
+        return decorator
+
+
+@Commander.command()
+async def import_plugin(code, module_name):
+    pass
 
 
 def get_compressor(compressor):

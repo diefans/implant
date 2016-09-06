@@ -241,7 +241,19 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 def parse_command(line):
     """Parse a command from line."""
 
-    # TODO
+    args = []
+    kwargs = {}
+    command, *parts = line.split(' ')
+
+    for part in parts:
+        if '=' in part:
+            k, v = part.split('=')
+            kwargs[k] = v
+
+        else:
+            args.append(part)
+
+    return command, args, kwargs
 
 
 async def feed_stdin_to_remotes(**options):
@@ -261,8 +273,8 @@ async def feed_stdin_to_remotes(**options):
                     break
 
                 if remote.returncode is None:
-                    command_name = line[:-1].decode()
-                    result = await remote.execute(command_name, 1, 2, 3, foo='bar')
+                    command, args, kwargs = parse_command(line[:-1].decode())
+                    result = await remote.execute(command, *args, **kwargs)
 
                     print("< {}\n > ".format(result), end='')
 
