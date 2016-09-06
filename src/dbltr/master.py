@@ -98,6 +98,8 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         super(Remote, self).__init__(limit=asyncio.streams._DEFAULT_LIMIT, loop=loop)
 
+        self.compressor = core.get_compressor(compressor)
+
         self.queue_in = asyncio.Queue(loop=self._loop)
         self.queue_out = asyncio.Queue(loop=self._loop)
         self.queue_err = asyncio.Queue(loop=self._loop)
@@ -108,10 +110,10 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.receiving = None
 
         # we distribute channels from stdout
-        self.channels = core.Channels(loop=self._loop, compressor=compressor)
+        self.channels = core.Channels(loop=self._loop, compressor=self.compressor)
 
         # the channel to send everything
-        self.channel_out = core.JsonChannel(queue=self.queue_in, loop=self._loop, compressor=compressor)
+        self.channel_out = core.JsonChannel(queue=self.queue_in, loop=self._loop, compressor=self.compressor)
         self._commander = core.Commander(self.channel_out, self.channels.default, self._loop)
 
     @utils.reify
@@ -202,7 +204,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         """Collect messages from remote in stdout queue."""
 
         async for line in self.stdout:
-            chunk = core.Chunk.decode(line)
+            chunk = core.Chunk.decode(line, compressor=self.compressor)
             log("remote stdout", pid=self.pid, chunk=chunk, data=chunk.data)
 
             await self.channels.distribute(chunk)
@@ -302,7 +304,6 @@ class ExecutorConsoleHandler(StreamHandler):
 
 def main():
     compressor = 'gzip'
-    core.Chunk.set_compressor(compressor)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
         logging_handler = ExecutorConsoleHandler(logging_executor)

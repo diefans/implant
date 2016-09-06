@@ -126,10 +126,10 @@ async def distribute_incomming_chunks(channels, pipe=sys.stdin):
                 break
 
             logger.debug("line: %s", line)
-            chunk = Chunk.decode(line)
-            logger.debug('Chunk received: %s', chunk)
+            # chunk = Chunk.decode(line)
+            # logger.debug('Chunk received: %s', chunk)
 
-            await channels.distribute(chunk)
+            await channels.distribute(line)
 
 
 class Messenger:
@@ -197,24 +197,11 @@ class Chunk:
     """We split messages into chunks to allow parallel communication of messages."""
 
     separator = b'|'
-    compressor = False
 
     def __init__(self, data=None, *, channel=None, uid=None):
         self.data = data
         self.channel = channel
         self.uid = uid
-
-    @classmethod
-    def set_compressor(cls, compressor):
-        if compressor in ('gzip', 'lzma'):
-            try:
-                compressor = __import__(compressor)
-                logger.info("Using compression: %s", compressor)
-                cls.compressor = compressor
-
-            except ImportError:
-                import traceback
-                logger.error('Importing compressor failed: %s', traceback.format_exc())
 
     @classmethod
     def decode(cls, raw, *, compressor=False):
@@ -244,8 +231,8 @@ class Chunk:
         data_view = raw_view[uid_end + 1:raw_end]
 
         data = base64.b64decode(data_view)
-        if cls.compressor:
-            data = cls.compressor.decompress(data)
+        if compressor:
+            data = compressor.decompress(data)
 
         return cls(data, channel=channel_view.tobytes(), uid=uid_view.tobytes())
 
@@ -259,8 +246,8 @@ class Chunk:
             yield self.separator
 
             data = self.data or b''
-            if self.compressor:
-                data = self.compressor.compress(data)
+            if compressor:
+                data = compressor.compress(data)
             yield base64.b64encode(data)
 
             if eol:
@@ -307,6 +294,10 @@ class ChunkChannel:
         self.name = name
         self._loop = loop or asyncio.get_event_loop()
         self.queue = queue or asyncio.Queue(loop=loop)
+
+        if isinstance(compressor, str):
+            compressor = get_compressor(compressor)
+
         self.compressor = compressor
 
     async def __aiter__(self):
@@ -436,7 +427,7 @@ class Channels:
 
     def __init__(self, *, loop=None, compressor=False):
         self._loop = loop or asyncio.get_event_loop()
-        self.compressor = compressor
+        self.compressor = get_compressor(compressor)
 
         self._channels = {}
         self.add_channel(JsonChannel(loop=self._loop, compressor=self.compressor))
@@ -451,6 +442,9 @@ class Channels:
             await self.distribute(chunk)
 
     async def distribute(self, chunk):
+        if isinstance(chunk, bytes):
+            chunk = Chunk.decode(chunk, compressor=self.compressor)
+
         channel = chunk.channel
         if channel not in self._channels:
             logger.error('Channel `%s` not found for Chunk %s', channel, chunk)
@@ -544,9 +538,21 @@ class Commander:
                 await send(result)
 
 
+def get_compressor(compressor):
+    if compressor in ('gzip', 'lzma'):
+        try:
+            compressor = __import__(compressor)
+            logger.info("Using compression: %s", compressor)
+            return compressor
+
+        except ImportError:
+            import traceback
+            logger.error('Importing compressor failed: %s', traceback.format_exc())
+
+    return False
+
+
 def main(compressor=False, **kwargs):
-    if compressor:
-        Chunk.set_compressor(compressor)
 
     messenger = Messenger(loop)
 
