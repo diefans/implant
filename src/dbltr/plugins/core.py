@@ -10,4 +10,4 @@ from dbltr import core
 # provide all control structures
 # sequence, choice, if, loop
 
-print('...core plugins loaded')
+core.logger.info('...core plugins loaded')

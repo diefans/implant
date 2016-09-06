@@ -257,6 +257,8 @@ def parse_command(line):
 
 
 async def feed_stdin_to_remotes(**options):
+    plugins = utils.load_plugins()
+
     remote = await Remote.launch(code=core, loop=core.loop, options=options)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
@@ -274,9 +276,14 @@ async def feed_stdin_to_remotes(**options):
 
                 if remote.returncode is None:
                     command, args, kwargs = parse_command(line[:-1].decode())
-                    result = await remote.execute(command, *args, **kwargs)
+                    try:
+                        result = await remote.execute(command, *args, **kwargs)
 
-                    print("< {}\n > ".format(result), end='')
+                    except (TypeError, KeyError) as ex:
+                        print("< {}\n > ".format(ex), end='')
+
+                    else:
+                        print("< {}\n > ".format(result), end='')
 
                 else:
                     await remote.wait()

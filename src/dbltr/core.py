@@ -1,6 +1,8 @@
 """
 Remote process
 """
+import imp
+import inspect
 import sys
 import asyncio
 import signal
@@ -9,7 +11,7 @@ import os
 import base64
 import json
 import uuid
-from collections import defaultdict
+from collections import namedtuple, defaultdict
 import logging
 
 
@@ -477,6 +479,11 @@ class Channels:
         self[channel.name] = channel
 
 
+class Command(namedtuple('Command', ('name', 'local', 'remote'))):
+    def __new__(cls, name, local=None, remote=None):
+        return super(Command, cls).__new__(cls, name, local, remote)
+
+
 class Commander:
 
     """
@@ -506,12 +513,27 @@ class Commander:
     async def execute(self, name, *args, **kwargs):
         """Send a command to channel_out and wait for returing a result at channel_in."""
 
-        uid = uuid.uuid1().hex.encode()
+        if name not in self.commands:
+            raise KeyError('Command not found: {}'.format(name))
+
+        command = self.commands[name]
+        try:
+            cmd_args, cmd_kwargs = await command.local(*args, **kwargs)
+
+        except TypeError as ex:
+            raise
+
+        # return if nothing for remote todo
+        if not command.remote:
+            return
+
         msg = {
             'command': name,
-            'args': args,
-            'kwargs': kwargs,
+            'args': cmd_args,
+            'kwargs': cmd_kwargs,
         }
+
+        uid = uuid.uuid1().hex.encode()
         async with self.channel_out.message(uid) as send:
             await send(msg)
 
@@ -532,8 +554,15 @@ class Commander:
             logger.info("retrieved command: %s", message)
 
             # do something and return result
+            command = self.commands[message['command']]
+
+            cmd_args = message.get('args', [])
+            cmd_kwargs = message.get('kwargs', {})
+
+            result = await command.remote(*cmd_args, **cmd_kwargs)
+
             result = {
-                'foo': message
+                'foo': result
             }
 
             async with self.channel_out.message(uid) as send:
@@ -553,7 +582,14 @@ class Commander:
             else:
                 name = command_name
 
-            cls.commands[name] = func
+            cls.commands[name] = Command(name, local=func)
+
+            def remote_decorator(remote_func):
+                cls.commands[name] = Command(name, local=func, remote=remote_func)
+
+                return remote_func
+
+            func.remote = remote_decorator
 
             return func
 
@@ -561,8 +597,25 @@ class Commander:
 
 
 @Commander.command()
+async def import_plugin(plugin_name):
+    # we hope this gets never called on remote to early
+    from dbltr import utils
+
+    plugin = utils.load_plugins().get(plugin_name)
+
+    code = inspect.getsource(plugin)
+    module_name = plugin.__name__
+
+    return [code, module_name], {}
+
+
+@import_plugin.remote
 async def import_plugin(code, module_name):
-    pass
+    module = imp.new_module(module_name)
+    c = compile(code, "<string>", "exec")
+    exec(c, module.__dict__)
+
+    return True
 
 
 def get_compressor(compressor):
