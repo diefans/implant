@@ -61,7 +61,7 @@ setup(
     name="Debellator",
     author="Oliver Berger",
     author_email="diefans@gmail.com",
-    url="https://github.com/diefans/debellator",
+    url="https://github.com/diefans/dbltr",
     description='Remote execution via stdin/stdout messaging.',
     long_description=read('README.rst'),
     version=__version__,
@@ -73,7 +73,7 @@ setup(
     ],
     license='Apache License Version 2.0',
 
-    keywords="ssh RPC Remote execution dependency injection stdin stdout messaging",
+    keywords="asyncio ssh RPC Remote execution dependency injection stdin stdout messaging",
 
     package_dir={'': 'src'},
     namespace_packages=['dbltr'],
