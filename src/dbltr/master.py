@@ -27,9 +27,12 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
     """A unique representation of a Remote."""
 
     bootstrap = (
-        'import imp, base64, json; boot = imp.new_module("dbltr.msgr");'
+        'import sys, imp, base64, json;'
+        'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr");'
+        'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
+        'dbltr.__dict__["core"] = core;'
         'c = compile(base64.b64decode(b"{code}"), "<string>", "exec");'
-        'exec(c, boot.__dict__); boot.main(**boot.decode_options(b"{options}"));'
+        'exec(c, core.__dict__); core.main(**core.decode_options(b"{options}"));'
     )
 
     def __new__(cls, host=None, user=None, sudo=None):
@@ -257,7 +260,8 @@ def parse_command(line):
 
 
 async def feed_stdin_to_remotes(**options):
-    remote = await Remote.launch(code=core, loop=core.loop, options=options)
+    remote = await Remote.launch(code=core, python_bin='/home/olli/.pyenv/versions/3.5.2/bin/python',
+                                 loop=core.loop, options=options)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
     core.logger.info("fooo")

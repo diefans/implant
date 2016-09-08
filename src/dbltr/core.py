@@ -127,10 +127,6 @@ async def distribute_incomming_chunks(channels, pipe=sys.stdin):
             if line is b'':
                 break
 
-            logger.debug("line: %s", line)
-            # chunk = Chunk.decode(line)
-            # logger.debug('Chunk received: %s', chunk)
-
             await channels.distribute(line)
 
 
@@ -315,7 +311,7 @@ class ChunkChannel:
 
         try:
             chunk = Chunk.decode(line, compressor=self.compressor)
-            logger.debug('Chunk received at %s: %s', self, chunk)
+            # logger.debug('Chunk received at %s: %s', self, chunk)
             return chunk.uid, chunk
 
         finally:
@@ -437,7 +433,7 @@ class Channels:
         self.default = self[DEFAULT_CHANNEL_NAME]
 
     async def __call__(self, queue):
-        logger.info("Starting channel distribution...")
+        # logger.info("Starting channel distribution...")
         channel = ChunkChannel(queue=queue, loop=self._loop)
 
         async for uid, chunk in channel:
@@ -452,7 +448,7 @@ class Channels:
             logger.error('Channel `%s` not found for Chunk %s', channel, chunk)
 
         await self._channels[channel].inject_chunk(chunk)
-        logger.info("Chunk %s distributed to Channel `%s`", chunk, channel)
+        # logger.info("Chunk %s distributed to Channel `%s`", chunk, channel)
 
     def __getitem__(self, channel_name):
         try:
@@ -469,7 +465,7 @@ class Channels:
 
     def __delitem__(self, channel_name):
         try:
-            logger.info('Removing channel `%s`', channel_name)
+            # logger.info('Removing channel `%s`', channel_name)
             del self._channels[channel_name]
 
         except KeyError:
@@ -484,7 +480,16 @@ class Command(namedtuple('Command', ('name', 'local', 'remote'))):
         return super(Command, cls).__new__(cls, name, local, remote)
 
 
-class Commander:
+class MetaCommander(type):
+    def __new__(mcs, name, bases, dct):
+        cls = type.__new__(mcs, name, bases, dct)
+
+        logger.debug("\n\nCreate %s(%s) in %s", name, id(cls), __package__)
+
+        return cls
+
+
+class Commander(metaclass=MetaCommander):
 
     """
     Execute specific messages/commands
@@ -548,7 +553,7 @@ class Commander:
     async def receive(self):
         """The remote part of execute method."""
 
-        logger.info("Retrieving commands...")
+        # logger.info("Retrieving commands...")
 
         async for uid, message in self.channel_in:
             logger.info("retrieved command: %s", message)
@@ -630,12 +635,12 @@ def get_compressor(compressor):
     if compressor in ('gzip', 'lzma'):
         try:
             compressor = __import__(compressor)
-            logger.info("Using compression: %s", compressor)
+            # logger.info("Using compression: %s", compressor)
             return compressor
 
         except ImportError:
             import traceback
-            logger.error('Importing compressor failed: %s', traceback.format_exc())
+            # logger.error('Importing compressor failed: %s', traceback.format_exc())
 
     return False
 
@@ -649,6 +654,9 @@ def main(compressor=False, **kwargs):
     channel_out = JsonChannel(channels.default.name, queue=queue_out, compressor=compressor)
 
     commander = Commander(channel_out, channels.default, loop=loop)
+
+    for module in sorted(sys.modules):
+        logger.debug("\t\t--> %s", module)
 
     try:
         loop.run_until_complete(
