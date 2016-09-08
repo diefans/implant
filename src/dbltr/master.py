@@ -11,7 +11,7 @@ import inspect
 
 from collections import namedtuple
 
-from dbltr import core, utils
+from dbltr import core, utils, plugins
 
 from logging import StreamHandler
 
@@ -257,8 +257,6 @@ def parse_command(line):
 
 
 async def feed_stdin_to_remotes(**options):
-    plugins = utils.load_plugins()
-
     remote = await Remote.launch(code=core, loop=core.loop, options=options)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)

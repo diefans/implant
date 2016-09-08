@@ -1,4 +1,3 @@
-import pkg_resources
 from functools import update_wrapper, lru_cache
 
 
@@ -44,16 +43,3 @@ class reify(object):
         val = self.wrapped(inst)
         setattr(inst, self.wrapped.__name__, val)
         return val
-
-
-PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
-
-
-@lru_cache(maxsize=1)
-def load_plugins():
-    """:return a dict of all registered plugins."""
-
-    return {
-        '#'.join((entry_point.dist.project_name, entry_point.name)): entry_point.load()
-        for entry_point in pkg_resources.iter_entry_points(group=PLUGINS_ENTRY_POINT_GROUP, name=None)
-    }

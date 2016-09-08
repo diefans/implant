@@ -5,6 +5,9 @@ Core features
 from dbltr import core
 
 
+core.logger.debug("core: %s, commands: %s", id(core.Commander), core.Commander.commands)
+
+
 # some misc commands
 @core.Commander.command()
 async def echo(*args, **kwargs):
@@ -23,5 +26,6 @@ async def echo(*args, **kwargs):
 
 # provide all control structures
 # sequence, choice, if, loop
+core.logger.debug("core: %s, commands: %s", id(core.Commander), core.Commander.commands)
 
 core.logger.info('...core plugins loaded')

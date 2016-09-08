@@ -582,6 +582,8 @@ class Commander:
             else:
                 name = command_name
 
+            logger.debug("\t%s, new command: %s", id(cls), name)
+
             cls.commands[name] = Command(name, local=func)
 
             def remote_decorator(remote_func):
@@ -599,12 +601,12 @@ class Commander:
 @Commander.command()
 async def import_plugin(plugin_name):
     # we hope this gets never called on remote to early
-    from dbltr import utils
+    from dbltr import plugins
 
-    plugin = utils.load_plugins().get(plugin_name)
+    plugin = plugins.Plugin[plugin_name]
 
-    code = inspect.getsource(plugin)
-    module_name = plugin.__name__
+    code = inspect.getsource(plugin.module)
+    module_name = plugin.module.__name__
 
     return [code, module_name], {}
 
@@ -615,7 +617,13 @@ async def import_plugin(code, module_name):
     c = compile(code, "<string>", "exec")
     exec(c, module.__dict__)
 
-    return True
+    # collect commands
+    logger.debug("--> %s, commands: %s", id(Commander), Commander.commands)
+    commands = list(Commander.commands.keys())
+
+    return {
+        'commands': commands
+    }
 
 
 def get_compressor(compressor):
