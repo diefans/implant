@@ -12,6 +12,7 @@ import base64
 import json
 import uuid
 from collections import namedtuple, defaultdict
+import contextlib
 import logging
 
 
@@ -300,7 +301,9 @@ class ChunkChannel:
 
         self.futures = {}
         """Register a message uid to be a resolvable future.
-        If that uid is received the futures result will be set
+        If that uid is received the futures result will be set.
+
+        For this to work a task must iterate the channel.
         """
 
     async def __aiter__(self):
@@ -311,27 +314,20 @@ class ChunkChannel:
 
         # trigger waiting futures
         if uid in self.futures:
-            await self.futures[uid].set_result(data)
+            self.futures[uid].set_result(data)
 
         return uid, data
 
-    async def waiting_for(self, uid):
+    @contextlib.contextmanager
+    def waiting_for(self, uid):
         """Create a context with a future to wait for."""
         # TODO XXX does this make only sense for complete (json) messages?
 
         self.futures[uid] = future = asyncio.Future(loop=self._loop)
 
-        def _clean():
-            del self.futures[uid]
+        yield future
 
-        class _waiting_for:
-            async def __aenter__(self):
-                return future
-
-            async def __aexit__(self, ex_type, value, tb):
-                _clean()
-
-        return _waiting_for()
+        del self.futures[uid]
 
     async def data_received(self):
         """:returns: a tuple (uid, chunk) from the queue of this channel."""
@@ -551,15 +547,11 @@ class Commander(metaclass=MetaCommander):
         self.channel_out = channel_out
         self.channel_in = channel_in
 
-        # collect finished commands
-        self._commands_pending = defaultdict(lambda: asyncio.Future(loop=self._loop))
-
     async def resolve_pending(self):
         """Completes all RPC style commands by resolving a future per message uid."""
 
-        async for uid, message in self.channel_in:
-            future = self._commands_pending[uid]
-            future.set_result(message)
+        async for _ in self.channel_in:
+            pass
 
     async def execute(self, name, *args, **kwargs):
         """Send a command to channel_out and wait for returing a result at channel_in."""
@@ -568,33 +560,36 @@ class Commander(metaclass=MetaCommander):
             raise KeyError('Command not found: {}'.format(name))
 
         command = self.commands[name]
+        partial_command = functools.partial(self.rpc, command)
+
         try:
-            cmd_args, cmd_kwargs = await command.local(*args, **kwargs)
+            result = await command.local(partial_command, *args, **kwargs)
+
+            return result
 
         except TypeError as ex:
             raise
 
+    async def rpc(self, command, *args, **kwargs):
         # return if nothing for remote todo
         if not command.remote:
             return
 
         msg = {
-            'command': name,
-            'args': cmd_args,
-            'kwargs': cmd_kwargs,
+            'command': command.name,
+            'args': args,
+            'kwargs': kwargs,
         }
 
         uid = uuid.uuid1().hex.encode()
-        async with self.channel_out.message(uid) as send:
-            await send(msg)
 
-        try:
-            result = await self._commands_pending[uid]
+        with self.channel_in.waiting_for(uid) as future:
+            async with self.channel_out.message(uid) as send:
+                await send(msg)
+
+            result = await future
             logger.info("result: %s", result)
             return result
-
-        finally:
-            del self._commands_pending[uid]
 
     async def receive(self):
         """The remote part of execute method."""
@@ -650,7 +645,7 @@ class Commander(metaclass=MetaCommander):
 
 
 @Commander.command()
-async def import_plugin(plugin_name):
+async def import_plugin(cmd, plugin_name):
     # we hope this gets never called on remote to early
     from dbltr import plugins
 
@@ -659,7 +654,9 @@ async def import_plugin(plugin_name):
     code = inspect.getsource(plugin.module)
     module_name = plugin.module.__name__
 
-    return [code, module_name], {}
+    result = await cmd(code, module_name)
+
+    return result
 
 
 @import_plugin.remote
