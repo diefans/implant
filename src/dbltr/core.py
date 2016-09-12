@@ -298,11 +298,40 @@ class ChunkChannel:
 
         self.compressor = compressor
 
+        self.futures = {}
+        """Register a message uid to be a resolvable future.
+        If that uid is received the futures result will be set
+        """
+
     async def __aiter__(self):
         return self
 
     async def __anext__(self):
-        return await self.data_received()
+        uid, data = await self.data_received()
+
+        # trigger waiting futures
+        if uid in self.futures:
+            await self.futures[uid].set_result(data)
+
+        return uid, data
+
+    async def waiting_for(self, uid):
+        """Create a context with a future to wait for."""
+        # TODO XXX does this make only sense for complete (json) messages?
+
+        self.futures[uid] = future = asyncio.Future(loop=self._loop)
+
+        def _clean():
+            del self.futures[uid]
+
+        class _waiting_for:
+            async def __aenter__(self):
+                return future
+
+            async def __aexit__(self, ex_type, value, tb):
+                _clean()
+
+        return _waiting_for()
 
     async def data_received(self):
         """:returns: a tuple (uid, chunk) from the queue of this channel."""
@@ -312,6 +341,7 @@ class ChunkChannel:
         try:
             chunk = Chunk.decode(line, compressor=self.compressor)
             # logger.debug('Chunk received at %s: %s', self, chunk)
+
             return chunk.uid, chunk
 
         finally:
@@ -356,14 +386,14 @@ def split_data(data, size=1024):
         start = end
 
 
-class JsonChannel(ChunkChannel):
+class EncodedBufferChannel(ChunkChannel):
 
-    """Buffers chunks, combines them and tries to json-decode them."""
+    """Buffers chunks, combines them and tries to decode them."""
 
     def __init__(self, *args, **kwargs):
-        super(JsonChannel, self).__init__(*args, **kwargs)
+        super(EncodedBufferChannel, self).__init__(*args, **kwargs)
 
-        # holds message parts until json is complete
+        # holds message parts until decoding is complete
         self.buffer = {}
 
     async def data_received(self):
@@ -371,36 +401,41 @@ class JsonChannel(ChunkChannel):
 
         while True:
             # wait for the next data
-            uid, chunk = await super(JsonChannel, self).data_received()
+            uid, chunk = await super(EncodedBufferChannel, self).data_received()
 
             # create buffer if uid is new
             if uid not in self.buffer:
                 self.buffer[uid] = bytearray()
 
-            # message completed -> return json decoded chunks
+            # message completed -> return decoded chunks
             if chunk.is_eom:
-                return uid, self._pop_json_from_buffer(uid)
+                return uid, self._pop_from_buffer(uid)
 
             # append data to buffer
             self.buffer[uid].extend(chunk.data)
 
-    def _pop_json_from_buffer(self, uid):
+    def _pop_from_buffer(self, uid):
         try:
-            data = json.loads(self.buffer[uid].decode())
-
+            data = self.decode(self.buffer[uid].decode())
             return data
 
         finally:
             del self.buffer[uid]
+
+    def decode(self, data):
+        return data
+
+    def encode(self, data):
+        return data
 
     async def send(self, data, *, uid=None):
 
         if isinstance(data, Chunk):
             data = data.data
 
-        json_data = json.dumps(data).encode()
+        encoded_data = self.encode(data).encode()
 
-        await super(JsonChannel, self).send(json_data, uid=uid)
+        await super(EncodedBufferChannel, self).send(encoded_data, uid=uid)
 
     def message(self, uid=None):
         class _context:
@@ -415,6 +450,17 @@ class JsonChannel(ChunkChannel):
                 await self.channel.send_eom(uid=uid)
 
         return _context(self)
+
+
+class JsonChannel(EncodedBufferChannel):
+
+    def decode(self, data):
+        data = json.loads(data)
+        return data
+
+    def encode(self, data):
+        data = json.dumps(data)
+        return data
 
 
 class Channels:
@@ -508,7 +554,7 @@ class Commander(metaclass=MetaCommander):
         # collect finished commands
         self._commands_pending = defaultdict(lambda: asyncio.Future(loop=self._loop))
 
-    async def __call__(self):
+    async def resolve_pending(self):
         """Completes all RPC style commands by resolving a future per message uid."""
 
         async for uid, message in self.channel_in:

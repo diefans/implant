@@ -1,5 +1,6 @@
 """Controlles a bunch of remotes."""
 
+import os
 import sys
 import asyncio
 import shlex
@@ -89,9 +90,6 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     """
     Embodies a remote python process.
     """
-
-    targets = {}
-    """caches all remotes."""
 
     def __init__(self, *, loop=None, compressor=False, **options):
         if loop is None:
@@ -222,7 +220,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             asyncio.ensure_future(self._connect_stdin()),
             asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
-            asyncio.ensure_future(self._commander()),
+            asyncio.ensure_future(self._commander.resolve_pending()),
             loop=self._loop
         )
 
@@ -260,7 +258,7 @@ def parse_command(line):
 
 
 async def feed_stdin_to_remotes(**options):
-    remote = await Remote.launch(code=core, python_bin='/home/olli/.pyenv/versions/3.5.2/bin/python',
+    remote = await Remote.launch(code=core, python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
                                  loop=core.loop, options=options)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
