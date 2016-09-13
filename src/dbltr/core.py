@@ -158,6 +158,7 @@ class Messenger:
                     future.result()
 
                 except Exception as ex:
+                    # delegate tsk error to running future to signal exit
                     # logger.error(traceback.format_exc())
                     running.set_exception(ex)
 
@@ -551,6 +552,7 @@ class Commander(metaclass=MetaCommander):
         """Completes all RPC style commands by resolving a future per message uid."""
 
         async for _ in self.channel_in:
+            # XXX TODO log incomming?
             pass
 
     async def execute(self, name, *args, **kwargs):
@@ -591,16 +593,17 @@ class Commander(metaclass=MetaCommander):
             logger.info("result: %s", result)
             return result
 
-    async def receive(self):
+    @classmethod
+    async def receive(cls, channel_in, channel_out):
         """The remote part of execute method."""
 
         # logger.info("Retrieving commands...")
 
-        async for uid, message in self.channel_in:
+        async for uid, message in channel_in:
             logger.info("retrieved command: %s", message)
 
             # do something and return result
-            command = self.commands[message['command']]
+            command = cls.commands[message['command']]
 
             cmd_args = message.get('args', [])
             cmd_kwargs = message.get('kwargs', {})
@@ -611,7 +614,7 @@ class Commander(metaclass=MetaCommander):
                 'foo': result
             }
 
-            async with self.channel_out.message(uid) as send:
+            async with channel_out.message(uid) as send:
                 await send(result)
 
     @classmethod
@@ -674,6 +677,11 @@ async def import_plugin(code, module_name):
     }
 
 
+async def copy_large_file(*args, src=None, dest=None, **kwargs):
+    pass
+
+
+
 def get_compressor(compressor):
     if compressor in ('gzip', 'lzma'):
         try:
@@ -692,11 +700,11 @@ def main(compressor=False, **kwargs):
 
     messenger = Messenger(loop)
 
+    # TODO channels must somehow connected with commands
     channels = Channels(loop=loop, compressor=compressor)
+
     queue_out = asyncio.Queue(loop=loop)
     channel_out = JsonChannel(channels.default.name, queue=queue_out, compressor=compressor)
-
-    commander = Commander(channel_out, channels.default, loop=loop)
 
     for module in sorted(sys.modules):
         logger.debug("\t\t--> %s", module)
@@ -706,7 +714,7 @@ def main(compressor=False, **kwargs):
             messenger.run(
                 send_outgoing_queue(queue_out, sys.stdout),
                 distribute_incomming_chunks(channels, sys.stdin),
-                commander.receive()
+                Commander.receive(channels.default, channel_out),
             )
         )
 
