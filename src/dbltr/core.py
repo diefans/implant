@@ -194,7 +194,11 @@ DEFAULT_CHANNEL_NAME = b''
 
 class Chunk:
 
-    """We split messages into chunks to allow parallel communication of messages."""
+    """
+    Abstracts the format of the wire data.
+
+    We split messages into chunks to allow parallel communication of messages.
+    """
 
     separator = b'|'
 
@@ -475,13 +479,6 @@ class Channels:
 
         self.default = self[DEFAULT_CHANNEL_NAME]
 
-    async def __call__(self, queue):
-        # logger.info("Starting channel distribution...")
-        channel = ChunkChannel(queue=queue, loop=self._loop)
-
-        async for uid, chunk in channel:
-            await self.distribute(chunk)
-
     async def distribute(self, chunk):
         if isinstance(chunk, bytes):
             chunk = Chunk.decode(chunk, compressor=self.compressor)
@@ -523,16 +520,7 @@ class Command(namedtuple('Command', ('name', 'local', 'remote'))):
         return super(Command, cls).__new__(cls, name, local, remote)
 
 
-class MetaCommander(type):
-    def __new__(mcs, name, bases, dct):
-        cls = type.__new__(mcs, name, bases, dct)
-
-        logger.debug("\n\nCreate %s(%s) in %s", name, id(cls), __package__)
-
-        return cls
-
-
-class Commander(metaclass=MetaCommander):
+class Commander:
 
     """
     Execute specific messages/commands
@@ -677,9 +665,12 @@ async def import_plugin(code, module_name):
     }
 
 
-async def copy_large_file(*args, src=None, dest=None, **kwargs):
+async def copy_large_file(channel_out, *args, src=None, dest=None, **kwargs):
     pass
 
+
+async def copy_large_file_remote(channel_in, *args, src=None, dest=None, **kwargs):
+    pass
 
 
 def get_compressor(compressor):
@@ -690,7 +681,7 @@ def get_compressor(compressor):
             return compressor
 
         except ImportError:
-            import traceback
+            pass
             # logger.error('Importing compressor failed: %s', traceback.format_exc())
 
     return False
