@@ -9,6 +9,7 @@ import types
 import functools
 import concurrent.futures
 import inspect
+import lzma
 
 from collections import namedtuple
 
@@ -28,13 +29,14 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
     """A unique representation of a Remote."""
 
     bootstrap = (
-        'import sys, imp, base64, json;'
+        'import sys, imp, base64, json, lzma;'
         'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr");'
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'
-        'c = compile(base64.b64decode(b"{code}"), "<string>", "exec");'
+        'c = compile(lzma.decompress(base64.b64decode(b"{code}")), "<string>", "exec");'
         'exec(c, core.__dict__); core.main(**core.decode_options(b"{options}"));'
     )
+    """Bootstrapping of core module on remote."""
 
     def __new__(cls, host=None, user=None, sudo=None):
         return super(Target, cls).__new__(cls, host, user, sudo)
@@ -76,7 +78,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
                 bootstrap = self.bootstrap
 
             yield bootstrap.format(
-                code=base64.b64encode(code).decode(),
+                code=base64.b64encode(lzma.compress(code)).decode(),
                 options=core.encode_options(**options),
             )
 
