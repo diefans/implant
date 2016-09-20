@@ -2,7 +2,6 @@
 Remote process
 """
 import pkg_resources
-import imp
 import inspect
 import sys
 import asyncio
@@ -13,7 +12,8 @@ import base64
 import json
 import uuid
 import types
-from collections import namedtuple, defaultdict
+import gzip
+import lzma
 import contextlib
 import logging
 
@@ -23,7 +23,7 @@ pkg_environment = pkg_resources.Environment()
 
 logging.basicConfig(level='DEBUG')
 logger = logging.getLogger(__name__)
-logger.info('\n%s', '\n'.join(['*'* 80] * 3))
+logger.info('\n%s', '\n'.join(['*' * 80] * 3))
 
 
 def log(_msg, **kwargs):
@@ -208,7 +208,10 @@ class Chunk:
 
     separator = b'|'
 
-    compressor = {}
+    compressor = {
+        'gzip': gzip,
+        'lzma': lzma
+    }
 
     def __init__(self, data=None, *, channel=None, uid=None):
         self.data = data
@@ -216,9 +219,7 @@ class Chunk:
         self.uid = uid
 
     @classmethod
-    def decode(cls, raw, *, compressor=False):
-        """Decodes a bytes string with or without ending \n into a Chunk."""
-
+    def view(cls, raw):
         raw_view = memoryview(raw)
 
         # split raw data at separators
@@ -243,9 +244,17 @@ class Chunk:
         compressor_view = raw_view[uid_end + 1:compressor_end]
         data_view = raw_view[compressor_end + 1:raw_end]
 
+        return channel_view, uid_view, compressor_view, data_view
+
+    @classmethod
+    def decode(cls, raw):
+        """Decodes a bytes string with or without ending \n into a Chunk."""
+
+        channel_view, uid_view, compressor_view, data_view = cls.view(raw)
+
         data = base64.b64decode(data_view)
-        if compressor:
-            data = compressor.decompress(data)
+        if compressor_view.tobytes().decode() in cls.compressor:
+            data = cls.compressor[compressor_view.tobytes().decode()].decompress(data)
 
         return cls(data, channel=channel_view.tobytes(), uid=uid_view.tobytes())
 
@@ -257,12 +266,12 @@ class Chunk:
             yield self.separator
             yield self.uid or b''
             yield self.separator
-            yield b'gzip'
+            yield compressor and compressor.encode() or b''
             yield self.separator
 
             data = self.data or b''
-            if compressor:
-                data = compressor.compress(data)
+            if compressor in self.compressor:
+                data = self.compressor[compressor].compress(data)
             yield base64.b64encode(data)
 
             if eol:
@@ -310,9 +319,6 @@ class ChunkChannel:
         self._loop = loop or asyncio.get_event_loop()
         self.queue = queue or asyncio.Queue(loop=loop)
 
-        if isinstance(compressor, str):
-            compressor = get_compressor(compressor)
-
         self.compressor = compressor
 
         self.futures = {}
@@ -351,7 +357,7 @@ class ChunkChannel:
         line = await self.queue.get()
 
         try:
-            chunk = Chunk.decode(line, compressor=self.compressor)
+            chunk = Chunk.decode(line)
             # logger.debug('Chunk received at %s: %s', self, chunk)
 
             return chunk.uid, chunk
@@ -359,12 +365,15 @@ class ChunkChannel:
         finally:
             self.queue.task_done()
 
-    async def inject_chunk(self, chunk):
+    async def forward(self, line):
+        await self.queue.put(line)
+
+    async def inject_chunk(self, chunk, compressor=False):
         """Allows forwarding of a chunk as is into the queue."""
 
-        await self.queue.put(chunk.encode(compressor=self.compressor))
+        await self.queue.put(chunk.encode(compressor=compressor))
 
-    async def send(self, data, *, uid=None):
+    async def send(self, data, *, uid=None, compressor=False):
         """Create a chunk from data and uid and send it to the queue of this channel."""
 
         if isinstance(data, Chunk):
@@ -373,14 +382,14 @@ class ChunkChannel:
         for part in split_data(data, self.max_size):
             chunk = Chunk(part, channel=self.name, uid=uid)
 
-            await self.inject_chunk(chunk)
+            await self.inject_chunk(chunk, compressor=compressor)
 
     async def send_eom(self, *, uid=None):
         """Send EOM (end of message) to the queue."""
 
         chunk = Chunk(None, channel=self.name, uid=uid)
 
-        await self.queue.put(chunk.encode(compressor=self.compressor))
+        await self.queue.put(chunk.encode(compressor=False))
 
 
 def split_data(data, size=1024):
@@ -440,14 +449,14 @@ class EncodedBufferChannel(ChunkChannel):
     def encode(self, data):
         return data
 
-    async def send(self, data, *, uid=None):
+    async def send(self, data, *, uid=None, compressor=False):
 
         if isinstance(data, Chunk):
             data = data.data
 
         encoded_data = self.encode(data).encode()
 
-        await super(EncodedBufferChannel, self).send(encoded_data, uid=uid)
+        await super(EncodedBufferChannel, self).send(encoded_data, uid=uid, compressor=compressor)
 
     def message(self, uid=None):
         class _context:
@@ -483,22 +492,19 @@ class Channels:
 
     def __init__(self, *, loop=None, compressor=False):
         self._loop = loop or asyncio.get_event_loop()
-        self.compressor = get_compressor(compressor)
 
         self._channels = {}
-        self.add_channel(JsonChannel(loop=self._loop, compressor=self.compressor))
+        self.add_channel(JsonChannel(loop=self._loop, compressor=compressor))
 
         self.default = self[DEFAULT_CHANNEL_NAME]
 
-    async def distribute(self, chunk):
-        if isinstance(chunk, bytes):
-            chunk = Chunk.decode(chunk, compressor=self.compressor)
+    async def distribute(self, line):
+        channel, *_ = Chunk.view(line)
 
-        channel = chunk.channel
         if channel not in self._channels:
-            logger.error('Channel `%s` not found for Chunk %s', channel, chunk)
+            logger.error('Channel `%s` not found for Chunk', channel)
 
-        await self._channels[channel].inject_chunk(chunk)
+        await self._channels[channel].forward(line)
         # logger.info("Chunk %s distributed to Channel `%s`", chunk, channel)
 
     def __getitem__(self, channel_name):
@@ -598,7 +604,7 @@ class Commander:
 
         with self.channel_in.waiting_for(uid) as future:
             async with self.channel_out.message(uid) as send:
-                await send(msg)
+                await send(msg, compressor='gzip')
 
             result = await future
             logger.info("result: %s", result)
@@ -626,7 +632,7 @@ class Commander:
             }
 
             async with channel_out.message(uid) as send:
-                await send(result)
+                await send(result, compressor='gzip')
 
     @classmethod
     def command(cls, name=None):
@@ -828,7 +834,6 @@ class Plugin(metaclass=MetaPlugin):
                 await channels.distribute(line)
 
 
-
 @Commander.command()
 async def import_plugin(cmd, plugin_name):
     plugin = Plugin[plugin_name]
@@ -866,24 +871,9 @@ async def copy_large_file_remote(channel_in, *args, src=None, dest=None, **kwarg
     pass
 
 
-def get_compressor(compressor):
-    if compressor in ('gzip', 'lzma'):
-        try:
-            compressor = __import__(compressor)
-            # logger.info("Using compression: %s", compressor)
-            return compressor
-
-        except ImportError:
-            pass
-            # logger.error('Importing compressor failed: %s', traceback.format_exc())
-
-    return False
-
-
 def main(compressor=False, **kwargs):
 
     messenger = Messenger(loop)
-
 
     # TODO channels must somehow connected with commands
     channels = Channels(loop=loop, compressor=compressor)

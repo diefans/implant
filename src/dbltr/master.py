@@ -99,7 +99,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         super(Remote, self).__init__(limit=asyncio.streams._DEFAULT_LIMIT, loop=loop)
 
-        self.compressor = core.get_compressor(compressor)
+        self.compressor = compressor
 
         self.queue_in = asyncio.Queue(loop=self._loop)
         self.queue_out = asyncio.Queue(loop=self._loop)
@@ -205,10 +205,9 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         """Collect messages from remote in stdout queue."""
 
         async for line in self.stdout:
-            chunk = core.Chunk.decode(line, compressor=self.compressor)
-            log("remote stdout", pid=self.pid, chunk=chunk, data=chunk.data)
+            log("remote stdout", pid=self.pid, line=line)
 
-            await self.channels.distribute(chunk)
+            await self.channels.distribute(line)
 
     async def _connect_stderr(self):
         """Collect error messages from remote in stderr queue."""
