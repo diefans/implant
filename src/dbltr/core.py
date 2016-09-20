@@ -541,9 +541,8 @@ class Command:
         self.local = local
         self.remote = remote
         self.plugin = plugin
-
-        # XXX
-        self.queue = asyncio.Queue()
+        self.queues = {}
+        """holds all chunks per message uid"""
 
     async def execute(self, *args, **kwargs):
         pass
@@ -683,7 +682,7 @@ def create_module(module_name, is_package=False):
         package_name, _, _ = module_name.rpartition('.')
 
         if package_name:
-            package = create_module(package_name, is_package=True)
+            create_module(package_name, is_package=True)
 
         module = types.ModuleType(module_name)
         module.__file__ = '<memory>'
@@ -708,8 +707,6 @@ class MetaPlugin(type):
     plugins = {}
 
     def __new__(mcs, name, bases, dct):
-        print("new Plugin", mcs, name, bases, dct)
-
         cls = type.__new__(mcs, name, bases, dct)
 
         cls.scan_entry_points()
@@ -731,15 +728,29 @@ class MetaPlugin(type):
         cls.plugins[plugin.module_name] = cls.plugins[plugin.name] = plugin
 
     def __getitem__(cls, name):
-        return cls.plugins[name]
+        plugin_name, _, command_name = name.partition(':')
+        plugin = cls.plugins[plugin_name]
 
-    def __setitem__(cls, name, plugin):
-        assert isinstance(name, cls)
+        if not command_name:
+            return plugin
 
-        cls.plugins[name] = plugin
+        command = plugin.commands[command_name]
+        return command
 
-    def __delitem__(cls, name):
-        del cls.plugins[name]
+    def __contains__(cls, name):
+        try:
+            cls[name]
+            return True
+
+        except KeyError:
+            return False
+
+    def get(cls, name, default=None):
+        try:
+            return cls[name]
+
+        except KeyError:
+            return default
 
 
 class Plugin(metaclass=MetaPlugin):
@@ -762,14 +773,14 @@ class Plugin(metaclass=MetaPlugin):
 
     @classmethod
     def create_from_entry_point(cls, entry_point):
-
         plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
 
         return plugin
 
     @classmethod
-    def create_from_code(cls, code, project_name, entry_point_name, module_name):
-        dist = pkg_resources.Distribution(project_name=project_name)
+    def create_from_code(cls, code, project_name, entry_point_name, module_name, version='0.0.0'):
+        dist = pkg_resources.Distribution(project_name=project_name, version=version)
+        dist.activate()
         pkg_environment.add(dist)
         entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
 
@@ -822,7 +833,7 @@ class Plugin(metaclass=MetaPlugin):
         return "<Plugin: {}>".format(', '.join(self.commands.keys()))
 
     @classmethod
-    async def distribute_incomming_chunks(cls, pipe=sys.stdin):
+    async def distribute_incomming_chunks(cls, channels, pipe=sys.stdin):
         """Distribute all chunks from stdin to channels."""
 
         async with Incomming(pipe=pipe) as reader:
@@ -831,7 +842,19 @@ class Plugin(metaclass=MetaPlugin):
                 if line is b'':
                     break
 
+                channel, uid, compressor, data = Chunk.view(line)
+
                 await channels.distribute(line)
+
+
+@Plugin.command()
+async def command(queue_out, command, *args, **kwargs):
+    pass
+
+
+@command.remote
+async def command(queue_in, queue_out, command, *args, **kwargs):
+    pass
 
 
 @Commander.command()
@@ -862,6 +885,18 @@ async def import_plugin(code, project_name, entry_point_name, module_name):
         'plugins': list(Plugin.plugins.keys())
     }
 
+
+@Plugin.command()
+async def echo(cmd, *args, **kwargs):
+    return await cmd(*args, **kwargs)
+
+
+@echo.remote
+async def echo(*args, **kwargs):
+    return {
+        'args': args,
+        'kwargs': kwargs
+    }
 
 async def copy_large_file(channel_out, *args, src=None, dest=None, **kwargs):
     pass
