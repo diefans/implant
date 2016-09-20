@@ -17,7 +17,8 @@ class MetaPlugin(type):
         # scan for available plugins
         for entry_point in pkg_resources.iter_entry_points(group=PLUGINS_ENTRY_POINT_GROUP):
             plugin = cls(entry_point)
-            mcs.plugins[plugin.name] = plugin
+            # we index entry_points and module names
+            mcs.plugins[plugin.module_name] = mcs.plugins[plugin.name] = plugin
 
         return cls
 
@@ -37,10 +38,13 @@ class Plugin(metaclass=MetaPlugin):
 
     """A plugin module introduced via entry point."""
 
+    commands = {}
+    """A map of commands the plugin provides."""
+
     def __init__(self, entry_point):
         self.entry_point = entry_point
-
-        self.name = '#'.join((self.entry_point.dist.project_name, self.entry_point.name))
+        self.module_name = self.entry_point.module_name
+        self.name = '#'.join((self.entry_point.dist.key, self.entry_point.name))
 
     @utils.reify
     def module(self):

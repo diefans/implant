@@ -1,6 +1,7 @@
 """
 Remote process
 """
+import pkg_resources
 import imp
 import inspect
 import sys
@@ -11,13 +12,18 @@ import os
 import base64
 import json
 import uuid
+import types
 from collections import namedtuple, defaultdict
 import contextlib
 import logging
 
 
+pkg_environment = pkg_resources.Environment()
+
+
 logging.basicConfig(level='DEBUG')
 logger = logging.getLogger(__name__)
+logger.info('\n%s', '\n'.join(['*'* 80] * 3))
 
 
 def log(_msg, **kwargs):
@@ -515,9 +521,21 @@ class Channels:
         self[channel.name] = channel
 
 
-class Command(namedtuple('Command', ('name', 'local', 'remote'))):
-    def __new__(cls, name, local=None, remote=None):
-        return super(Command, cls).__new__(cls, name, local, remote)
+class Command:
+
+    """Execution context for all plugin commands"""
+
+    def __init__(self, name, local=None, remote=None, plugin=None):
+        self.name = name
+        self.local = local
+        self.remote = remote
+        self.plugin = plugin
+
+        # XXX
+        self.queue = asyncio.Queue()
+
+    async def execute(self, *args, **kwargs):
+        pass
 
 
 class Commander:
@@ -544,7 +562,7 @@ class Commander:
             pass
 
     async def execute(self, name, *args, **kwargs):
-        """Send a command to channel_out and wait for returing a result at channel_in."""
+        """Send a command to channel_out and wait for returning a result at channel_in."""
 
         if name not in self.commands:
             raise KeyError('Command not found: {}'.format(name))
@@ -609,6 +627,7 @@ class Commander:
     def command(cls, name=None):
         """Decorates a command."""
 
+        # from pdb import set_trace; set_trace()       # XXX BREAKPOINT
         command_name = name
 
         def decorator(func):
@@ -635,33 +654,205 @@ class Commander:
         return decorator
 
 
+######################################################################################
+class reify:
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        functools.update_wrapper(self, wrapped)
+
+    def __get__(self, inst, objtype=None):
+        if inst is None:
+            return self
+        val = self.wrapped(inst)
+        setattr(inst, self.wrapped.__name__, val)
+        return val
+
+
+def create_module(module_name, is_package=False):
+    if module_name not in sys.modules:
+        package_name, _, _ = module_name.rpartition('.')
+
+        if package_name:
+            package = create_module(package_name, is_package=True)
+
+        module = types.ModuleType(module_name)
+        module.__file__ = '<memory>'
+
+        if is_package:
+            module.__package__ = module_name
+            module.__path__ = []
+
+        else:
+            module.__package__ = package_name
+
+        sys.modules[module_name] = module
+
+    return sys.modules[module_name]
+
+
+PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
+
+
+class MetaPlugin(type):
+
+    plugins = {}
+
+    def __new__(mcs, name, bases, dct):
+        print("new Plugin", mcs, name, bases, dct)
+
+        cls = type.__new__(mcs, name, bases, dct)
+
+        cls.scan_entry_points()
+
+        # add this module as default
+        cls.add(cls(__name__))
+
+        return cls
+
+    def scan_entry_points(cls):
+        # scan for available plugins
+        for entry_point in pkg_resources.iter_entry_points(group=PLUGINS_ENTRY_POINT_GROUP):
+            plugin = cls.create_from_entry_point(entry_point)
+            # we index entry_points and module names
+            cls.add(plugin)
+            # mcs.plugins[plugin.module_name] = mcs.plugins[plugin.name] = plugin
+
+    def add(cls, plugin):
+        cls.plugins[plugin.module_name] = cls.plugins[plugin.name] = plugin
+
+    def __getitem__(cls, name):
+        return cls.plugins[name]
+
+    def __setitem__(cls, name, plugin):
+        assert isinstance(name, cls)
+
+        cls.plugins[name] = plugin
+
+    def __delitem__(cls, name):
+        del cls.plugins[name]
+
+
+class Plugin(metaclass=MetaPlugin):
+
+    """A plugin module introduced via entry point."""
+
+    def __init__(self, module_name, name=None):
+        self.module_name = module_name
+        self.name = name or module_name
+
+        self.commands = {}
+        """A map of commands the plugin provides."""
+
+    @reify
+    def module(self):
+        """On demand module loading."""
+
+        return __import__(self.module_name, fromlist=[''])
+        # return self.entry_point.load()
+
+    @classmethod
+    def create_from_entry_point(cls, entry_point):
+
+        plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
+
+        return plugin
+
+    @classmethod
+    def create_from_code(cls, code, project_name, entry_point_name, module_name):
+        dist = pkg_resources.Distribution(project_name=project_name)
+        pkg_environment.add(dist)
+        entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
+
+        module = create_module(module_name)
+        c = compile(code, "<string>", "exec", optimize=2)
+        exec(c, module.__dict__)
+
+        plugin = cls.create_from_entry_point(entry_point)
+
+        return plugin
+
+    @classmethod
+    def command(cls, name=None):
+        """Decorates a command."""
+
+        # from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+        command_name = name
+
+        def decorator(func):
+
+            func_module = inspect.getmodule(func).__name__
+
+            if command_name is None:
+                name = func.__name__
+
+            else:
+                name = command_name
+
+            plugin = Plugin[func_module]
+
+            if name in plugin.commands:
+                raise KeyError("Command `{}` is already defined in plugin `{}`".format(name, func_module))
+
+            command = plugin.commands[name] = Command(name, local=func)
+
+            def remote_decorator(remote_func):
+                command.remote = remote_func
+
+                return remote_func
+
+            func.remote = remote_decorator
+
+            logger.debug("\t%s, new command: %s:%s", id(cls), func_module, name)
+            logger.debug("plugins: %s", Plugin.plugins)
+
+            return func
+
+        return decorator
+
+    def __repr__(self):
+        return "<Plugin: {}>".format(', '.join(self.commands.keys()))
+
+    @classmethod
+    async def distribute_incomming_chunks(cls, pipe=sys.stdin):
+        """Distribute all chunks from stdin to channels."""
+
+        async with Incomming(pipe=pipe) as reader:
+            while True:
+                line = await reader.readline()
+                if line is b'':
+                    break
+
+                await channels.distribute(line)
+
+
+
 @Commander.command()
 async def import_plugin(cmd, plugin_name):
-    # we hope this gets never called on remote to early
-    from dbltr import plugins
+    plugin = Plugin[plugin_name]
 
-    plugin = plugins.Plugin[plugin_name]
-
+    from pdb import set_trace; set_trace()       # XXX BREAKPOINT
     code = inspect.getsource(plugin.module)
     module_name = plugin.module.__name__
 
-    result = await cmd(code, module_name)
+    project_name, entry_point_name = plugin.name.split('#')
+
+    result = await cmd(code, project_name, entry_point_name, module_name)
 
     return result
 
 
 @import_plugin.remote
-async def import_plugin(code, module_name):
-    module = imp.new_module(module_name)
-    c = compile(code, "<string>", "exec")
-    exec(c, module.__dict__)
+async def import_plugin(code, project_name, entry_point_name, module_name):
+    plugin = Plugin.create_from_code(code, project_name, entry_point_name, module_name)
+    Plugin.add(plugin)
 
     # collect commands
     logger.debug("--> %s, commands: %s", id(Commander), Commander.commands)
     commands = list(Commander.commands.keys())
 
     return {
-        'commands': commands
+        'commands': commands,
+        'plugins': list(Plugin.plugins.keys())
     }
 
 
@@ -691,19 +882,18 @@ def main(compressor=False, **kwargs):
 
     messenger = Messenger(loop)
 
+
     # TODO channels must somehow connected with commands
     channels = Channels(loop=loop, compressor=compressor)
 
     queue_out = asyncio.Queue(loop=loop)
     channel_out = JsonChannel(channels.default.name, queue=queue_out, compressor=compressor)
 
-    for module in sorted(sys.modules):
-        logger.debug("\t\t--> %s", module)
-
     try:
         loop.run_until_complete(
             messenger.run(
                 send_outgoing_queue(queue_out, sys.stdout),
+                # Plugin.distribute_incomming_chunks(sys.stdin),
                 distribute_incomming_chunks(channels, sys.stdin),
                 Commander.receive(channels.default, channel_out),
             )

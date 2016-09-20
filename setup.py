@@ -83,6 +83,7 @@ setup(
     ),
     entry_points={
         'dbltr.plugins': [
+            '_=dbltr.core',
             'core=dbltr.plugins.core'
         ]
     },

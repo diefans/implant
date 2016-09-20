@@ -1,4 +1,4 @@
-from functools import update_wrapper, lru_cache
+from functools import update_wrapper
 
 
 # borrowed from pyramid
