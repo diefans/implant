@@ -208,6 +208,8 @@ class Chunk:
 
     separator = b'|'
 
+    compressor = {}
+
     def __init__(self, data=None, *, channel=None, uid=None):
         self.data = data
         self.channel = channel
@@ -229,8 +231,8 @@ class Chunk:
                     yield i
                     count += 1
 
-            assert count == 2, 'A Chunk must be composed by two separators, e.g. `channel|uid|payload`!'
-        channel_end, uid_end = _gen_separator_index()
+            assert count == 3, 'A Chunk must be composed by two separators, e.g. `channel|uid|payload`!'
+        channel_end, uid_end, compressor_end = _gen_separator_index()
 
         raw_len = len(raw_view)
         # 10 == \n: skip newline
@@ -238,7 +240,8 @@ class Chunk:
 
         channel_view = raw_view[0:channel_end]
         uid_view = raw_view[channel_end + 1:uid_end]
-        data_view = raw_view[uid_end + 1:raw_end]
+        compressor_view = raw_view[uid_end + 1:compressor_end]
+        data_view = raw_view[compressor_end + 1:raw_end]
 
         data = base64.b64decode(data_view)
         if compressor:
@@ -253,6 +256,8 @@ class Chunk:
             yield self.channel or DEFAULT_CHANNEL_NAME
             yield self.separator
             yield self.uid or b''
+            yield self.separator
+            yield b'gzip'
             yield self.separator
 
             data = self.data or b''
@@ -627,7 +632,6 @@ class Commander:
     def command(cls, name=None):
         """Decorates a command."""
 
-        # from pdb import set_trace; set_trace()       # XXX BREAKPOINT
         command_name = name
 
         def decorator(func):
@@ -775,7 +779,6 @@ class Plugin(metaclass=MetaPlugin):
     def command(cls, name=None):
         """Decorates a command."""
 
-        # from pdb import set_trace; set_trace()       # XXX BREAKPOINT
         command_name = name
 
         def decorator(func):
@@ -830,7 +833,6 @@ class Plugin(metaclass=MetaPlugin):
 async def import_plugin(cmd, plugin_name):
     plugin = Plugin[plugin_name]
 
-    from pdb import set_trace; set_trace()       # XXX BREAKPOINT
     code = inspect.getsource(plugin.module)
     module_name = plugin.module.__name__
 
