@@ -849,6 +849,7 @@ class Plugin(metaclass=MetaPlugin):
 
 @Plugin.command()
 async def command(queue_out, command, *args, **kwargs):
+    channel = JsonChannel(command, queue=queue_out)
     pass
 
 
