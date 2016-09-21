@@ -26,6 +26,43 @@ logger = logging.getLogger(__name__)
 logger.info('\n%s', '\n'.join(['*' * 80] * 3))
 
 
+class reify:
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        functools.update_wrapper(self, wrapped)
+
+    def __get__(self, inst, objtype=None):
+        if inst is None:
+            return self
+        val = self.wrapped(inst)
+        setattr(inst, self.wrapped.__name__, val)
+        return val
+
+
+def create_module(module_name, is_package=False):
+    if module_name not in sys.modules:
+        package_name, _, module_attr = module_name.rpartition('.')
+
+        module = types.ModuleType(module_name)
+        module.__file__ = '<memory>'
+
+        if package_name:
+            package = create_module(package_name, is_package=True)
+            # see https://docs.python.org/3/reference/import.html#submodules
+            setattr(package, module_attr, module)
+
+        if is_package:
+            module.__package__ = module_name
+            module.__path__ = []
+
+        else:
+            module.__package__ = package_name
+
+        sys.modules[module_name] = module
+
+    return sys.modules[module_name]
+
+
 def log(_msg, **kwargs):
     if sys.stderr.isatty():
         colors = {
@@ -135,6 +172,191 @@ async def distribute_incomming_chunks(channels, pipe=sys.stdin):
                 break
 
             await channels.distribute(line)
+
+
+######################################################################################
+PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
+
+
+class MetaPlugin(type):
+
+    plugins = {}
+
+    def __new__(mcs, name, bases, dct):
+        cls = type.__new__(mcs, name, bases, dct)
+
+        cls.scan_entry_points()
+
+        # add this module as default
+        cls.add(cls(__name__))
+
+        return cls
+
+    def scan_entry_points(cls):
+        # scan for available plugins
+        for entry_point in pkg_resources.iter_entry_points(group=PLUGINS_ENTRY_POINT_GROUP):
+            plugin = cls.create_from_entry_point(entry_point)
+            # we index entry_points and module names
+            cls.add(plugin)
+            # mcs.plugins[plugin.module_name] = mcs.plugins[plugin.name] = plugin
+
+    def add(cls, plugin):
+        cls.plugins[plugin.module_name] = cls.plugins[plugin.name] = plugin
+
+    def __getitem__(cls, name):
+        plugin_name, _, command_name = name.partition(':')
+        plugin = cls.plugins[plugin_name]
+
+        if not command_name:
+            return plugin
+
+        command = plugin.commands[command_name]
+        return command
+
+    def __contains__(cls, name):
+        try:
+            cls[name]
+            return True
+
+        except KeyError:
+            return False
+
+    def get(cls, name, default=None):
+        try:
+            return cls[name]
+
+        except KeyError:
+            return default
+
+
+class Plugin(metaclass=MetaPlugin):
+
+    """A plugin module introduced via entry point."""
+
+    def __init__(self, module_name, name=None):
+        self.module_name = module_name
+        self.name = name or module_name
+
+        self.commands = {}
+        """A map of commands the plugin provides."""
+
+    @reify
+    def module(self):
+        """On demand module loading."""
+
+        return __import__(self.module_name, fromlist=[''])
+        # return self.entry_point.load()
+
+    @classmethod
+    def create_from_entry_point(cls, entry_point):
+        plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
+
+        return plugin
+
+    @classmethod
+    def create_from_code(cls, code, project_name, entry_point_name, module_name, version='0.0.0'):
+        dist = pkg_resources.Distribution(project_name=project_name, version=version)
+        dist.activate()
+        pkg_environment.add(dist)
+        entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
+
+        module = create_module(module_name)
+        c = compile(code, "<string>", "exec", optimize=2)
+        exec(c, module.__dict__)
+
+        plugin = cls.create_from_entry_point(entry_point)
+
+        return plugin
+
+    class command:
+        def __init__(self, name=None):
+            self.name = name
+            self.local_func = None
+            self.command = None
+
+        def __call__(self, func):
+            name = self.name or func.__name__
+            self.command = Command(name, local=func)
+
+            print("set func:", name, func)
+
+            self._extend_decorators(func)
+            return func
+
+        def _extend_decorators(self, func):
+            func.remote = self.set_remote
+            func.remote_setup = self.set_remote_setup
+
+        def set_remote(self, func):
+            self.command.remote = func
+            self._extend_decorators(func)
+            return func
+
+        def set_remote_setup(self, func):
+            self.command.remote_setup = func
+            self._extend_decorators(func)
+            return func
+
+    @classmethod
+    def _command(cls, name=None):
+        """Decorates a command."""
+
+        command_name = name
+
+        def decorator(func):
+
+            func_module = inspect.getmodule(func).__name__
+
+            if command_name is None:
+                name = func.__name__
+
+            else:
+                name = command_name
+
+            plugin = Plugin[func_module]
+
+            if name in plugin.commands:
+                raise KeyError("Command `{}` is already defined in plugin `{}`".format(name, func_module))
+
+            command = plugin.commands[name] = Command(name, local=func)
+
+            def remote_decorator(remote_func):
+                command.remote = remote_func
+
+                return remote_func
+
+            func.remote = remote_decorator
+
+            def remote_setup_decorator(remote_func):
+                command.remote_setup = remote_func
+
+                return remote_func
+
+            func.remote_setup = remote_setup_decorator
+
+            logger.debug("\t%s, new command: %s:%s", id(cls), func_module, name)
+            logger.debug("plugins: %s", Plugin.plugins)
+
+            return func
+
+        return decorator
+
+    def __repr__(self):
+        return "<Plugin {}>".format(self.module_name)
+
+    @classmethod
+    async def distribute_incomming_chunks(cls, channels, pipe=sys.stdin):
+        """Distribute all chunks from stdin to channels."""
+
+        async with Incomming(pipe=pipe) as reader:
+            while True:
+                line = await reader.readline()
+                if line is b'':
+                    break
+
+                channel, uid, compressor, data = Chunk.view(line)
+
+                await channels.distribute(line)
 
 
 class Messenger:
@@ -536,16 +758,37 @@ class Command:
 
     """Execution context for all plugin commands"""
 
-    def __init__(self, name, local=None, remote=None, plugin=None):
+    def __init__(self, name, local, *, remote=None, remote_setup=None):
         self.name = name
         self.local = local
         self.remote = remote
-        self.plugin = plugin
+        self.remote_setup = remote_setup
+        self.plugin = self._connect_plugin()
+        self.queue = asyncio.Queue()
         self.queues = {}
         """holds all chunks per message uid"""
 
-    async def execute(self, *args, **kwargs):
-        pass
+    def _connect_plugin(self):
+        func_module = inspect.getmodule(self.local).__name__
+        plugin = Plugin[func_module]
+        plugin.commands[self.name] = self
+
+        return plugin
+
+    @reify
+    def id(self):
+        return ':'.join((self.plugin.module_name, self.name))
+
+    def __repr__(self):
+        return "<Command {}@{}>".format(self.name, self.plugin.module_name)
+
+    async def execute(self, queue_out, queue_in, *args, **kwargs):
+        """startes execution of command at the local side."""
+
+        # XXX we need to take ownership of queue_in of remote instance
+>>>>>
+
+        return await self.local(self, queue_out, queue_in, command_args=args, command_kwargs=kwargs)
 
 
 class Commander:
@@ -663,201 +906,6 @@ class Commander:
         return decorator
 
 
-######################################################################################
-class reify:
-    def __init__(self, wrapped):
-        self.wrapped = wrapped
-        functools.update_wrapper(self, wrapped)
-
-    def __get__(self, inst, objtype=None):
-        if inst is None:
-            return self
-        val = self.wrapped(inst)
-        setattr(inst, self.wrapped.__name__, val)
-        return val
-
-
-def create_module(module_name, is_package=False):
-    if module_name not in sys.modules:
-        package_name, _, _ = module_name.rpartition('.')
-
-        if package_name:
-            create_module(package_name, is_package=True)
-
-        module = types.ModuleType(module_name)
-        module.__file__ = '<memory>'
-
-        if is_package:
-            module.__package__ = module_name
-            module.__path__ = []
-
-        else:
-            module.__package__ = package_name
-
-        sys.modules[module_name] = module
-
-    return sys.modules[module_name]
-
-
-PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
-
-
-class MetaPlugin(type):
-
-    plugins = {}
-
-    def __new__(mcs, name, bases, dct):
-        cls = type.__new__(mcs, name, bases, dct)
-
-        cls.scan_entry_points()
-
-        # add this module as default
-        cls.add(cls(__name__))
-
-        return cls
-
-    def scan_entry_points(cls):
-        # scan for available plugins
-        for entry_point in pkg_resources.iter_entry_points(group=PLUGINS_ENTRY_POINT_GROUP):
-            plugin = cls.create_from_entry_point(entry_point)
-            # we index entry_points and module names
-            cls.add(plugin)
-            # mcs.plugins[plugin.module_name] = mcs.plugins[plugin.name] = plugin
-
-    def add(cls, plugin):
-        cls.plugins[plugin.module_name] = cls.plugins[plugin.name] = plugin
-
-    def __getitem__(cls, name):
-        plugin_name, _, command_name = name.partition(':')
-        plugin = cls.plugins[plugin_name]
-
-        if not command_name:
-            return plugin
-
-        command = plugin.commands[command_name]
-        return command
-
-    def __contains__(cls, name):
-        try:
-            cls[name]
-            return True
-
-        except KeyError:
-            return False
-
-    def get(cls, name, default=None):
-        try:
-            return cls[name]
-
-        except KeyError:
-            return default
-
-
-class Plugin(metaclass=MetaPlugin):
-
-    """A plugin module introduced via entry point."""
-
-    def __init__(self, module_name, name=None):
-        self.module_name = module_name
-        self.name = name or module_name
-
-        self.commands = {}
-        """A map of commands the plugin provides."""
-
-    @reify
-    def module(self):
-        """On demand module loading."""
-
-        return __import__(self.module_name, fromlist=[''])
-        # return self.entry_point.load()
-
-    @classmethod
-    def create_from_entry_point(cls, entry_point):
-        plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
-
-        return plugin
-
-    @classmethod
-    def create_from_code(cls, code, project_name, entry_point_name, module_name, version='0.0.0'):
-        dist = pkg_resources.Distribution(project_name=project_name, version=version)
-        dist.activate()
-        pkg_environment.add(dist)
-        entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
-
-        module = create_module(module_name)
-        c = compile(code, "<string>", "exec", optimize=2)
-        exec(c, module.__dict__)
-
-        plugin = cls.create_from_entry_point(entry_point)
-
-        return plugin
-
-    @classmethod
-    def command(cls, name=None):
-        """Decorates a command."""
-
-        command_name = name
-
-        def decorator(func):
-
-            func_module = inspect.getmodule(func).__name__
-
-            if command_name is None:
-                name = func.__name__
-
-            else:
-                name = command_name
-
-            plugin = Plugin[func_module]
-
-            if name in plugin.commands:
-                raise KeyError("Command `{}` is already defined in plugin `{}`".format(name, func_module))
-
-            command = plugin.commands[name] = Command(name, local=func)
-
-            def remote_decorator(remote_func):
-                command.remote = remote_func
-
-                return remote_func
-
-            func.remote = remote_decorator
-
-            logger.debug("\t%s, new command: %s:%s", id(cls), func_module, name)
-            logger.debug("plugins: %s", Plugin.plugins)
-
-            return func
-
-        return decorator
-
-    def __repr__(self):
-        return "<Plugin: {}>".format(', '.join(self.commands.keys()))
-
-    @classmethod
-    async def distribute_incomming_chunks(cls, channels, pipe=sys.stdin):
-        """Distribute all chunks from stdin to channels."""
-
-        async with Incomming(pipe=pipe) as reader:
-            while True:
-                line = await reader.readline()
-                if line is b'':
-                    break
-
-                channel, uid, compressor, data = Chunk.view(line)
-
-                await channels.distribute(line)
-
-
-@Plugin.command()
-async def command(queue_out, command, *args, **kwargs):
-    channel = JsonChannel(command, queue=queue_out)
-    pass
-
-
-@command.remote
-async def command(queue_in, queue_out, command, *args, **kwargs):
-    pass
-
-
 @Commander.command()
 async def import_plugin(cmd, plugin_name):
     plugin = Plugin[plugin_name]
@@ -888,7 +936,102 @@ async def import_plugin(code, project_name, entry_point_name, module_name):
 
 
 @Plugin.command()
-async def echo(cmd, *args, **kwargs):
+async def command(command, queue_out, command_args, command_kwargs):
+    channel = JsonChannel(command, queue=queue_out)
+    pass
+
+
+@command.remote
+async def command(command, *, queue_out, command_args, command_kwargs):
+    pass
+
+
+async def receive(cls, channel_in, channel_out):
+    """The remote part of execute method."""
+
+    # logger.info("Retrieving commands...")
+
+    async for uid, message in channel_in:
+        logger.info("retrieved command: %s", message)
+
+        # do something and return result
+        command = cls.commands[message['command']]
+
+        cmd_args = message.get('args', [])
+        cmd_kwargs = message.get('kwargs', {})
+
+        result = await command.remote(*cmd_args, **cmd_kwargs)
+
+        result = {
+            'foo': result
+        }
+
+        async with channel_out.message(uid) as send:
+            await send(result, compressor='gzip')
+
+
+@command.remote_setup
+async def command(command, queue_out, loop):
+    """Starts distribution of incomming chunks."""
+
+    channel_out = JsonChannel(queue=queue_out)
+
+    # our incomming command queue
+    queue_in = asyncio.Queue(loop=loop)
+    channel_in = JsonChannel(queue=queue_in)
+
+    async def execute_commands():
+        async for uid, message in channel_in:
+            logger.info("retrieved command: %s", message)
+
+            # do something and return result
+            cmd_args = message.get('args', [])
+            cmd_kwargs = message.get('kwargs', {})
+
+            result = await command.remote(
+                command,
+                queue_out=queue_out,
+                command_args=cmd_args,
+                command_kwargs=cmd_kwargs
+            )
+
+            result = {
+                'foo': result
+            }
+
+            async with channel_out.message(uid) as send:
+                await send(result, compressor='gzip')
+
+    async def distribute_commands():
+        async with Incomming(pipe=sys.stdin) as reader:
+            while True:
+                line = await reader.readline()
+                if line is b'':
+                    break
+
+                channel, uid, compressor, data = Chunk.view(line)
+
+                logger.debug("\t\tincomming: %s", line)
+
+                # split command channel from other plugin channels
+                # we want to execute a command
+                if channel == command.id:
+                    await channel_in.forward(line)
+
+                else:
+                    # distribute to plugin channels
+                    await channels.distribute(line)
+
+    logger.debug("remote setup %s %s", command, queue_out)
+
+    future = asyncio.gather(execute_commands(), distribute_commands())
+    await future
+
+
+@Plugin.command()
+async def echo(command, *, queue_out, queue_in, command_args, command_kwargs):
+
+
     return await cmd(*args, **kwargs)
 
 
@@ -917,13 +1060,22 @@ def main(compressor=False, **kwargs):
     queue_out = asyncio.Queue(loop=loop)
     channel_out = JsonChannel(channels.default.name, queue=queue_out, compressor=compressor)
 
+    # setup all plugin commands
+    for plugin in set(Plugin.plugins.values()):
+        for command in plugin.commands.values():
+            if command.remote_setup:
+
+                logger.debug("\t\tSetup remote plugin: %s, %s", plugin, command)
+
+                asyncio.ensure_future(command.remote_setup(command, queue_out, loop))
+
     try:
         loop.run_until_complete(
             messenger.run(
                 send_outgoing_queue(queue_out, sys.stdout),
                 # Plugin.distribute_incomming_chunks(sys.stdin),
-                distribute_incomming_chunks(channels, sys.stdin),
-                Commander.receive(channels.default, channel_out),
+                # distribute_incomming_chunks(channels, sys.stdin),
+                # Commander.receive(channels.default, channel_out),
             )
         )
 

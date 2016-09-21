@@ -276,12 +276,17 @@ async def feed_stdin_to_remotes(**options):
                     break
 
                 if remote.returncode is None:
-                    command, args, kwargs = parse_command(line[:-1].decode())
+                    command_name, args, kwargs = parse_command(line[:-1].decode())
                     try:
-                        result = await remote.execute(command, *args, **kwargs)
+                        if command_name in core.Plugin:
+                            from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+                            command = core.Plugin[command_name]
+                            result = await command.execute(remote.stdin, remote.stdout, *args, **kwargs)
+                        else:
+                            result = await remote.execute(command_name, *args, **kwargs)
 
                     except (TypeError, KeyError) as ex:
-                        print("< {}\n > ".format(ex), end='')
+                        print("< {}:{}\n > ".format(ex.__class__.__name__, ex), end='')
 
                     else:
                         print("< {}\n > ".format(result), end='')
