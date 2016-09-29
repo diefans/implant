@@ -284,16 +284,35 @@ class Plugin(metaclass=MetaPlugin):
             return func
 
         def _extend_decorators(self, func):
+            func.local_setup = self.set_local_setup
+            func.local_teardown = self.set_local_teardown
+
             func.remote = self.set_remote
             func.remote_setup = self.set_remote_setup
+            func.remote_teardown = self.set_remote_teardown
 
         def set_remote(self, func):
             self.command.remote = func
             self._extend_decorators(func)
             return func
 
+        def set_local_setup(self, func):
+            self.command.local_setup = func
+            self._extend_decorators(func)
+            return func
+
+        def set_local_teardown(self, func):
+            self.command.local_teardown = func
+            self._extend_decorators(func)
+            return func
+
         def set_remote_setup(self, func):
             self.command.remote_setup = func
+            self._extend_decorators(func)
+            return func
+
+        def set_remote_teardown(self, func):
+            self.command.remote_teardown = func
             self._extend_decorators(func)
             return func
 
@@ -758,11 +777,17 @@ class Command:
 
     """Execution context for all plugin commands"""
 
-    def __init__(self, name, local, *, remote=None, remote_setup=None):
+    def __init__(self, name, local, *,
+                 local_setup=None, local_teardown=None,
+                 remote=None, remote_setup=None, remote_teardown=None
+                 ):
         self.name = name
         self.local = local
+        self.local_setup = local_setup
+        self.local_teardown = local_teardown
         self.remote = remote
         self.remote_setup = remote_setup
+        self.remote_teardown = remote_teardown
         self.plugin = self._connect_plugin()
         self.queue = asyncio.Queue()
         self.queues = {}
@@ -786,7 +811,6 @@ class Command:
         """startes execution of command at the local side."""
 
         # XXX we need to take ownership of queue_in of remote instance
->>>>>
 
         return await self.local(self, queue_out, queue_in, command_args=args, command_kwargs=kwargs)
 
@@ -936,9 +960,14 @@ async def import_plugin(code, project_name, entry_point_name, module_name):
 
 
 @Plugin.command()
-async def command(command, queue_out, command_args, command_kwargs):
+async def command(command, queue_out, queue_in, command_args, command_kwargs):
     channel = JsonChannel(command, queue=queue_out)
     pass
+
+
+@command.local_setup
+async def command(command, remote, loop):
+    """Distribute remote stdout to channels."""
 
 
 @command.remote
@@ -979,6 +1008,9 @@ async def command(command, queue_out, loop):
     # our incomming command queue
     queue_in = asyncio.Queue(loop=loop)
     channel_in = JsonChannel(queue=queue_in)
+
+    # a queue for each plugin command message
+    plugin_command_queues = {}
 
     async def execute_commands():
         async for uid, message in channel_in:
@@ -1080,6 +1112,15 @@ def main(compressor=False, **kwargs):
         )
 
     finally:
+        # teardown all plugin commands
+        for plugin in set(Plugin.plugins.values()):
+            for command in plugin.commands.values():
+                if command.remote_teardown:
+
+                    logger.debug("\t\Teardown remote plugin: %s, %s", plugin, command)
+
+                    asyncio.ensure_future(command.remote_teardown(command, queue_out, loop))
+
         loop.close()
 
 

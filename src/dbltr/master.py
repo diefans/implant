@@ -136,6 +136,18 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         if self.receiving is not None:
             self.receiving.cancel()
 
+    def process_launched(self):
+        # setup all plugin commands
+        for plugin in set(core.Plugin.plugins.values()):
+            for command in plugin.commands.values():
+                if command.local_setup:
+
+                    core.logger.debug("\t\tSetup local plugin: %s, %s", plugin, command)
+
+                    asyncio.ensure_future(command.local_setup(command, self, self._loop))
+
+        core.logger.info('\n%s', '\n'.join(['-' * 80] * 1))
+
     async def wait(self):
         """Wait until the process exit and return the process return code.
 
@@ -158,6 +170,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
                      python_bin=sys.executable, code=None,
                      loop=None, options=None, **kwargs):
         """Create a remote process."""
+        core.logger.info('\n%s', '\n'.join(['+' * 80] * 1))
 
         if target is None:
             target = Target()
@@ -184,7 +197,11 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             **kwargs
         )
 
-        return remote
+        try:
+            return remote
+
+        finally:
+            remote.process_launched()
 
     async def send(self, input):
         """Send input to remote process."""
@@ -259,7 +276,8 @@ def parse_command(line):
 
 
 async def feed_stdin_to_remotes(**options):
-    remote = await Remote.launch(code=core, python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
+    remote = await Remote.launch(code=core,
+                                 python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
                                  loop=core.loop, options=options)
 
     remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
@@ -276,17 +294,19 @@ async def feed_stdin_to_remotes(**options):
                     break
 
                 if remote.returncode is None:
-                    command_name, args, kwargs = parse_command(line[:-1].decode())
+                    command, args, kwargs = parse_command(line[:-1].decode())
+
                     try:
-                        if command_name in core.Plugin:
-                            from pdb import set_trace; set_trace()       # XXX BREAKPOINT
-                            command = core.Plugin[command_name]
-                            result = await command.execute(remote.stdin, remote.stdout, *args, **kwargs)
+                        cmd = core.Plugin.get(command)
+                        if isinstance(cmd, core.Command):
+                            # new command execution
+                            result = None
+
                         else:
-                            result = await remote.execute(command_name, *args, **kwargs)
+                            result = await remote.execute(command, *args, **kwargs)
 
                     except (TypeError, KeyError) as ex:
-                        print("< {}:{}\n > ".format(ex.__class__.__name__, ex), end='')
+                        print("< {}\n > ".format(ex), end='')
 
                     else:
                         print("< {}\n > ".format(result), end='')
