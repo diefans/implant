@@ -228,6 +228,32 @@ class MetaPlugin(type):
         except KeyError:
             return default
 
+    def local(cls, func):
+        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+        func.local = True
+
+        return func
+
+    def Command(cls, cmd):
+        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+        # iterate through the methods and register methods
+
+
+    def local_setup(cls, func):
+        pass
+
+    def local_teardown(cls, func):
+        pass
+
+    def remote(cls, func):
+        pass
+
+    def remote_setup(cls, func):
+        pass
+
+    def remote_teardown(cls, func):
+        pass
+
 
 class Plugin(metaclass=MetaPlugin):
 
@@ -376,6 +402,96 @@ class Plugin(metaclass=MetaPlugin):
                 channel, uid, compressor, data = Chunk.view(line)
 
                 await channels.distribute(line)
+
+
+class CommandMeta(type):
+
+    commands = {}
+
+    local_setups = []
+    local_teardowns = []
+    remote_setups = []
+    remote_teardowns = []
+
+    def __new__(mcs, name, bases, dct):
+        """Register command at plugin vice versa"""
+
+        module = dct['__module__']
+        plugin = dct['plugin'] = Plugin[module]
+
+        cls = type.__new__(mcs, name, bases, dct)
+        mcs._register_command(cls)
+        mcs._register_setup_and_teardown(cls)
+
+        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+        return cls
+
+    @classmethod
+    def _register_command(mcs, cls):
+        cls.plugin.commands[cls.__name__] = cls
+
+        for plugin_name in set((cls.plugin.module_name, cls.plugin.name)):
+            name = ':'.join((plugin_name, cls.__name__))
+            mcs.commands[name] = cls
+
+    @classmethod
+    def _register_setup_and_teardown(mcs, cls):
+        containers = {
+            'local_setup': mcs.local_setups,
+            'local_teardown': mcs.local_teardowns,
+            'remote_setup': mcs.remote_setups,
+            'remote_teardown': mcs.remote_teardowns,
+        }
+
+        # only classmethods
+        for name, attr in inspect.getmembers(cls, inspect.ismethod):
+            container = containers.get(name)
+            if container is not None:
+                container.append(attr)
+
+    @classmethod
+    async def setup_locals(mcs, *args, **kwargs):
+        for func in mcs.local_setups:
+            await func(*args, **kwargs)
+
+    @classmethod
+    async def teardown_locals(mcs, *args, **kwargs):
+        for func in mcs.local_teardowns:
+            await func(*args, **kwargs)
+
+    @classmethod
+    async def setup_remotes(mcs, *args, **kwargs):
+        for func in mcs.remote_setups:
+            await func(*args, **kwargs)
+
+    @classmethod
+    async def teardown_remotes(mcs, *args, **kwargs):
+        for func in mcs.remote_teardowns:
+            await func(*args, **kwargs)
+
+
+class Foo:
+
+    @classmethod
+    def remote_teardown(cls):
+        pass
+
+class Cmd(Foo, metaclass=CommandMeta):
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def local(self):
+        raise NotImplementedError(
+            'You have to implement at least a `local` method for your Command to work: {}'.format(self.__class__)
+        )
+
+    @classmethod
+    def local_setup(self, remote):
+        pass
+
+    def echo(self):
+        pass
 
 
 class Messenger:
