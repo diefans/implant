@@ -25,6 +25,12 @@ logging.basicConfig(level='DEBUG')
 logger = logging.getLogger(__name__)
 logger.info('\n%s', '\n'.join(['*' * 80] * 3))
 
+finalizer = []
+
+
+def add_finalizer(func):
+    finalizer.append(func)
+
 
 class reify:
     def __init__(self, wrapped):
@@ -406,12 +412,8 @@ class Plugin(metaclass=MetaPlugin):
 
 class CommandMeta(type):
 
+    base = None
     commands = {}
-
-    local_setups = []
-    local_teardowns = []
-    remote_setups = []
-    remote_teardowns = []
 
     def __new__(mcs, name, bases, dct):
         """Register command at plugin vice versa"""
@@ -420,10 +422,13 @@ class CommandMeta(type):
         plugin = dct['plugin'] = Plugin[module]
 
         cls = type.__new__(mcs, name, bases, dct)
-        mcs._register_command(cls)
-        mcs._register_setup_and_teardown(cls)
+        if mcs.base is None:
+            mcs.base = cls
 
-        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+        else:
+            # only register classes except base class
+            mcs._register_command(cls)
+
         return cls
 
     @classmethod
@@ -435,121 +440,144 @@ class CommandMeta(type):
             mcs.commands[name] = cls
 
     @classmethod
-    def _register_setup_and_teardown(mcs, cls):
-        containers = {
-            'local_setup': mcs.local_setups,
-            'local_teardown': mcs.local_teardowns,
-            'remote_setup': mcs.remote_setups,
-            'remote_teardown': mcs.remote_teardowns,
-        }
+    def _lookup_command_classmethods(mcs, *names):
+        valid_names = set(['local_setup', 'local_teardown', 'remote_setup', 'remote_teardown'])
+        names = set(names) & valid_names
 
-        # only classmethods
-        for name, attr in inspect.getmembers(cls, inspect.ismethod):
-            container = containers.get(name)
-            if container is not None:
-                container.append(attr)
+        for command in mcs.commands.values():
+            for name, attr in inspect.getmembers(command, inspect.ismethod):
+                if name in names:
+                    yield command, name, attr
 
     @classmethod
-    async def setup_locals(mcs, *args, **kwargs):
-        for func in mcs.local_setups:
+    async def local_setup(mcs, *args, **kwargs):
+        for _, _, func in mcs._lookup_command_classmethods('local_setup'):
             await func(*args, **kwargs)
 
     @classmethod
-    async def teardown_locals(mcs, *args, **kwargs):
-        for func in mcs.local_teardowns:
+    async def local_teardown(mcs, *args, **kwargs):
+        for _, _, func in mcs._lookup_command_classmethods('local_teardown'):
             await func(*args, **kwargs)
 
     @classmethod
-    async def setup_remotes(mcs, *args, **kwargs):
-        for func in mcs.remote_setups:
+    async def remote_setup(mcs, *args, **kwargs):
+        for _, _, func in mcs._lookup_command_classmethods('remote_setup'):
             await func(*args, **kwargs)
 
     @classmethod
-    async def teardown_remotes(mcs, *args, **kwargs):
-        for func in mcs.remote_teardowns:
+    async def remote_teardown(mcs, *args, **kwargs):
+        for _, _, func in mcs._lookup_command_classmethods('remote_teardown'):
             await func(*args, **kwargs)
 
 
-class Foo:
+class Cmd(metaclass=CommandMeta):
 
-    @classmethod
-    def remote_teardown(cls):
-        pass
+    """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
-class Cmd(Foo, metaclass=CommandMeta):
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def local(self):
+    def local(self, *args, **kwargs):
         raise NotImplementedError(
-            'You have to implement at least a `local` method for your Command to work: {}'.format(self.__class__)
+            'You have to implement at least a `local` method'
+            'for your Command to work: {}'.format(self.__class__)
         )
 
+
+class Execute(Cmd):
+
+    """The executor of all commands."""
+
+    def __init__(self, command, *args, **kwargs):
+        pass
+
     @classmethod
-    def local_setup(self, remote):
+    async def local_setup(cls, remote, loop):
         pass
 
-    def echo(self):
+    @classmethod
+    async def remote_setup(cls, queue_out, loop):
+        channel_out = JsonChannel(queue=queue_out)
+
+        # our incomming command queue
+        queue_in = asyncio.Queue(loop=loop)
+        channel_in = JsonChannel(queue=queue_in)
+
+        # a queue for each plugin command message
+        plugin_command_queues = {}
+
+        async def execute_commands():
+            async for uid, message in channel_in:
+                logger.info("retrieved command: %s", message)
+
+                # do something and return result
+                cmd_args = message.get('args', [])
+                cmd_kwargs = message.get('kwargs', {})
+
+                result = await command.remote(
+                    command,
+                    queue_out=queue_out,
+                    command_args=cmd_args,
+                    command_kwargs=cmd_kwargs
+                )
+
+                result = {
+                    'foo': result
+                }
+
+                async with channel_out.message(uid) as send:
+                    await send(result, compressor='gzip')
+
+        async def distribute_commands():
+            async with Incomming(pipe=sys.stdin) as reader:
+                while True:
+                    line = await reader.readline()
+                    if line is b'':
+                        break
+
+                    channel, uid, compressor, data = Chunk.view(line)
+
+                    logger.debug("\t\tincomming: %s", line)
+
+                    # split command channel from other plugin channels
+                    # we want to execute a command
+                    if channel == command.id:
+                        await channel_in.forward(line)
+
+                    else:
+                        # distribute to plugin channels
+                        await channels.distribute(line)
+
+        logger.debug("remote setup %s %s", command, queue_out)
+
+        # create a teardown background task to be called when this process finishes
+        setup = asyncio.gather(execute_commands(), distribute_commands(), loop=loop)
+        future = asyncio.Future(loop=loop)
+        setup.add_done_callback(future.set_result)
+
+        async def teardown():
+            await future
+            result = future.get_result()
+
+            logger.debug("teardown %s with %s", cls, result)
+        asyncio.ensure_future(teardown())
+
+
+class Echo(Cmd):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    async def local(self):
         pass
 
+    async def remote(self):
+        pass
 
-class Messenger:
+    @classmethod
+    async def remote_setup(cls, queue_out, loop):
+        logger.info("--------------------------------setup remote: %s", cls)
+        async def log(remote):
+            logger.info("exit: %s", cls)
 
-    """Upstream communication."""
-
-    def __init__(self, loop=None):
-        self._loop = loop or asyncio.get_event_loop()
-
-        # holds a future indicating that the Messenger is running
-        self.running = None
-
-    async def run(self, *tasks):
-        """Schedules all tasks and wait for running is done or canceled"""
-
-        # create indicator for running messenger
-        running = asyncio.Future(loop=self._loop)
-
-        shutdown_tasks = []
-
-        for task in tasks:
-            fut = asyncio.ensure_future(task, loop=self._loop)
-
-            def _shutdown_on_error(future):
-                try:
-                    # retrieve result or exception
-                    future.result()
-
-                except Exception as ex:
-                    # delegate tsk error to running future to signal exit
-                    # logger.error(traceback.format_exc())
-                    running.set_exception(ex)
-
-                    # raise
-
-            fut.add_done_callback(_shutdown_on_error)
-            shutdown_tasks.append(fut)
-
-        # exit on sigterm or sigint
-        for signame in ('SIGINT', 'SIGTERM'):
-            sig = getattr(signal, signame)
-            self._loop.add_signal_handler(sig, functools.partial(running.set_result, sig))
-
-        self.running = running
-
-        # wait for running completed
-        result = await self.running
-
-        # cleanup
-        for task in shutdown_tasks:
-            if task.done():
-                continue
-
-            log("cancel", task=task)
-            task.cancel()
-            await asyncio.wait_for(task, None)
-
-        return result
+        add_finalizer(log)
 
 
 DEFAULT_CHANNEL_NAME = b''
@@ -1198,9 +1226,53 @@ async def copy_large_file_remote(channel_in, *args, src=None, dest=None, **kwarg
     pass
 
 
-def main(compressor=False, **kwargs):
+async def run(*tasks, loop=None):
+    """Schedules all tasks and wait for running is done or canceled"""
 
-    messenger = Messenger(loop)
+    # create indicator for running messenger
+    running = asyncio.Future(loop=loop)
+
+    shutdown_tasks = []
+
+    for task in tasks:
+        fut = asyncio.ensure_future(task, loop=loop)
+
+        def _shutdown_on_error(future):
+            try:
+                # retrieve result or exception
+                future.result()
+
+            except Exception as ex:
+                # delegate tsk error to running future to signal exit
+                # logger.error(traceback.format_exc())
+                running.set_exception(ex)
+
+                # raise
+
+        fut.add_done_callback(_shutdown_on_error)
+        shutdown_tasks.append(fut)
+
+    # exit on sigterm or sigint
+    for signame in ('SIGINT', 'SIGTERM'):
+        sig = getattr(signal, signame)
+        loop.add_signal_handler(sig, functools.partial(running.set_result, sig))
+
+    # wait for running completed
+    result = await running
+
+    # cleanup
+    for task in shutdown_tasks:
+        if task.done():
+            continue
+
+        log("cancel", task=task)
+        task.cancel()
+        await asyncio.wait_for(task, None)
+
+    return result
+
+
+def main(compressor=False, **kwargs):
 
     # TODO channels must somehow connected with commands
     channels = Channels(loop=loop, compressor=compressor)
@@ -1209,34 +1281,16 @@ def main(compressor=False, **kwargs):
     channel_out = JsonChannel(channels.default.name, queue=queue_out, compressor=compressor)
 
     # setup all plugin commands
-    for plugin in set(Plugin.plugins.values()):
-        for command in plugin.commands.values():
-            if command.remote_setup:
-
-                logger.debug("\t\tSetup remote plugin: %s, %s", plugin, command)
-
-                asyncio.ensure_future(command.remote_setup(command, queue_out, loop))
-
+    loop.run_until_complete(Cmd.remote_setup(queue_out, loop))
     try:
         loop.run_until_complete(
-            messenger.run(
+            run(
                 send_outgoing_queue(queue_out, sys.stdout),
-                # Plugin.distribute_incomming_chunks(sys.stdin),
-                # distribute_incomming_chunks(channels, sys.stdin),
-                # Commander.receive(channels.default, channel_out),
+                loop=loop
             )
         )
 
     finally:
-        # teardown all plugin commands
-        for plugin in set(Plugin.plugins.values()):
-            for command in plugin.commands.values():
-                if command.remote_teardown:
-
-                    logger.debug("\t\Teardown remote plugin: %s, %s", plugin, command)
-
-                    asyncio.ensure_future(command.remote_teardown(command, queue_out, loop))
-
         loop.close()
 
 

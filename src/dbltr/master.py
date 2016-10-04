@@ -106,6 +106,10 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.queue_err = asyncio.Queue(loop=self._loop)
         self.pid = None
         self.returncode = None
+        self.terminator = None
+        self.teardown = None
+
+        self.finalizer = []
 
         # a future indicating a receiving remote
         self.receiving = None
@@ -136,15 +140,35 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         if self.receiving is not None:
             self.receiving.cancel()
 
-    def process_launched(self):
+        # inform future
+        self.terminator.set_result(self.returncode)
+        core.logger.info("process exited: %s", self.returncode)
+
+    def add_finalizer(self, func):
+        self.finalizer.append(func)
+
+    async def process_launched(self):
+        self.terminator = asyncio.Future()
+
+        async def teardown():
+            exitcode = await self.terminator
+            core.logger.debug("TTTTTTTTTT")
+
+            for finalizer in self.finalizer:
+                core.logger.info("\t\tteardown: %s", finalizer)
+                await finalizer(self)
+
+        self.teardown = asyncio.ensure_future(teardown())
+
         # setup all plugin commands
-        for plugin in set(core.Plugin.plugins.values()):
-            for command in plugin.commands.values():
-                if command.local_setup:
+        await core.Cmd.local_setup(self, self._loop)
+        # for plugin in set(core.Plugin.plugins.values()):
+        #     for command in plugin.commands.values():
+        #         if command.local_setup:
 
-                    core.logger.debug("\t\tSetup local plugin: %s, %s", plugin, command)
+        #             core.logger.debug("\t\tSetup local plugin: %s, %s", plugin, command)
 
-                    asyncio.ensure_future(command.local_setup(command, self, self._loop))
+        #             asyncio.ensure_future(command.local_setup(command, self, self._loop))
 
         core.logger.info('\n%s', '\n'.join(['-' * 80] * 1))
 
@@ -152,6 +176,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         """Wait until the process exit and return the process return code.
 
         This method is a coroutine."""
+        await self.teardown
         return (await self._transport._wait())
 
     def send_signal(self, signal):
@@ -201,7 +226,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             return remote
 
         finally:
-            remote.process_launched()
+            await remote.process_launched()
 
     async def send(self, input):
         """Send input to remote process."""
@@ -250,6 +275,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         except asyncio.CancelledError:
 
             log("remote cancel", pid=self.pid)
+            self.terminate()
             pass
 
         finally:
@@ -320,8 +346,10 @@ async def feed_stdin_to_remotes(**options):
                 await remote.wait()
 
     except asyncio.CancelledError:
+        core.logger.info('XXXXXXXXXXXXXXXXXXXXXXX')
         # wait for remote to complete
         remote_task.cancel()
+        await remote_task
         if remote.returncode is None:
             await remote.wait()
 
@@ -354,12 +382,11 @@ def main():
         core.logger.addHandler(logging_handler)
         # core.logger.setLevel('INFO')
 
-        messenger = core.Messenger(core.loop)
-
         try:
             core.loop.run_until_complete(
-                messenger.run(
-                    feed_stdin_to_remotes(compressor=compressor)
+                core.run(
+                    feed_stdin_to_remotes(compressor=compressor),
+                    loop=core.loop
                 )
             )
 
