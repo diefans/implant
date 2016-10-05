@@ -438,6 +438,10 @@ class CommandMeta(type):
             name = ':'.join((plugin_name, cls.__name__))
             mcs.commands[name] = cls
 
+    @property
+    def fqn(cls):
+        return ':'.join((cls.plugin.module_name, cls.__name__))
+
     @classmethod
     def _lookup_command_classmethods(mcs, *names):
         valid_names = set(['local_setup', 'local_teardown', 'remote_setup', 'remote_teardown'])
@@ -473,7 +477,7 @@ class Cmd(metaclass=CommandMeta):
 
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
-    channels = defaultdict(lambda: asyncio.Queue())
+    channels = defaultdict(asyncio.Queue)
 
     def local(self, *args, **kwargs):
         raise NotImplementedError(
@@ -491,18 +495,28 @@ class Execute(Cmd):
         self.args = args
         self.kwargs = kwargs
 
+    @property
+    def params(self):
+        params = {
+            'command_name': self.command_name,
+            'args': self.args,
+            'kwargs': self.kwargs,
+        }
+        return params
+
     async def local(self, remote):
 
-        channel = '{0.command_name}/{uuid}'.format(
-            self,
-            uuid = uuid.uuid1().hex
-        ).encode()
-
+        channel_out = JsonChannel(
+            self.__class__.fqn.encode(),
+            queue=remote.queue_in
+        )
 
         # send command and args to remote
         # and wait for setup_complete
 
-        pass
+        uid = uuid.uuid1().hex
+        async with channel_out.message(uid.encode()) as send:
+            await send(self.params)
 
     async def remote(self):
         pass
@@ -551,13 +565,13 @@ class Execute(Cmd):
                     if line is b'':
                         break
 
-                    channel, uid, compressor, data = Chunk.view(line)
+                    channel_name, uid, compressor, data = Chunk.view(line)
 
                     logger.debug("\t\tincomming: %s", line)
 
                     # split command channel from other plugin channels
                     # we want to execute a command
-                    if channel == command.id:
+                    if channel_name == cls.fqn.encode():
                         await channel_in.forward(line)
 
                     else:
@@ -573,10 +587,14 @@ class Execute(Cmd):
         setup.add_done_callback(future.set_result)
 
         async def teardown():
-            await future
-            result = future.get_result()
+            try:
+                result = await setup
+            except Exception as ex:
+                result = ex
+                raise
 
             logger.debug("teardown %s with %s", cls, result)
+
         asyncio.ensure_future(teardown())
 
 

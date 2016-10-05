@@ -310,6 +310,10 @@ async def feed_stdin_to_remotes(**options):
                 if line is b'':
                     break
 
+                if not line[:-1]:
+                    line = b'dbltr.core:Execute dbltr.core:Echo foo bar=123\n'
+                    print(line)
+
                 if remote.returncode is None:
                     command, args, kwargs = parse_command(line[:-1].decode())
 
