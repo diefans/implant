@@ -93,17 +93,12 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     Embodies a remote python process.
     """
 
-    def __init__(self, *, loop=None, compressor=False, **options):
-        if loop is None:
-            loop = asyncio.get_event_loop()
+    def __init__(self, **options):
+        super(Remote, self).__init__(limit=asyncio.streams._DEFAULT_LIMIT, loop=asyncio.get_event_loop())
 
-        super(Remote, self).__init__(limit=asyncio.streams._DEFAULT_LIMIT, loop=loop)
-
-        self.compressor = compressor
-
-        self.queue_in = asyncio.Queue(loop=self._loop)
-        self.queue_out = asyncio.Queue(loop=self._loop)
-        self.queue_err = asyncio.Queue(loop=self._loop)
+        self.queue_in = asyncio.Queue()
+        self.queue_out = asyncio.Queue()
+        self.queue_err = asyncio.Queue()
         self.pid = None
         self.returncode = None
         self.terminator = None
@@ -115,11 +110,11 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.receiving = None
 
         # we distribute channels from stdout
-        self.channels = core.Channels(loop=self._loop, compressor=self.compressor)
+        self.channels = core.Channels()
 
         # the channel to send everything
-        self.channel_out = core.JsonChannel(queue=self.queue_in, loop=self._loop, compressor=self.compressor)
-        self._commander = core.Commander(self.channel_out, self.channels.default, self._loop)
+        self.channel_out = core.JsonChannel(queue=self.queue_in)
+        self._commander = core.Commander(self.channel_out, self.channels.default)
 
     @utils.reify
     def execute(self):
@@ -161,7 +156,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.teardown = asyncio.ensure_future(teardown())
 
         # setup all plugin commands
-        await core.Cmd.local_setup(self, self._loop)
+        await core.Cmd.local_setup(self)
         # for plugin in set(core.Plugin.plugins.values()):
         #     for command in plugin.commands.values():
         #         if command.local_setup:
@@ -193,15 +188,12 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
                      target=None,
                      # host=None, user=None, sudo=None,
                      python_bin=sys.executable, code=None,
-                     loop=None, options=None, **kwargs):
+                     options=None, **kwargs):
         """Create a remote process."""
         core.logger.info('\n%s', '\n'.join(['+' * 80] * 1))
 
         if target is None:
             target = Target()
-
-        if loop is None:
-            loop = asyncio.get_event_loop()
 
         if code is None:
             # our default receiver is myself
@@ -212,8 +204,8 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         command_args = target.command_args(code, options=options, python_bin=python_bin)
 
-        remote = cls(loop=loop, **options)
-        await loop.subprocess_exec(
+        remote = cls(**options)
+        await asyncio.get_event_loop().subprocess_exec(
             lambda: remote,
             *command_args,
             stdin=asyncio.subprocess.PIPE,
@@ -264,7 +256,6 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
             asyncio.ensure_future(self._commander.resolve_pending()),
-            loop=self._loop
         )
 
         self.receiving = receiving
@@ -304,9 +295,9 @@ def parse_command(line):
 async def feed_stdin_to_remotes(**options):
     remote = await Remote.launch(code=core,
                                  python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
-                                 loop=core.loop, options=options)
+                                 options=options)
 
-    remote_task = asyncio.ensure_future(remote.receive(), loop=core.loop)
+    remote_task = asyncio.ensure_future(remote.receive())
     core.logger.info("fooo")
     try:
         async with core.Incomming(pipe=sys.stdin) as reader:
@@ -323,10 +314,15 @@ async def feed_stdin_to_remotes(**options):
                     command, args, kwargs = parse_command(line[:-1].decode())
 
                     try:
-                        cmd = core.Plugin.get(command)
-                        if isinstance(cmd, core.Command):
-                            # new command execution
-                            result = None
+                        Command = core.Cmd.commands.get(command)
+
+                        # cmd = core.Plugin.get(command)
+
+                        if inspect.isclass(Command) and issubclass(Command, core.Cmd):
+                            core.logger.info('executing %s', Command)
+                            cmd = Command(*args, **kwargs)
+
+                            result = await cmd.local(remote)
 
                         else:
                             result = await remote.execute(command, *args, **kwargs)
@@ -370,12 +366,10 @@ class ExecutorConsoleHandler(StreamHandler):
     # TODO FIXME it still occurs...
 
     def _emit(self, record):
-        core.loop.run_in_executor(self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record))
+        asyncio.get_event_loop().run_in_executor(self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record))
 
 
 def main():
-    compressor = 'gzip'
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
         logging_handler = ExecutorConsoleHandler(logging_executor)
         core.logger.propagate = False
@@ -383,12 +377,11 @@ def main():
         # core.logger.setLevel('INFO')
 
         try:
-            core.loop.run_until_complete(
+            asyncio.get_event_loop().run_until_complete(
                 core.run(
-                    feed_stdin_to_remotes(compressor=compressor),
-                    loop=core.loop
+                    feed_stdin_to_remotes(),
                 )
             )
 
         finally:
-            core.loop.close()
+            asyncio.get_event_loop().close()

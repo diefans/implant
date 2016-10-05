@@ -1,7 +1,6 @@
 """
 Remote process
 """
-import pkg_resources
 import inspect
 import sys
 import asyncio
@@ -16,6 +15,8 @@ import gzip
 import lzma
 import contextlib
 import logging
+from collections import defaultdict
+import pkg_resources
 
 
 pkg_environment = pkg_resources.Environment()
@@ -114,16 +115,15 @@ class Incomming:
 
     """A context for an incomming pipe."""
 
-    def __init__(self, *, loop=None, pipe=sys.stdin):
-        self._loop = loop or asyncio.get_event_loop()
+    def __init__(self, *, pipe=sys.stdin):
         self.pipe = pipe
         self.transport = None
 
     async def __aenter__(self):
-        reader = asyncio.StreamReader(loop=self._loop)
+        reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
 
-        self.transport, _ = await self._loop.connect_read_pipe(
+        self.transport, _ = await asyncio.get_event_loop().connect_read_pipe(
             lambda: protocol,
             # sys.stdin
             os.fdopen(self.pipe.fileno(), 'r')
@@ -138,18 +138,17 @@ class Outgoing:
 
     """A context for an outgoing pipe."""
 
-    def __init__(self, *, loop=None, pipe=sys.stdout):
-        self._loop = loop or asyncio.get_event_loop()
+    def __init__(self, *, pipe=sys.stdout):
         self.pipe = pipe
         self.transport = None
 
     async def __aenter__(self):
-        self.transport, protocol = await self._loop.connect_write_pipe(
+        self.transport, protocol = await asyncio.get_event_loop().connect_write_pipe(
             asyncio.streams.FlowControlMixin,
             # sys.stdout
             os.fdopen(self.pipe.fileno(), 'wb')
         )
-        writer = asyncio.streams.StreamWriter(self.transport, protocol, None, self._loop)
+        writer = asyncio.streams.StreamWriter(self.transport, protocol, None, asyncio.get_event_loop())
 
         return writer
 
@@ -474,6 +473,8 @@ class Cmd(metaclass=CommandMeta):
 
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
+    channels = defaultdict(lambda: asyncio.Queue())
+
     def local(self, *args, **kwargs):
         raise NotImplementedError(
             'You have to implement at least a `local` method'
@@ -485,19 +486,37 @@ class Execute(Cmd):
 
     """The executor of all commands."""
 
-    def __init__(self, command, *args, **kwargs):
+    def __init__(self, command_name, *args, **kwargs):
+        self.command_name = command_name
+        self.args = args
+        self.kwargs = kwargs
+
+    async def local(self, remote):
+
+        channel = '{0.command_name}/{uuid}'.format(
+            self,
+            uuid = uuid.uuid1().hex
+        ).encode()
+
+
+        # send command and args to remote
+        # and wait for setup_complete
+
+        pass
+
+    async def remote(self):
         pass
 
     @classmethod
-    async def local_setup(cls, remote, loop):
+    async def local_setup(cls, remote):
         pass
 
     @classmethod
-    async def remote_setup(cls, queue_out, loop):
+    async def remote_setup(cls, queue_out):
         channel_out = JsonChannel(queue=queue_out)
 
         # our incomming command queue
-        queue_in = asyncio.Queue(loop=loop)
+        queue_in = asyncio.Queue()
         channel_in = JsonChannel(queue=queue_in)
 
         # a queue for each plugin command message
@@ -542,14 +561,15 @@ class Execute(Cmd):
                         await channel_in.forward(line)
 
                     else:
+                        # XXX TODO create a queue for each command/uuid pair
                         # distribute to plugin channels
                         await channels.distribute(line)
 
         logger.debug("remote setup %s %s", command, queue_out)
 
         # create a teardown background task to be called when this process finishes
-        setup = asyncio.gather(execute_commands(), distribute_commands(), loop=loop)
-        future = asyncio.Future(loop=loop)
+        setup = asyncio.gather(execute_commands(), distribute_commands())
+        future = asyncio.Future()
         setup.add_done_callback(future.set_result)
 
         async def teardown():
@@ -572,7 +592,7 @@ class Echo(Cmd):
         pass
 
     @classmethod
-    async def remote_setup(cls, queue_out, loop):
+    async def remote_setup(cls, queue_out):
         logger.info("--------------------------------setup remote: %s", cls)
         async def log(remote):
             logger.info("exit: %s", cls)
@@ -594,6 +614,7 @@ class Chunk:
     separator = b'|'
 
     compressor = {
+        True: gzip,
         'gzip': gzip,
         'lzma': lzma
     }
@@ -617,7 +638,8 @@ class Chunk:
                     yield i
                     count += 1
 
-            assert count == 3, 'A Chunk must be composed by two separators, e.g. `channel|uid|payload`!'
+            assert count == 3, 'A Chunk must be composed by three separators, '\
+                'e.g. `channel|uid|payload`!'
         channel_end, uid_end, compressor_end = _gen_separator_index()
 
         raw_len = len(raw_view)
@@ -643,7 +665,7 @@ class Chunk:
 
         return cls(data, channel=channel_view.tobytes(), uid=uid_view.tobytes())
 
-    def encode(self, eol=True, *, compressor=False):
+    def encode(self, eol=True, *, compress=False):
         """Encode the chunk into a bytes string."""
 
         def _gen_parts():
@@ -651,12 +673,12 @@ class Chunk:
             yield self.separator
             yield self.uid or b''
             yield self.separator
-            yield compressor and compressor.encode() or b''
+            yield compress and compress.encode() or b''
             yield self.separator
 
             data = self.data or b''
-            if compressor in self.compressor:
-                data = self.compressor[compressor].compress(data)
+            if compress in self.compressor:
+                data = self.compressor[compress].compress(data)
             yield base64.b64encode(data)
 
             if eol:
@@ -699,12 +721,9 @@ class ChunkChannel:
 
     max_size = 10240
 
-    def __init__(self, name=DEFAULT_CHANNEL_NAME, *, queue=None, loop=None, compressor=False):
+    def __init__(self, name=DEFAULT_CHANNEL_NAME, *, queue=None):
         self.name = name
-        self._loop = loop or asyncio.get_event_loop()
-        self.queue = queue or asyncio.Queue(loop=loop)
-
-        self.compressor = compressor
+        self.queue = queue or asyncio.Queue()
 
         self.futures = {}
         """Register a message uid to be a resolvable future.
@@ -730,7 +749,7 @@ class ChunkChannel:
         """Create a context with a future to wait for."""
         # TODO XXX does this make only sense for complete (json) messages?
 
-        self.futures[uid] = future = asyncio.Future(loop=self._loop)
+        self.futures[uid] = future = asyncio.Future()
 
         yield future
 
@@ -753,12 +772,12 @@ class ChunkChannel:
     async def forward(self, line):
         await self.queue.put(line)
 
-    async def inject_chunk(self, chunk, compressor=False):
+    async def inject_chunk(self, chunk, compress=False):
         """Allows forwarding of a chunk as is into the queue."""
 
-        await self.queue.put(chunk.encode(compressor=compressor))
+        await self.queue.put(chunk.encode(compress=compress))
 
-    async def send(self, data, *, uid=None, compressor=False):
+    async def send(self, data, *, uid=None, compress=False):
         """Create a chunk from data and uid and send it to the queue of this channel."""
 
         if isinstance(data, Chunk):
@@ -767,14 +786,14 @@ class ChunkChannel:
         for part in split_data(data, self.max_size):
             chunk = Chunk(part, channel=self.name, uid=uid)
 
-            await self.inject_chunk(chunk, compressor=compressor)
+            await self.inject_chunk(chunk, compress=compress)
 
     async def send_eom(self, *, uid=None):
         """Send EOM (end of message) to the queue."""
 
         chunk = Chunk(None, channel=self.name, uid=uid)
 
-        await self.queue.put(chunk.encode(compressor=False))
+        await self.queue.put(chunk.encode(compress=False))
 
 
 def split_data(data, size=1024):
@@ -834,14 +853,16 @@ class EncodedBufferChannel(ChunkChannel):
     def encode(self, data):
         return data
 
-    async def send(self, data, *, uid=None, compressor=False):
+    async def send(self, data, *, uid=None, compress=False):
 
         if isinstance(data, Chunk):
             data = data.data
 
         encoded_data = self.encode(data).encode()
 
-        await super(EncodedBufferChannel, self).send(encoded_data, uid=uid, compressor=compressor)
+        await super(EncodedBufferChannel, self).send(
+            encoded_data, uid=uid, compress=compress
+        )
 
     def message(self, uid=None):
         class _context:
@@ -875,11 +896,9 @@ class Channels:
 
     The empty channel is used to send Commands."""
 
-    def __init__(self, *, loop=None, compressor=False):
-        self._loop = loop or asyncio.get_event_loop()
-
+    def __init__(self):
         self._channels = {}
-        self.add_channel(JsonChannel(loop=self._loop, compressor=compressor))
+        self.add_channel(JsonChannel())
 
         self.default = self[DEFAULT_CHANNEL_NAME]
 
@@ -969,9 +988,7 @@ class Commander:
 
     commands = {}
 
-    def __init__(self, channel_out, channel_in, loop=None):
-        self._loop = loop or asyncio.get_event_loop()
-
+    def __init__(self, channel_out, channel_in):
         self.channel_out = channel_out
         self.channel_in = channel_in
 
@@ -1014,7 +1031,7 @@ class Commander:
 
         with self.channel_in.waiting_for(uid) as future:
             async with self.channel_out.message(uid) as send:
-                await send(msg, compressor='gzip')
+                await send(msg, compress='gzip')
 
             result = await future
             logger.info("result: %s", result)
@@ -1042,7 +1059,7 @@ class Commander:
             }
 
             async with channel_out.message(uid) as send:
-                await send(result, compressor='gzip')
+                await send(result, compress='gzip')
 
     @classmethod
     def command(cls, name=None):
@@ -1110,7 +1127,7 @@ async def command(command, queue_out, queue_in, command_args, command_kwargs):
 
 
 @command.local_setup
-async def command(command, remote, loop):
+async def command(command, remote):
     """Distribute remote stdout to channels."""
 
 
@@ -1119,38 +1136,14 @@ async def command(command, *, queue_out, command_args, command_kwargs):
     pass
 
 
-async def receive(cls, channel_in, channel_out):
-    """The remote part of execute method."""
-
-    # logger.info("Retrieving commands...")
-
-    async for uid, message in channel_in:
-        logger.info("retrieved command: %s", message)
-
-        # do something and return result
-        command = cls.commands[message['command']]
-
-        cmd_args = message.get('args', [])
-        cmd_kwargs = message.get('kwargs', {})
-
-        result = await command.remote(*cmd_args, **cmd_kwargs)
-
-        result = {
-            'foo': result
-        }
-
-        async with channel_out.message(uid) as send:
-            await send(result, compressor='gzip')
-
-
 @command.remote_setup
-async def command(command, queue_out, loop):
+async def command(command, queue_out):
     """Starts distribution of incomming chunks."""
 
     channel_out = JsonChannel(queue=queue_out)
 
     # our incomming command queue
-    queue_in = asyncio.Queue(loop=loop)
+    queue_in = asyncio.Queue()
     channel_in = JsonChannel(queue=queue_in)
 
     # a queue for each plugin command message
@@ -1176,7 +1169,7 @@ async def command(command, queue_out, loop):
             }
 
             async with channel_out.message(uid) as send:
-                await send(result, compressor='gzip')
+                await send(result, compress='gzip')
 
     async def distribute_commands():
         async with Incomming(pipe=sys.stdin) as reader:
@@ -1185,7 +1178,7 @@ async def command(command, queue_out, loop):
                 if line is b'':
                     break
 
-                channel, uid, compressor, data = Chunk.view(line)
+                channel, uid, compress, data = Chunk.view(line)
 
                 logger.debug("\t\tincomming: %s", line)
 
@@ -1226,16 +1219,16 @@ async def copy_large_file_remote(channel_in, *args, src=None, dest=None, **kwarg
     pass
 
 
-async def run(*tasks, loop=None):
+async def run(*tasks):
     """Schedules all tasks and wait for running is done or canceled"""
 
     # create indicator for running messenger
-    running = asyncio.Future(loop=loop)
+    running = asyncio.Future()
 
     shutdown_tasks = []
 
     for task in tasks:
-        fut = asyncio.ensure_future(task, loop=loop)
+        fut = asyncio.ensure_future(task)
 
         def _shutdown_on_error(future):
             try:
@@ -1255,7 +1248,7 @@ async def run(*tasks, loop=None):
     # exit on sigterm or sigint
     for signame in ('SIGINT', 'SIGTERM'):
         sig = getattr(signal, signame)
-        loop.add_signal_handler(sig, functools.partial(running.set_result, sig))
+        asyncio.get_event_loop().add_signal_handler(sig, functools.partial(running.set_result, sig))
 
     # wait for running completed
     result = await running
@@ -1272,21 +1265,20 @@ async def run(*tasks, loop=None):
     return result
 
 
-def main(compressor=False, **kwargs):
+def main(**kwargs):
 
     # TODO channels must somehow connected with commands
-    channels = Channels(loop=loop, compressor=compressor)
+    channels = Channels()
 
-    queue_out = asyncio.Queue(loop=loop)
-    channel_out = JsonChannel(channels.default.name, queue=queue_out, compressor=compressor)
+    queue_out = asyncio.Queue()
+    channel_out = JsonChannel(channels.default.name, queue=queue_out)
 
     # setup all plugin commands
-    loop.run_until_complete(Cmd.remote_setup(queue_out, loop))
+    loop.run_until_complete(Cmd.remote_setup(queue_out))
     try:
         loop.run_until_complete(
             run(
                 send_outgoing_queue(queue_out, sys.stdout),
-                loop=loop
             )
         )
 
