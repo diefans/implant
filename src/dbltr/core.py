@@ -518,8 +518,26 @@ class Execute(Cmd):
         async with channel_out.message(uid.encode()) as send:
             await send(self.params)
 
-    async def remote(self):
-        pass
+    async def remote(self, queue_out, uid):
+        logger.info("executing %s for %s", uid, self.params)
+        Command = Cmd.commands.get(self.command_name)
+
+        if inspect.isclass(Command) and issubclass(Command, Cmd):
+
+            # do something and return result
+            command = Command(*self.args, **self.kwargs)
+
+            result = await command.remote(
+                # XXX should we supply a send context?
+                queue_out=queue_out,
+                # XXX we should supply a caommand instance input queue here
+                queue_in=?,
+                uid=uid
+            )
+
+        else:
+            result = None
+
 
     @classmethod
     async def local_setup(cls, remote):
@@ -540,16 +558,9 @@ class Execute(Cmd):
             async for uid, message in channel_in:
                 logger.info("retrieved command: %s", message)
 
-                # do something and return result
-                cmd_args = message.get('args', [])
-                cmd_kwargs = message.get('kwargs', {})
+                execute = cls(message['command_name'], *message['args'], **message['kwargs'])
 
-                result = await command.remote(
-                    command,
-                    queue_out=queue_out,
-                    command_args=cmd_args,
-                    command_kwargs=cmd_kwargs
-                )
+                result = execute.remote(queue_out=queue_out, uid=uid)
 
                 result = {
                     'foo': result
@@ -606,7 +617,7 @@ class Echo(Cmd):
     async def local(self):
         pass
 
-    async def remote(self):
+    async def remote(self, queue_out):
         pass
 
     @classmethod
