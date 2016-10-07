@@ -15,6 +15,9 @@ import gzip
 import lzma
 import contextlib
 import logging
+import weakref
+import traceback
+import pickle
 from collections import defaultdict
 import pkg_resources
 
@@ -440,7 +443,7 @@ class CommandMeta(type):
 
     @property
     def fqn(cls):
-        return ':'.join((cls.plugin.module_name, cls.__name__))
+        return ':'.join((cls.plugin.module_name, cls.__name__)).encode()
 
     @classmethod
     def _lookup_command_classmethods(mcs, *names):
@@ -479,18 +482,61 @@ class Cmd(metaclass=CommandMeta):
 
     channels = defaultdict(asyncio.Queue)
 
+    command_instances = weakref.WeakValueDictionary()
+    """Holds references to all active Instances of Commands, to forward to their queue"""
+
+    command_instance_names = weakref.WeakKeyDictionary()
+    """Holds all instances mapping to their FQIN."""
+
+
+    def __init__(self):
+        self.queue = asyncio.Queue()
+
     def local(self, *args, **kwargs):
         raise NotImplementedError(
             'You have to implement at least a `local` method'
             'for your Command to work: {}'.format(self.__class__)
         )
 
+    @reify
+    def fqin(self):
+        """The fully qualified instance name."""
+
+        return self.__class__.command_instance_names[self]
+
+    def _create_reference(self, uid):
+        fqin = b'/'.join((self.__class__.fqn, uid))
+        self.__class__.command_instance_names[self] = fqin
+        self.__class__.command_instances[fqin] = self
+
+    @functools.lru_cache(typed=True)
+    def channel(self, channel_type, *, queue=None):
+        return channel_type(self.fqin, queue=queue or self.queue)
+
+    def __repr__(self):
+        return self.fqin.decode()
+
+
+
+class RemoteException(Exception):
+
+    def __init__(self, *, fqin, traceback, type):
+        super(RemoteException, self).__init__()
+
+        self.fqin = fqin
+        self.traceback = traceback
+        self.type = type
+
 
 class Execute(Cmd):
 
     """The executor of all commands."""
 
+    pending_futures = defaultdict(asyncio.Future)
+
     def __init__(self, command_name, *args, **kwargs):
+        super(Execute, self).__init__()
+
         self.command_name = command_name
         self.args = args
         self.kwargs = kwargs
@@ -504,22 +550,9 @@ class Execute(Cmd):
         }
         return params
 
-    async def local(self, remote):
+    def create_command(self, uid):
+        """Create a new Command instance and assign a uid to it."""
 
-        channel_out = JsonChannel(
-            self.__class__.fqn.encode(),
-            queue=remote.queue_in
-        )
-
-        # send command and args to remote
-        # and wait for setup_complete
-
-        uid = uuid.uuid1().hex
-        async with channel_out.message(uid.encode()) as send:
-            await send(self.params)
-
-    async def remote(self, queue_out, uid):
-        logger.info("executing %s for %s", uid, self.params)
         Command = Cmd.commands.get(self.command_name)
 
         if inspect.isclass(Command) and issubclass(Command, Cmd):
@@ -527,25 +560,139 @@ class Execute(Cmd):
             # do something and return result
             command = Command(*self.args, **self.kwargs)
 
-            result = await command.remote(
-                # XXX should we supply a send context?
-                queue_out=queue_out,
-                # XXX we should supply a caommand instance input queue here
-                queue_in=?,
-                uid=uid
-            )
+            try:
+                return command
 
-        else:
-            result = None
+            finally:
+                command._create_reference(uid)
 
+        raise KeyError('The command `{}` does not exist!'.format(self.command_name))
+
+    async def local(self, remote):
+
+        # XXX maybe simplify by directly using remote.stdin
+        channel_out = JsonChannel(
+            self.__class__.fqn,
+            queue=remote.queue_in
+        )
+
+        # send command and args to remote
+        # and wait for setup_complete
+
+        uid = uuid.uuid1().hex.encode()
+        self._create_reference(uid)
+
+        command = self.create_command(uid)
+
+        # create remote command
+        async with channel_out.message(uid) as send:
+            await send(self.params)
+
+        async for msg in self.channel(JsonChannel):
+            logger.info("sync: %s", msg)
+            break
+        # future_create = self.pending_futures[self.fqin]
+        # await future_create
+
+        # XXX TODO create a context and remove future when done
+        future = self.pending_futures[command.fqin]
+        result = await command.local(queue_out=remote.queue_in, future=future)
+
+        return result
 
     @classmethod
     async def local_setup(cls, remote):
-        pass
+        # distibute to local instances
+        logger.info("create local instance distributor")
+
+        channel_in = JsonChannel()
+
+        async def resolve_pending_futures():
+            async for uid, message in channel_in:
+                fqin = message['fqin'].encode()
+                future = cls.pending_futures[fqin]
+
+                if 'result' in message:
+                    future.set_result(message['result'])
+
+                elif 'exception' in message:
+                    ex = RemoteException(
+                        fqin=fqin,
+                        type=message['exception']['type'],
+                        traceback=message['exception']['traceback'],
+                    )
+                    ex_unpickled = pickle.loads(base64.b64decode(message['exception']['pickle']))
+
+                    future.set_exception(ex_unpickled)
+
+
+        async def distribute_commands():
+            async for line in remote.stdout:
+                if line is b'':
+                    break
+
+                channel_name, uid, compress, data = Chunk.view(line)
+
+                logger.debug("\t\t<-- incomming: %s", line)
+
+                # split command channel from other plugin channels
+                # we want to execute a command
+                if channel_name == cls.fqn:
+                    await channel_in.forward(line)
+
+                else:
+                    # forward arbitrary data to their instances
+                    try:
+                        await cls.command_instances[channel_name.tobytes()].queue.put(line)
+
+                    except KeyError:
+                        logger.error("Channel instance not found: %s", channel_name.tobytes())
+
+        setup = asyncio.gather(resolve_pending_futures(), distribute_commands())
+        async def teardown():
+            try:
+                result = await setup
+            except Exception as ex:
+                result = ex
+                raise
+
+            logger.debug("teardown %s with %s", cls, result)
+
+        asyncio.ensure_future(teardown())
+
+    async def remote(self, queue_out, uid):
+
+        command = self.create_command(uid)
+        logger.info("remote executing %s for %s", command, self.params)
+
+        result_message = {
+            'fqin': command.fqin.decode(),
+        }
+
+        # trigger sync
+        channel = self.channel(JsonChannel, queue=queue_out)
+        async with channel.message() as send:
+            await send(None)
+
+        try:
+            result = await command.remote(
+                queue_out=queue_out,
+            )
+
+            result_message['result'] = result
+
+        except Exception as ex:
+            result_message['exception'] = {
+                'traceback': traceback.format_exc(),
+                'type': ex.__class__.__name__,
+                'pickle': base64.b64encode(pickle.dumps(ex)).decode()
+            }
+
+        return result_message
 
     @classmethod
     async def remote_setup(cls, queue_out):
-        channel_out = JsonChannel(queue=queue_out)
+        channel_out = JsonChannel(cls.fqn, queue=queue_out)
 
         # our incomming command queue
         queue_in = asyncio.Queue()
@@ -559,15 +706,14 @@ class Execute(Cmd):
                 logger.info("retrieved command: %s", message)
 
                 execute = cls(message['command_name'], *message['args'], **message['kwargs'])
+                execute._create_reference(uid)
 
-                result = execute.remote(queue_out=queue_out, uid=uid)
+                result = await execute.remote(queue_out=queue_out, uid=uid)
 
-                result = {
-                    'foo': result
-                }
+                logger.debug("result: %s", result)
 
                 async with channel_out.message(uid) as send:
-                    await send(result, compressor='gzip')
+                    await send(result, compress='gzip')
 
         async def distribute_commands():
             async with Incomming(pipe=sys.stdin) as reader:
@@ -576,19 +722,18 @@ class Execute(Cmd):
                     if line is b'':
                         break
 
-                    channel_name, uid, compressor, data = Chunk.view(line)
+                    channel_name, uid, compress, data = Chunk.view(line)
 
-                    logger.debug("\t\tincomming: %s", line)
+                    logger.debug("\t\t--> incomming: %s", line)
 
                     # split command channel from other plugin channels
                     # we want to execute a command
-                    if channel_name == cls.fqn.encode():
+                    if channel_name == cls.fqn:
                         await channel_in.forward(line)
 
                     else:
-                        # XXX TODO create a queue for each command/uuid pair
-                        # distribute to plugin channels
-                        await channels.distribute(line)
+                        # forward arbitrary data to their instances
+                        await cls.command_instances[channel_name.tobytes()].queue.put(line)
 
         logger.debug("remote setup %s %s", command, queue_out)
 
@@ -611,14 +756,42 @@ class Execute(Cmd):
 
 class Echo(Cmd):
     def __init__(self, *args, **kwargs):
+        super(Echo, self).__init__()
+
         self.args = args
         self.kwargs = kwargs
 
-    async def local(self):
-        pass
+    async def local(self, queue_out, future):
+        logger.info("local running %s", self)
+        channel = self.channel(JsonChannel, queue=queue_out)
+
+        for i in range(10):
+            async with channel.message() as send:
+                await send({'i': i})
+
+        result = await future
+        logger.info("local future finished: %s", result)
+        return result
 
     async def remote(self, queue_out):
-        pass
+        logger.info("remote running %s", self)
+
+        channel = self.channel(JsonChannel)
+
+        data = []
+        async for uid, msg in channel:
+            logger.info("\t\t--> data incomming: %s", msg)
+            data.append(msg)
+
+            if msg['i'] == 9:
+                break
+
+        # raise Exception("foo")
+        return {
+            'args': self.args,
+            'kwargs': self.kwargs,
+            'data': data
+        }
 
     @classmethod
     async def remote_setup(cls, queue_out):
@@ -654,6 +827,7 @@ class Chunk:
         self.uid = uid
 
     @classmethod
+    @functools.lru_cache(typed=True)
     def view(cls, raw):
         raw_view = memoryview(raw)
 
@@ -824,6 +998,24 @@ class ChunkChannel:
 
         await self.queue.put(chunk.encode(compress=False))
 
+    def message(self, uid=None):
+
+        if uid is None:
+            uid = uuid.uuid1().hex.encode()
+
+        class _context:
+            def __init__(self, channel):
+                self.channel = channel
+
+            async def __aenter__(self):
+                return functools.partial(self.channel.send, uid=uid)
+
+            async def __aexit__(self, exc_type, exc, tb):
+                # send EOM
+                await self.channel.send_eom(uid=uid)
+
+        return _context(self)
+
 
 def split_data(data, size=1024):
     """A generator to yield splitted data."""
@@ -892,20 +1084,6 @@ class EncodedBufferChannel(ChunkChannel):
         await super(EncodedBufferChannel, self).send(
             encoded_data, uid=uid, compress=compress
         )
-
-    def message(self, uid=None):
-        class _context:
-            def __init__(self, channel):
-                self.channel = channel
-
-            async def __aenter__(self):
-                return functools.partial(self.channel.send, uid=uid)
-
-            async def __aexit__(self, exc_type, exc, tb):
-                # send EOM
-                await self.channel.send_eom(uid=uid)
-
-        return _context(self)
 
 
 class JsonChannel(EncodedBufferChannel):

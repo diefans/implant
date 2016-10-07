@@ -253,7 +253,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     async def receive(self):
         receiving = asyncio.gather(
             asyncio.ensure_future(self._connect_stdin()),
-            asyncio.ensure_future(self._connect_stdout()),
+            # asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
             asyncio.ensure_future(self._commander.resolve_pending()),
         )
@@ -333,6 +333,8 @@ async def feed_stdin_to_remotes(**options):
 
                     except (TypeError, KeyError) as ex:
                         print("< {}\n > ".format(ex), end='')
+                        import traceback
+                        traceback.print_exc()
 
                     else:
                         print("< {}\n > ".format(result), end='')
