@@ -29,11 +29,21 @@ logging.basicConfig(level='DEBUG')
 logger = logging.getLogger(__name__)
 logger.info('\n%s', '\n'.join(['*' * 80] * 3))
 
-finalizer = []
 
+class aenumerate:
+    def __init__(self, aiterable, start=0):
+        self._ait = aiterable
+        self._i = start
 
-def add_finalizer(func):
-    finalizer.append(func)
+    async def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        val = await self._ait.__anext__()
+        try:
+            return self._i, val
+        finally:
+            self._i += 1
 
 
 class reify:
@@ -570,27 +580,13 @@ class Execute(Cmd):
 
     async def local(self, remote):
 
-        # XXX maybe simplify by directly using remote.stdin
-        channel_out = JsonChannel(
-            self.__class__.fqn,
-            queue=remote.queue_in
-        )
-
-        # send command and args to remote
-        # and wait for setup_complete
-
         uid = uuid.uuid1().hex.encode()
         self._create_reference(uid)
 
         command = self.create_command(uid)
 
-        # create remote command
-        async with channel_out.message(uid) as send:
-            await send(self.params)
+        await self._create_remote_command(remote, uid)
 
-        async for msg in self.channel(JsonChannel):
-            logger.info("sync: %s", msg)
-            break
         # future_create = self.pending_futures[self.fqin]
         # await future_create
 
@@ -599,6 +595,21 @@ class Execute(Cmd):
         result = await command.local(queue_out=remote.queue_in, future=future)
 
         return result
+
+    async def _create_remote_command(self, remote, uid):
+        channel_out = JsonChannel(
+            self.__class__.fqn,
+            queue=remote.queue_in
+        )
+
+        # create remote command
+        async with channel_out.message(uid) as send:
+            await send(self.params)
+
+        # wait for sync
+        async for msg in self.channel(JsonChannel):
+            logger.info("sync: %s", msg)
+            break
 
     @classmethod
     async def local_setup(cls, remote):
@@ -624,7 +635,6 @@ class Execute(Cmd):
                     ex_unpickled = pickle.loads(base64.b64decode(message['exception']['pickle']))
 
                     future.set_exception(ex_unpickled)
-
 
         async def distribute_commands():
             async for line in remote.stdout:
@@ -669,7 +679,7 @@ class Execute(Cmd):
             'fqin': command.fqin.decode(),
         }
 
-        # trigger sync
+        # trigger sync for awaiting local method
         channel = self.channel(JsonChannel, queue=queue_out)
         async with channel.message() as send:
             await send(None)
@@ -754,6 +764,54 @@ class Execute(Cmd):
         asyncio.ensure_future(teardown())
 
 
+class Import(Cmd):
+    def __init__(self, plugin_name):
+        super(Import, self).__init__()
+
+        self.plugin_name = plugin_name
+
+    async def local(self, queue_out, future):
+        plugin = Plugin[self.plugin_name]
+
+        code = inspect.getsource(plugin.module)
+        module_name = plugin.module.__name__
+
+        project_name, entry_point_name = plugin.name.split('#')
+
+        plugin_data = {
+            'code': code,
+            'project_name': project_name,
+            'entry_point_name': entry_point_name,
+            'module_name': module_name,
+        }
+
+        channel_out = self.channel(JsonChannel, queue=queue_out)
+        async with channel_out.message() as send:
+            await send(plugin_data)
+
+        result = await cmd(code, project_name, entry_point_name, module_name)
+
+        return result
+
+    async def remote(self, queue_out):
+        channel_in = self.channel(JsonChannel)
+
+        async for uid, module_data in channel_in: break
+
+        plugin = Plugin.create_from_code(code, project_name, entry_point_name, module_name)
+        Plugin.add(plugin)
+
+        # collect commands
+        logger.debug("--> %s, commands: %s", id(Commander), Commander.commands)
+        commands = list(Commander.commands.keys())
+
+        return {
+            'commands': commands,
+            'plugins': list(Plugin.plugins.keys())
+        }
+
+
+
 class Echo(Cmd):
     def __init__(self, *args, **kwargs):
         super(Echo, self).__init__()
@@ -763,23 +821,42 @@ class Echo(Cmd):
 
     async def local(self, queue_out, future):
         logger.info("local running %s", self)
-        channel = self.channel(JsonChannel, queue=queue_out)
+        channel_in = self.channel(JsonChannel)
+        channel_out = self.channel(JsonChannel, queue=queue_out)
 
+        incomming = []
+
+        # custom protocol
+        # first receive
+        async for i, (uid, msg) in aenumerate(channel_in):
+            incomming.append(msg)
+            if i == 9:
+                break
+
+        # second send
         for i in range(10):
-            async with channel.message() as send:
+            async with channel_out.message() as send:
                 await send({'i': i})
 
         result = await future
         logger.info("local future finished: %s", result)
-        return result
+        return [result, incomming]
 
     async def remote(self, queue_out):
         logger.info("remote running %s", self)
 
-        channel = self.channel(JsonChannel)
+        channel_in = self.channel(JsonChannel)
+        channel_out = self.channel(JsonChannel, queue=queue_out)
 
         data = []
-        async for uid, msg in channel:
+
+        # first send
+        for i in range(10):
+            async with channel_out.message() as send:
+                await send({'i': str(i ** 2)})
+
+        # second receive
+        async for uid, msg in channel_in:
             logger.info("\t\t--> data incomming: %s", msg)
             data.append(msg)
 
@@ -792,14 +869,6 @@ class Echo(Cmd):
             'kwargs': self.kwargs,
             'data': data
         }
-
-    @classmethod
-    async def remote_setup(cls, queue_out):
-        logger.info("--------------------------------setup remote: %s", cls)
-        async def log(remote):
-            logger.info("exit: %s", cls)
-
-        add_finalizer(log)
 
 
 DEFAULT_CHANNEL_NAME = b''
