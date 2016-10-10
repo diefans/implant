@@ -292,6 +292,22 @@ def parse_command(line):
     return command, args, kwargs
 
 
+async def _execute_command(remote, line):
+    command_name, args, kwargs = parse_command(line[:-1].decode())
+
+    try:
+        cmd = core.Execute(command_name, *args, **kwargs)
+        result = await cmd.local(remote)
+
+    except (TypeError, KeyError) as ex:
+        print("< {}\n > ".format(ex), end='')
+        import traceback
+        traceback.print_exc()
+
+    else:
+        return result
+
+
 async def feed_stdin_to_remotes(**options):
     remote = await Remote.launch(code=core,
                                  python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
@@ -311,36 +327,15 @@ async def feed_stdin_to_remotes(**options):
                     break
 
                 if not line[:-1]:
-                    line = b'dbltr.core:Execute dbltr.core:Echo foo bar=123\n'
+                    line = b'dbltr.core:Echo foo bar=123\n'
                     print(line)
 
                 if remote.returncode is None:
-                    command, args, kwargs = parse_command(line[:-1].decode())
-
-                    try:
-                        Command = core.Cmd.commands.get(command)
-
-                        # cmd = core.Plugin.get(command)
-
-                        if inspect.isclass(Command) and issubclass(Command, core.Cmd):
-                            core.logger.info('executing %s', Command)
-                            cmd = Command(*args, **kwargs)
-
-                            result = await cmd.local(remote)
-
-                        else:
-                            result = await remote.execute(command, *args, **kwargs)
-
-                    except (TypeError, KeyError) as ex:
-                        print("< {}\n > ".format(ex), end='')
-                        import traceback
-                        traceback.print_exc()
-
-                    else:
-                        print("< {}\n > ".format(result), end='')
-                        print("pending futures", len(core.Execute.pending_futures))
-                        print("command instances", len(core.Cmd.command_instances),
-                              len(core.Cmd.command_instance_names))
+                    result = await _execute_command(remote, line)
+                    print("< {}\n > ".format(result), end='')
+                    core.logger.info("pending futures: %s", core.Execute.pending_futures)
+                    core.logger.info("command instances: %s", len(core.Cmd.command_instances))
+                    core.logger.info("command names: %s", len(core.Cmd.command_instance_names))
 
                 else:
                     await remote.wait()

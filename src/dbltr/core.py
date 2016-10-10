@@ -427,6 +427,12 @@ class CommandMeta(type):
     base = None
     commands = {}
 
+    command_instances = weakref.WeakValueDictionary()
+    """Holds references to all active Instances of Commands, to forward to their queue"""
+
+    command_instance_names = weakref.WeakKeyDictionary()
+    """Holds all instances mapping to their FQIN."""
+
     def __new__(mcs, name, bases, dct):
         """Register command at plugin vice versa"""
 
@@ -485,19 +491,27 @@ class CommandMeta(type):
         for _, _, func in mcs._lookup_command_classmethods('remote_teardown'):
             await func(*args, **kwargs)
 
+    def _create_reference(cls, uid, inst):
+        fqin = (cls.fqn, uid)
+        cls.command_instance_names[inst] = fqin
+        cls.command_instances[fqin] = inst
+
+    def __call__(cls, *args, command_uid=None, **kwargs):
+        inst = super(CommandMeta, cls).__call__(*args, **kwargs)
+
+        if command_uid is None:
+            command_uid = uuid.uuid1().hex.encode()
+
+        cls._create_reference(command_uid, inst)
+
+        return inst
+
 
 class Cmd(metaclass=CommandMeta):
 
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
     channels = defaultdict(asyncio.Queue)
-
-    command_instances = weakref.WeakValueDictionary()
-    """Holds references to all active Instances of Commands, to forward to their queue"""
-
-    command_instance_names = weakref.WeakKeyDictionary()
-    """Holds all instances mapping to their FQIN."""
-
 
     def __init__(self):
         self.queue = asyncio.Queue()
@@ -509,23 +523,27 @@ class Cmd(metaclass=CommandMeta):
         )
 
     @reify
+    def uid(self):
+        _, uid = self.fqin
+
+        return uid
+
+    @reify
     def fqin(self):
         """The fully qualified instance name."""
 
         return self.__class__.command_instance_names[self]
 
-    def _create_reference(self, uid):
-        fqin = b'/'.join((self.__class__.fqn, uid))
-        self.__class__.command_instance_names[self] = fqin
-        self.__class__.command_instances[fqin] = self
+    @reify
+    def channel_name(self):
+        return b'/'.join(self.fqin)
 
-    @functools.lru_cache(typed=True)
+    @functools.lru_cache(maxsize=10, typed=True)
     def channel(self, channel_type, *, queue=None):
-        return channel_type(self.fqin, queue=queue or self.queue)
+        return channel_type(self.channel_name, queue=queue or self.queue)
 
     def __repr__(self):
-        return self.fqin.decode()
-
+        return self.channel_name.decode()
 
 
 class RemoteException(Exception):
@@ -560,7 +578,7 @@ class Execute(Cmd):
         }
         return params
 
-    def create_command(self, uid):
+    def create_command(self):
         """Create a new Command instance and assign a uid to it."""
 
         Command = Cmd.commands.get(self.command_name)
@@ -568,42 +586,40 @@ class Execute(Cmd):
         if inspect.isclass(Command) and issubclass(Command, Cmd):
 
             # do something and return result
-            command = Command(*self.args, **self.kwargs)
+            command = Command(*self.args, command_uid=self.uid, **self.kwargs)
 
-            try:
-                return command
-
-            finally:
-                command._create_reference(uid)
+            return command
 
         raise KeyError('The command `{}` does not exist!'.format(self.command_name))
 
     async def local(self, remote):
+        command = self.create_command()
 
-        uid = uuid.uuid1().hex.encode()
-        self._create_reference(uid)
-
-        command = self.create_command(uid)
-
-        await self._create_remote_command(remote, uid)
+        await self._create_remote_command(remote)
 
         # future_create = self.pending_futures[self.fqin]
         # await future_create
 
         # XXX TODO create a context and remove future when done
-        future = self.pending_futures[command.fqin]
+        future = self.pending_futures[command.channel_name]
         result = await command.local(queue_out=remote.queue_in, future=future)
-        del self.pending_futures[command.fqin]
-        return result
+        future.result()
+        del self.pending_futures[command.channel_name]
 
-    async def _create_remote_command(self, remote, uid):
+        try:
+            return result
+
+        finally:
+            del command
+
+    async def _create_remote_command(self, remote):
         channel_out = JsonChannel(
             self.__class__.fqn,
             queue=remote.queue_in
         )
 
         # create remote command
-        async with channel_out.message(uid) as send:
+        async with channel_out.message(self.uid) as send:
             await send(self.params)
 
         # wait for sync
@@ -653,9 +669,10 @@ class Execute(Cmd):
                 else:
                     # forward arbitrary data to their instances
                     try:
-                        await cls.command_instances[channel_name.tobytes()].queue.put(line)
+                        await cls.command_instances[tuple(channel_name.tobytes().split(b'/', 1))].queue.put(line)
 
                     except KeyError:
+                        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
                         logger.error("Channel instance not found: %s", channel_name.tobytes())
 
         setup = asyncio.gather(resolve_pending_futures(), distribute_commands())
@@ -670,13 +687,13 @@ class Execute(Cmd):
 
         asyncio.ensure_future(teardown())
 
-    async def remote(self, queue_out, uid):
+    async def remote(self, queue_out):
 
-        command = self.create_command(uid)
+        command = self.create_command()
         logger.info("remote executing %s for %s", command, self.params)
 
         result_message = {
-            'fqin': command.fqin.decode(),
+            'fqin': command.channel_name.decode(),
         }
 
         # trigger sync for awaiting local method
@@ -715,10 +732,9 @@ class Execute(Cmd):
             async for uid, message in channel_in:
                 logger.info("retrieved command: %s", message)
 
-                execute = cls(message['command_name'], *message['args'], **message['kwargs'])
-                execute._create_reference(uid)
+                execute = cls(message['command_name'], *message['args'], command_uid=uid, **message['kwargs'])
 
-                result = await execute.remote(queue_out=queue_out, uid=uid)
+                result = await execute.remote(queue_out=queue_out)
 
                 logger.debug("result: %s", result)
 
@@ -743,7 +759,7 @@ class Execute(Cmd):
 
                     else:
                         # forward arbitrary data to their instances
-                        await cls.command_instances[channel_name.tobytes()].queue.put(line)
+                        await cls.command_instances[tuple(channel_name.tobytes().split(b'/', 1))].queue.put(line)
 
         logger.debug("remote setup %s %s", command, queue_out)
 
