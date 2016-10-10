@@ -109,15 +109,15 @@ def create_loop(*, debug=False):
     """Create the appropriate loop."""
 
     if sys.platform == 'win32':
-        loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
+        loop_ = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
         asyncio.set_event_loop(loop)
 
     else:
-        loop = asyncio.get_event_loop()
+        loop_ = asyncio.get_event_loop()
 
-    loop.set_debug(debug)
+    loop_.set_debug(debug)
 
-    return loop
+    return loop_
 
 
 # loop is global
@@ -246,32 +246,6 @@ class MetaPlugin(type):
         except KeyError:
             return default
 
-    def local(cls, func):
-        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
-        func.local = True
-
-        return func
-
-    def Command(cls, cmd):
-        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
-        # iterate through the methods and register methods
-
-
-    def local_setup(cls, func):
-        pass
-
-    def local_teardown(cls, func):
-        pass
-
-    def remote(cls, func):
-        pass
-
-    def remote_setup(cls, func):
-        pass
-
-    def remote_teardown(cls, func):
-        pass
-
 
 class Plugin(metaclass=MetaPlugin):
 
@@ -312,114 +286,8 @@ class Plugin(metaclass=MetaPlugin):
 
         return plugin
 
-    class command:
-        def __init__(self, name=None):
-            self.name = name
-            self.local_func = None
-            self.command = None
-
-        def __call__(self, func):
-            name = self.name or func.__name__
-            self.command = Command(name, local=func)
-
-            print("set func:", name, func)
-
-            self._extend_decorators(func)
-            return func
-
-        def _extend_decorators(self, func):
-            func.local_setup = self.set_local_setup
-            func.local_teardown = self.set_local_teardown
-
-            func.remote = self.set_remote
-            func.remote_setup = self.set_remote_setup
-            func.remote_teardown = self.set_remote_teardown
-
-        def set_remote(self, func):
-            self.command.remote = func
-            self._extend_decorators(func)
-            return func
-
-        def set_local_setup(self, func):
-            self.command.local_setup = func
-            self._extend_decorators(func)
-            return func
-
-        def set_local_teardown(self, func):
-            self.command.local_teardown = func
-            self._extend_decorators(func)
-            return func
-
-        def set_remote_setup(self, func):
-            self.command.remote_setup = func
-            self._extend_decorators(func)
-            return func
-
-        def set_remote_teardown(self, func):
-            self.command.remote_teardown = func
-            self._extend_decorators(func)
-            return func
-
-    @classmethod
-    def _command(cls, name=None):
-        """Decorates a command."""
-
-        command_name = name
-
-        def decorator(func):
-
-            func_module = inspect.getmodule(func).__name__
-
-            if command_name is None:
-                name = func.__name__
-
-            else:
-                name = command_name
-
-            plugin = Plugin[func_module]
-
-            if name in plugin.commands:
-                raise KeyError("Command `{}` is already defined in plugin `{}`".format(name, func_module))
-
-            command = plugin.commands[name] = Command(name, local=func)
-
-            def remote_decorator(remote_func):
-                command.remote = remote_func
-
-                return remote_func
-
-            func.remote = remote_decorator
-
-            def remote_setup_decorator(remote_func):
-                command.remote_setup = remote_func
-
-                return remote_func
-
-            func.remote_setup = remote_setup_decorator
-
-            logger.debug("\t%s, new command: %s:%s", id(cls), func_module, name)
-            logger.debug("plugins: %s", Plugin.plugins)
-
-            return func
-
-        return decorator
-
     def __repr__(self):
         return "<Plugin {}>".format(self.module_name)
-
-    @classmethod
-    async def distribute_incomming_chunks(cls, channels, pipe=sys.stdin):
-        """Distribute all chunks from stdin to channels."""
-
-        async with Incomming(pipe=pipe) as reader:
-            while True:
-                line = await reader.readline()
-                if line is b'':
-                    break
-
-                channel, uid, compressor, data = Chunk.view(line)
-
-                await channels.distribute(line)
 
 
 class CommandMeta(type):
@@ -437,7 +305,7 @@ class CommandMeta(type):
         """Register command at plugin vice versa"""
 
         module = dct['__module__']
-        plugin = dct['plugin'] = Plugin[module]
+        dct['plugin'] = Plugin[module]
 
         cls = type.__new__(mcs, name, bases, dct)
         if mcs.base is None:
@@ -507,7 +375,7 @@ class CommandMeta(type):
         return inst
 
 
-class Cmd(metaclass=CommandMeta):
+class Command(metaclass=CommandMeta):
 
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
@@ -556,7 +424,7 @@ class RemoteException(Exception):
         self.type = type
 
 
-class Execute(Cmd):
+class Execute(Command):
 
     """The executor of all commands."""
 
@@ -581,12 +449,12 @@ class Execute(Cmd):
     def create_command(self):
         """Create a new Command instance and assign a uid to it."""
 
-        Command = Cmd.commands.get(self.command_name)
+        command_class = Command.commands.get(self.command_name)
 
-        if inspect.isclass(Command) and issubclass(Command, Cmd):
+        if inspect.isclass(command_class) and issubclass(command_class, Command):
 
             # do something and return result
-            command = Command(*self.args, command_uid=self.uid, **self.kwargs)
+            command = command_class(*self.args, command_uid=self.uid, **self.kwargs)
 
             return command
 
@@ -635,22 +503,26 @@ class Execute(Cmd):
         channel_in = JsonChannel()
 
         async def resolve_pending_futures():
-            async for uid, message in channel_in:
-                fqin = message['fqin'].encode()
-                future = cls.pending_futures[fqin]
+            try:
+                async for uid, message in channel_in:
+                    fqin = message['fqin'].encode()
+                    future = cls.pending_futures[fqin]
 
-                if 'result' in message:
-                    future.set_result(message['result'])
+                    if 'result' in message:
+                        future.set_result(message['result'])
 
-                elif 'exception' in message:
-                    ex = RemoteException(
-                        fqin=fqin,
-                        type=message['exception']['type'],
-                        traceback=message['exception']['traceback'],
-                    )
-                    ex_unpickled = pickle.loads(base64.b64decode(message['exception']['pickle']))
+                    elif 'exception' in message:
+                        ex = RemoteException(
+                            fqin=fqin,
+                            type=message['exception']['type'],
+                            traceback=message['exception']['traceback'],
+                        )
+                        ex_unpickled = pickle.loads(base64.b64decode(message['exception']['pickle']))
 
-                    future.set_exception(ex_unpickled)
+                        future.set_exception(ex_unpickled)
+            except asyncio.CancelledError:
+                for fut in cls.pending_futures:
+                    fut.cancel()
 
         async def distribute_commands():
             async for line in remote.stdout:
@@ -679,6 +551,9 @@ class Execute(Cmd):
         async def teardown():
             try:
                 result = await setup
+            except asyncio.CancelledError:
+                setup.result()
+                pass
             except Exception as ex:
                 result = ex
                 raise
@@ -748,7 +623,7 @@ class Execute(Cmd):
                     if line is b'':
                         break
 
-                    channel_name, uid, compress, data = Chunk.view(line)
+                    channel_name, _, _, _ = Chunk.view(line)
 
                     logger.debug("\t\t--> incomming: %s", line)
 
@@ -760,8 +635,6 @@ class Execute(Cmd):
                     else:
                         # forward arbitrary data to their instances
                         await cls.command_instances[tuple(channel_name.tobytes().split(b'/', 1))].queue.put(line)
-
-        logger.debug("remote setup %s %s", command, queue_out)
 
         # create a teardown background task to be called when this process finishes
         setup = asyncio.gather(execute_commands(), distribute_commands())
@@ -780,7 +653,7 @@ class Execute(Cmd):
         asyncio.ensure_future(teardown())
 
 
-class Import(Cmd):
+class Import(Command):
     def __init__(self, plugin_name):
         super(Import, self).__init__()
 
@@ -827,8 +700,7 @@ class Import(Cmd):
         }
 
 
-
-class Echo(Cmd):
+class Echo(Command):
     def __init__(self, *args, **kwargs):
         super(Echo, self).__init__()
 
@@ -1228,162 +1100,6 @@ class Channels:
         self[channel.name] = channel
 
 
-class Command:
-
-    """Execution context for all plugin commands"""
-
-    def __init__(self, name, local, *,
-                 local_setup=None, local_teardown=None,
-                 remote=None, remote_setup=None, remote_teardown=None
-                 ):
-        self.name = name
-        self.local = local
-        self.local_setup = local_setup
-        self.local_teardown = local_teardown
-        self.remote = remote
-        self.remote_setup = remote_setup
-        self.remote_teardown = remote_teardown
-        self.plugin = self._connect_plugin()
-        self.queue = asyncio.Queue()
-        self.queues = {}
-        """holds all chunks per message uid"""
-
-    def _connect_plugin(self):
-        func_module = inspect.getmodule(self.local).__name__
-        plugin = Plugin[func_module]
-        plugin.commands[self.name] = self
-
-        return plugin
-
-    @reify
-    def id(self):
-        return ':'.join((self.plugin.module_name, self.name))
-
-    def __repr__(self):
-        return "<Command {}@{}>".format(self.name, self.plugin.module_name)
-
-    async def execute(self, queue_out, queue_in, *args, **kwargs):
-        """startes execution of command at the local side."""
-
-        # XXX we need to take ownership of queue_in of remote instance
-
-        return await self.local(self, queue_out, queue_in, command_args=args, command_kwargs=kwargs)
-
-
-class Commander:
-
-    """
-    Execute specific messages/commands
-
-    and return a result by replying in the same channel and with the same uid.
-    """
-
-    commands = {}
-
-    def __init__(self, channel_out, channel_in):
-        self.channel_out = channel_out
-        self.channel_in = channel_in
-
-    async def resolve_pending(self):
-        """Completes all RPC style commands by resolving a future per message uid."""
-
-        async for _ in self.channel_in:
-            # XXX TODO log incomming?
-            pass
-
-    async def execute(self, name, *args, **kwargs):
-        """Send a command to channel_out and wait for returning a result at channel_in."""
-
-        if name not in self.commands:
-            raise KeyError('Command not found: {}'.format(name))
-
-        command = self.commands[name]
-        partial_command = functools.partial(self.rpc, command)
-
-        try:
-            result = await command.local(partial_command, *args, **kwargs)
-
-            return result
-
-        except TypeError as ex:
-            raise
-
-    async def rpc(self, command, *args, **kwargs):
-        # return if nothing for remote todo
-        if not command.remote:
-            return
-
-        msg = {
-            'command': command.name,
-            'args': args,
-            'kwargs': kwargs,
-        }
-
-        uid = uuid.uuid1().hex.encode()
-
-        with self.channel_in.waiting_for(uid) as future:
-            async with self.channel_out.message(uid) as send:
-                await send(msg, compress='gzip')
-
-            result = await future
-            logger.info("result: %s", result)
-            return result
-
-    @classmethod
-    async def receive(cls, channel_in, channel_out):
-        """The remote part of execute method."""
-
-        # logger.info("Retrieving commands...")
-
-        async for uid, message in channel_in:
-            logger.info("retrieved command: %s", message)
-
-            # do something and return result
-            command = cls.commands[message['command']]
-
-            cmd_args = message.get('args', [])
-            cmd_kwargs = message.get('kwargs', {})
-
-            result = await command.remote(*cmd_args, **cmd_kwargs)
-
-            result = {
-                'foo': result
-            }
-
-            async with channel_out.message(uid) as send:
-                await send(result, compress='gzip')
-
-    @classmethod
-    def command(cls, name=None):
-        """Decorates a command."""
-
-        command_name = name
-
-        def decorator(func):
-
-            if command_name is None:
-                name = func.__name__
-
-            else:
-                name = command_name
-
-            logger.debug("\t%s, new command: %s", id(cls), name)
-
-            cls.commands[name] = Command(name, local=func)
-
-            def remote_decorator(remote_func):
-                cls.commands[name] = Command(name, local=func, remote=remote_func)
-
-                return remote_func
-
-            func.remote = remote_decorator
-
-            return func
-
-        return decorator
-
-
-@Commander.command()
 async def import_plugin(cmd, plugin_name):
     plugin = Plugin[plugin_name]
 
@@ -1397,7 +1113,6 @@ async def import_plugin(cmd, plugin_name):
     return result
 
 
-@import_plugin.remote
 async def import_plugin(code, project_name, entry_point_name, module_name):
     plugin = Plugin.create_from_code(code, project_name, entry_point_name, module_name)
     Plugin.add(plugin)
@@ -1410,105 +1125,6 @@ async def import_plugin(code, project_name, entry_point_name, module_name):
         'commands': commands,
         'plugins': list(Plugin.plugins.keys())
     }
-
-
-@Plugin.command()
-async def command(command, queue_out, queue_in, command_args, command_kwargs):
-    channel = JsonChannel(command, queue=queue_out)
-    pass
-
-
-@command.local_setup
-async def command(command, remote):
-    """Distribute remote stdout to channels."""
-
-
-@command.remote
-async def command(command, *, queue_out, command_args, command_kwargs):
-    pass
-
-
-@command.remote_setup
-async def command(command, queue_out):
-    """Starts distribution of incomming chunks."""
-
-    channel_out = JsonChannel(queue=queue_out)
-
-    # our incomming command queue
-    queue_in = asyncio.Queue()
-    channel_in = JsonChannel(queue=queue_in)
-
-    # a queue for each plugin command message
-    plugin_command_queues = {}
-
-    async def execute_commands():
-        async for uid, message in channel_in:
-            logger.info("retrieved command: %s", message)
-
-            # do something and return result
-            cmd_args = message.get('args', [])
-            cmd_kwargs = message.get('kwargs', {})
-
-            result = await command.remote(
-                command,
-                queue_out=queue_out,
-                command_args=cmd_args,
-                command_kwargs=cmd_kwargs
-            )
-
-            result = {
-                'foo': result
-            }
-
-            async with channel_out.message(uid) as send:
-                await send(result, compress='gzip')
-
-    async def distribute_commands():
-        async with Incomming(pipe=sys.stdin) as reader:
-            while True:
-                line = await reader.readline()
-                if line is b'':
-                    break
-
-                channel, uid, compress, data = Chunk.view(line)
-
-                logger.debug("\t\tincomming: %s", line)
-
-                # split command channel from other plugin channels
-                # we want to execute a command
-                if channel == command.id:
-                    await channel_in.forward(line)
-
-                else:
-                    # distribute to plugin channels
-                    await channels.distribute(line)
-
-    logger.debug("remote setup %s %s", command, queue_out)
-
-    future = asyncio.gather(execute_commands(), distribute_commands())
-    await future
-
-
-@Plugin.command()
-async def echo(command, *, queue_out, queue_in, command_args, command_kwargs):
-
-
-    return await cmd(*args, **kwargs)
-
-
-@echo.remote
-async def echo(*args, **kwargs):
-    return {
-        'args': args,
-        'kwargs': kwargs
-    }
-
-async def copy_large_file(channel_out, *args, src=None, dest=None, **kwargs):
-    pass
-
-
-async def copy_large_file_remote(channel_in, *args, src=None, dest=None, **kwargs):
-    pass
 
 
 async def run(*tasks):
@@ -1566,7 +1182,7 @@ def main(**kwargs):
     channel_out = JsonChannel(channels.default.name, queue=queue_out)
 
     # setup all plugin commands
-    loop.run_until_complete(Cmd.remote_setup(queue_out))
+    loop.run_until_complete(Command.remote_setup(queue_out))
     try:
         loop.run_until_complete(
             run(

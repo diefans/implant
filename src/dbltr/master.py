@@ -114,7 +114,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         # the channel to send everything
         self.channel_out = core.JsonChannel(queue=self.queue_in)
-        self._commander = core.Commander(self.channel_out, self.channels.default)
+        # self._commander = core.Commander(self.channel_out, self.channels.default)
 
     @utils.reify
     def execute(self):
@@ -156,15 +156,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.teardown = asyncio.ensure_future(teardown())
 
         # setup all plugin commands
-        await core.Cmd.local_setup(self)
-        # for plugin in set(core.Plugin.plugins.values()):
-        #     for command in plugin.commands.values():
-        #         if command.local_setup:
-
-        #             core.logger.debug("\t\tSetup local plugin: %s, %s", plugin, command)
-
-        #             asyncio.ensure_future(command.local_setup(command, self, self._loop))
-
+        await core.Command.local_setup(self)
         core.logger.info('\n%s', '\n'.join(['-' * 80] * 1))
 
     async def wait(self):
@@ -255,7 +247,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             asyncio.ensure_future(self._connect_stdin()),
             # asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
-            asyncio.ensure_future(self._commander.resolve_pending()),
+            # asyncio.ensure_future(self._commander.resolve_pending()),
         )
 
         self.receiving = receiving
@@ -308,7 +300,12 @@ async def _execute_command(remote, line):
         return result
 
 
+import pympler.tracker
+
+
 async def feed_stdin_to_remotes(**options):
+    tracker = pympler.tracker.SummaryTracker()
+
     remote = await Remote.launch(code=core,
                                  python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
                                  options=options)
@@ -334,8 +331,9 @@ async def feed_stdin_to_remotes(**options):
                     result = await _execute_command(remote, line)
                     print("< {}\n > ".format(result), end='')
                     core.logger.info("pending futures: %s", core.Execute.pending_futures)
-                    core.logger.info("command instances: %s", len(core.Cmd.command_instances))
-                    core.logger.info("command names: %s", len(core.Cmd.command_instance_names))
+                    core.logger.info("command instances: %s", len(core.Command.command_instances))
+                    core.logger.info("command names: %s", len(core.Command.command_instance_names))
+                    core.logger.info("mem:\n%s", '\n'.join(tracker.format_diff()))
 
                 else:
                     await remote.wait()
@@ -386,6 +384,8 @@ def main():
                     feed_stdin_to_remotes(),
                 )
             )
+
+            core.logger.info("* FINAL *".join('*' * 10))
 
         finally:
             asyncio.get_event_loop().close()
