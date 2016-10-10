@@ -338,6 +338,9 @@ async def feed_stdin_to_remotes(**options):
 
                     else:
                         print("< {}\n > ".format(result), end='')
+                        print("pending futures", len(core.Execute.pending_futures))
+                        print("command instances", len(core.Cmd.command_instances),
+                              len(core.Cmd.command_instance_names))
 
                 else:
                     await remote.wait()

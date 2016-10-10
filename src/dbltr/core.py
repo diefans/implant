@@ -593,7 +593,7 @@ class Execute(Cmd):
         # XXX TODO create a context and remove future when done
         future = self.pending_futures[command.fqin]
         result = await command.local(queue_out=remote.queue_in, future=future)
-
+        del self.pending_futures[command.fqin]
         return result
 
     async def _create_remote_command(self, remote, uid):
