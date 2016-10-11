@@ -6,6 +6,7 @@ import sys
 import asyncio
 import signal
 import functools
+import itertools
 import os
 import base64
 import json
@@ -325,13 +326,32 @@ class CommandMeta(type):
             name = ':'.join((plugin_name, cls.__name__))
             mcs.commands[name] = cls
 
+    def __getitem__(cls, value):
+        @functools.singledispatch
+        def _get(value):
+            return None
+
+        @_get.register(tuple)
+        def _tuple(value):
+            return cls.command_instances[value]
+
+        @_get.register(bytes)
+        def _bytes(value):
+            return cls.command_instances[tuple(value.split(b'/', 1))]
+
+        @_get.register(memoryview)
+        def _memoryview(value):
+            return cls.command_instances[tuple(value.tobytes().split(b'/', 1))]
+
+        return _get(value)
+
     @property
     def fqn(cls):
         return ':'.join((cls.plugin.module_name, cls.__name__)).encode()
 
     @classmethod
     def _lookup_command_classmethods(mcs, *names):
-        valid_names = set(['local_setup', 'local_teardown', 'remote_setup', 'remote_teardown'])
+        valid_names = set(['local_setup', 'remote_setup'])
         names = set(names) & valid_names
 
         for command in mcs.commands.values():
@@ -345,18 +365,8 @@ class CommandMeta(type):
             await func(*args, **kwargs)
 
     @classmethod
-    async def local_teardown(mcs, *args, **kwargs):
-        for _, _, func in mcs._lookup_command_classmethods('local_teardown'):
-            await func(*args, **kwargs)
-
-    @classmethod
     async def remote_setup(mcs, *args, **kwargs):
         for _, _, func in mcs._lookup_command_classmethods('remote_setup'):
-            await func(*args, **kwargs)
-
-    @classmethod
-    async def remote_teardown(mcs, *args, **kwargs):
-        for _, _, func in mcs._lookup_command_classmethods('remote_teardown'):
             await func(*args, **kwargs)
 
     def _create_reference(cls, uid, inst):
@@ -521,46 +531,44 @@ class Execute(Command):
 
                         future.set_exception(ex_unpickled)
             except asyncio.CancelledError:
-                for fut in cls.pending_futures:
-                    fut.cancel()
+                pass
+
+            # teardown here
+            for fut in cls.pending_futures:
+                fut.cancel()
 
         async def distribute_commands():
-            async for line in remote.stdout:
-                if line is b'':
-                    break
-
-                channel_name, uid, compress, data = Chunk.view(line)
-
-                logger.debug("\t\t<-- incomming: %s", line)
-
-                # split command channel from other plugin channels
-                # we want to execute a command
-                if channel_name == cls.fqn:
-                    await channel_in.forward(line)
-
-                else:
-                    # forward arbitrary data to their instances
-                    try:
-                        await cls.command_instances[tuple(channel_name.tobytes().split(b'/', 1))].queue.put(line)
-
-                    except KeyError:
-                        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
-                        logger.error("Channel instance not found: %s", channel_name.tobytes())
-
-        setup = asyncio.gather(resolve_pending_futures(), distribute_commands())
-        async def teardown():
             try:
-                result = await setup
+                async for line in remote.stdout:
+                    if line is b'':
+                        logger.warning('Remote send EOF')
+                        break
+
+                    channel_name, _, _, _ = Chunk.view(line)
+
+                    logger.debug("\t\t<-- incomming: %s", line)
+
+                    # split command channel from other plugin channels
+                    # we want to execute a command
+                    if channel_name == cls.fqn:
+                        await channel_in.forward(line)
+
+                    else:
+                        # forward arbitrary data to their instances
+                        try:
+                            await cls[channel_name].queue.put(line)
+
+                        except KeyError:
+                            from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+                            logger.error("Channel instance not found: %s", channel_name.tobytes())
+
             except asyncio.CancelledError:
-                setup.result()
                 pass
-            except Exception as ex:
-                result = ex
-                raise
 
-            logger.debug("teardown %s with %s", cls, result)
+            # teardown here
 
-        asyncio.ensure_future(teardown())
+        asyncio.ensure_future(distribute_commands())
+        asyncio.ensure_future(resolve_pending_futures())
 
     async def remote(self, queue_out):
 
@@ -600,57 +608,52 @@ class Execute(Command):
         queue_in = asyncio.Queue()
         channel_in = JsonChannel(queue=queue_in)
 
-        # a queue for each plugin command message
-        plugin_command_queues = {}
-
         async def execute_commands():
-            async for uid, message in channel_in:
-                logger.info("retrieved command: %s", message)
+            try:
+                async for uid, message in channel_in:
+                    logger.info("retrieved command: %s", message)
 
-                execute = cls(message['command_name'], *message['args'], command_uid=uid, **message['kwargs'])
+                    execute = cls(message['command_name'], *message['args'], command_uid=uid, **message['kwargs'])
 
-                result = await execute.remote(queue_out=queue_out)
+                    result = await execute.remote(queue_out=queue_out)
 
-                logger.debug("result: %s", result)
+                    logger.debug("result: %s", result)
 
-                async with channel_out.message(uid) as send:
-                    await send(result, compress='gzip')
+                    async with channel_out.message(uid) as send:
+                        await send(result, compress='gzip')
+            except asyncio.CancelledError:
+                pass
+
+            # teardown here
 
         async def distribute_commands():
-            async with Incomming(pipe=sys.stdin) as reader:
-                while True:
-                    line = await reader.readline()
-                    if line is b'':
-                        break
+            try:
+                async with Incomming(pipe=sys.stdin) as reader:
+                    while True:
+                        line = await reader.readline()
+                        if line is b'':
+                            break
 
-                    channel_name, _, _, _ = Chunk.view(line)
+                        channel_name, _, _, _ = Chunk.view(line)
 
-                    logger.debug("\t\t--> incomming: %s", line)
+                        logger.debug("\t\t--> incomming: %s", line)
 
-                    # split command channel from other plugin channels
-                    # we want to execute a command
-                    if channel_name == cls.fqn:
-                        await channel_in.forward(line)
+                        # split command channel from other plugin channels
+                        # we want to execute a command
+                        if channel_name == cls.fqn:
+                            await channel_in.forward(line)
 
-                    else:
-                        # forward arbitrary data to their instances
-                        await cls.command_instances[tuple(channel_name.tobytes().split(b'/', 1))].queue.put(line)
+                        else:
+                            # forward arbitrary data to their instances
+                            await cls[channel_name].queue.put(line)
+            except asyncio.CancelledError:
+                pass
+
+            # teardown here
 
         # create a teardown background task to be called when this process finishes
-        setup = asyncio.gather(execute_commands(), distribute_commands())
-        future = asyncio.Future()
-        setup.add_done_callback(future.set_result)
-
-        async def teardown():
-            try:
-                result = await setup
-            except Exception as ex:
-                result = ex
-                raise
-
-            logger.debug("teardown %s with %s", cls, result)
-
-        asyncio.ensure_future(teardown())
+        asyncio.ensure_future(execute_commands())
+        asyncio.ensure_future(distribute_commands())
 
 
 class Import(Command):
@@ -1160,17 +1163,33 @@ async def run(*tasks):
 
     # wait for running completed
     result = await running
+    logger.info("shutdown".join([' - '] * 10))
 
     # cleanup
-    for task in shutdown_tasks:
-        if task.done():
+    for task in itertools.chain(shutdown_tasks):
+        if task.done() or task.cancelled():
             continue
 
         log("cancel", task=task)
         task.cancel()
         await asyncio.wait_for(task, None)
 
+
     return result
+
+
+def cancel_pending_tasks():
+    logger.info("Shutdown pending tasks")
+    loop = asyncio.get_event_loop()
+
+    for task in asyncio.Task.all_tasks():
+        if task.done() or task.cancelled():
+            continue
+
+        task.cancel()
+        loop.run_until_complete(task)
+
+        logger.info("*** Task shutdown: %s", task)
 
 
 def main(**kwargs):
@@ -1189,6 +1208,7 @@ def main(**kwargs):
                 send_outgoing_queue(queue_out, sys.stdout),
             )
         )
+        cancel_pending_tasks()
 
     finally:
         loop.close()

@@ -300,11 +300,11 @@ async def _execute_command(remote, line):
         return result
 
 
-import pympler.tracker
+# import pympler.tracker
 
 
 async def feed_stdin_to_remotes(**options):
-    tracker = pympler.tracker.SummaryTracker()
+    # tracker = pympler.tracker.SummaryTracker()
 
     remote = await Remote.launch(code=core,
                                  python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
@@ -333,7 +333,9 @@ async def feed_stdin_to_remotes(**options):
                     core.logger.info("pending futures: %s", core.Execute.pending_futures)
                     core.logger.info("command instances: %s", len(core.Command.command_instances))
                     core.logger.info("command names: %s", len(core.Command.command_instance_names))
-                    core.logger.info("mem:\n%s", '\n'.join(tracker.format_diff()))
+                    # core.logger.info("mem:\n%s", '\n'.join(tracker.format_diff()))
+                    # all_objects = pympler.muppy.get_objects()
+                    # core.logger.info("objects: %s", len(all_objects))
 
                 else:
                     await remote.wait()
@@ -384,6 +386,8 @@ def main():
                     feed_stdin_to_remotes(),
                 )
             )
+
+            core.cancel_pending_tasks()
 
             core.logger.info("* FINAL *".join('*' * 10))
 
