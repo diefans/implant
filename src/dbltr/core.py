@@ -190,18 +190,6 @@ async def send_outgoing_queue(queue, pipe=sys.stdout):
             queue.task_done()
 
 
-async def distribute_incomming_chunks(channels, pipe=sys.stdin):
-    """Distribute all chunks from stdin to channels."""
-
-    async with Incomming(pipe=pipe) as reader:
-        while True:
-            line = await reader.readline()
-            if line is b'':
-                break
-
-            await channels.distribute(line)
-
-
 ######################################################################################
 PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
 
