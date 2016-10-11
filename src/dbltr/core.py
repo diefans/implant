@@ -148,6 +148,15 @@ class Incomming:
         self.transport.close()
 
 
+class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
+    def connection_lost(self, exc):
+        """Shutdown process"""
+        super(ShutdownOnConnectionLost, self).connection_lost(exc)
+
+        logger.warn("Connection lost! Shutting down...")
+        os.kill(os.getpid(), signal.SIGHUP)
+
+
 class Outgoing:
 
     """A context for an outgoing pipe."""
@@ -158,7 +167,7 @@ class Outgoing:
 
     async def __aenter__(self):
         self.transport, protocol = await asyncio.get_event_loop().connect_write_pipe(
-            asyncio.streams.FlowControlMixin,
+            ShutdownOnConnectionLost,
             # sys.stdout
             os.fdopen(self.pipe.fileno(), 'wb')
         )
@@ -394,7 +403,7 @@ class Command(metaclass=CommandMeta):
     def __init__(self):
         self.queue = asyncio.Queue()
 
-    def local(self, *args, **kwargs):
+    def local(self):
         raise NotImplementedError(
             'You have to implement at least a `local` method'
             'for your Command to work: {}'.format(self.__class__)
@@ -1057,52 +1066,6 @@ class JsonChannel(EncodedBufferChannel):
         return data
 
 
-class Channels:
-
-    """Distributes arbitrary chunks to channels.
-
-    The empty channel is used to send Commands."""
-
-    def __init__(self):
-        self._channels = {}
-        self.add_channel(JsonChannel())
-
-        self.default = self[DEFAULT_CHANNEL_NAME]
-
-    async def distribute(self, line):
-        channel, *_ = Chunk.view(line)
-
-        if channel not in self._channels:
-            logger.error('Channel `%s` not found for Chunk', channel)
-
-        await self._channels[channel].forward(line)
-        # logger.info("Chunk %s distributed to Channel `%s`", chunk, channel)
-
-    def __getitem__(self, channel_name):
-        try:
-            return self._channels[channel_name]
-
-        except KeyError:
-            raise KeyError("Channel `{}` not found!".format(channel_name))
-
-    def __setitem__(self, channel_name, channel):
-        if channel_name in self._channels:
-            logger.warning('Overriding existing channel `%s`', channel_name)
-
-        self._channels[channel_name] = channel
-
-    def __delitem__(self, channel_name):
-        try:
-            # logger.info('Removing channel `%s`', channel_name)
-            del self._channels[channel_name]
-
-        except KeyError:
-            raise KeyError("Channel `{}` not found!".format(channel_name))
-
-    def add_channel(self, channel):
-        self[channel.name] = channel
-
-
 async def import_plugin(cmd, plugin_name):
     plugin = Plugin[plugin_name]
 
@@ -1136,44 +1099,29 @@ async def run(*tasks):
     # create indicator for running messenger
     running = asyncio.Future()
 
-    shutdown_tasks = []
+    # shutdown_tasks = []
 
     for task in tasks:
         fut = asyncio.ensure_future(task)
 
-        def _shutdown_on_error(future):
-            try:
-                # retrieve result or exception
-                future.result()
-
-            except Exception as ex:
-                # delegate tsk error to running future to signal exit
-                # logger.error(traceback.format_exc())
-                running.set_exception(ex)
-
-                # raise
-
-        fut.add_done_callback(_shutdown_on_error)
-        shutdown_tasks.append(fut)
-
     # exit on sigterm or sigint
-    for signame in ('SIGINT', 'SIGTERM'):
+    for signame in ('SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'):
         sig = getattr(signal, signame)
-        asyncio.get_event_loop().add_signal_handler(sig, functools.partial(running.set_result, sig))
+
+        def log_signal():
+            logger.info("SIGNAL: %s", sig)
+            try:
+                running.set_result(sig)
+
+            except asyncio.InvalidStateError:
+                logger.warn("running already done!")
+
+        asyncio.get_event_loop().add_signal_handler(sig, log_signal)
 
     # wait for running completed
     result = await running
+    logger.info("\n\n\n")
     logger.info("shutdown".join([' - '] * 10))
-
-    # cleanup
-    for task in itertools.chain(shutdown_tasks):
-        if task.done() or task.cancelled():
-            continue
-
-        log("cancel", task=task)
-        task.cancel()
-        await asyncio.wait_for(task, None)
-
 
     return result
 
@@ -1187,18 +1135,32 @@ def cancel_pending_tasks():
             continue
 
         task.cancel()
-        loop.run_until_complete(task)
+        try:
+            loop.run_until_complete(task)
+
+        except asyncio.CancelledError:
+            pass
 
         logger.info("*** Task shutdown: %s", task)
 
 
+async def log_tcp_10001():
+    try:
+        reader, writer = await asyncio.open_connection('localhost', 10001)
+
+        while True:
+            msg = await reader.readline()
+
+            logger.info("TCP: %s", msg)
+
+    except asyncio.CancelledError:
+        logger.info("close tcp logger")
+        writer.close()
+
+
 def main(**kwargs):
 
-    # TODO channels must somehow connected with commands
-    channels = Channels()
-
     queue_out = asyncio.Queue()
-    channel_out = JsonChannel(channels.default.name, queue=queue_out)
 
     # setup all plugin commands
     loop.run_until_complete(Command.remote_setup(queue_out))
@@ -1206,6 +1168,7 @@ def main(**kwargs):
         loop.run_until_complete(
             run(
                 send_outgoing_queue(queue_out, sys.stdout),
+                # log_tcp_10001()
             )
         )
         cancel_pending_tasks()
@@ -1220,6 +1183,14 @@ def decode_options(b64):
 
 def encode_options(**options):
     return base64.b64encode(json.dumps(options).encode()).decode()
+
+
+def config_logging():
+    file_handler = logging.FileHandler('/tmp/dbltr.log')
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.DEBUG)
+
+    print("handlers", logger.handlers, file=sys.stderr)
 
 
 if __name__ == '__main__':

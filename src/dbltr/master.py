@@ -53,10 +53,16 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
             # ssh
             if self.host is not None:
                 yield 'ssh'
+                yield '-T'
                 # optionally with user
                 if self.user is not None:
                     yield '-l'
                     yield self.user
+
+                # remote port forwarding
+                yield '-R'
+                yield '10001:localhost:10000'
+
                 yield self.host
 
             # sudo
@@ -68,6 +74,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
                     yield self.sudo
 
             # python exec
+            # yield 'exec'
             yield from shlex.split(python_bin)
 
             yield '-c'
@@ -81,6 +88,8 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
                 code=base64.b64encode(lzma.compress(code)).decode(),
                 options=core.encode_options(**options),
             )
+
+            # yield ' 2> /tmp/core.log'
 
         command_args = list(_gen())
 
@@ -101,20 +110,9 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self.queue_err = asyncio.Queue()
         self.pid = None
         self.returncode = None
-        self.terminator = None
-        self.teardown = None
-
-        self.finalizer = []
 
         # a future indicating a receiving remote
         self.receiving = None
-
-        # we distribute channels from stdout
-        self.channels = core.Channels()
-
-        # the channel to send everything
-        self.channel_out = core.JsonChannel(queue=self.queue_in)
-        # self._commander = core.Commander(self.channel_out, self.channels.default)
 
     @utils.reify
     def execute(self):
@@ -136,26 +134,13 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             self.receiving.cancel()
 
         # inform future
-        self.terminator.set_result(self.returncode)
         core.logger.info("process exited: %s", self.returncode)
 
     def add_finalizer(self, func):
         self.finalizer.append(func)
 
     async def process_launched(self):
-        self.terminator = asyncio.Future()
-
-        async def teardown():
-            exitcode = await self.terminator
-            core.logger.debug("TTTTTTTTTT")
-
-            for finalizer in self.finalizer:
-                core.logger.info("\t\tteardown: %s", finalizer)
-                await finalizer(self)
-
-        self.teardown = asyncio.ensure_future(teardown())
-
-        # setup all plugin commands
+        # setup all plugin commands for this remote
         await core.Command.local_setup(self)
         core.logger.info('\n%s', '\n'.join(['-' * 80] * 1))
 
@@ -163,8 +148,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         """Wait until the process exit and return the process return code.
 
         This method is a coroutine."""
-        await self.teardown
-        return (await self._transport._wait())
+        return await self._transport._wait()
 
     def send_signal(self, signal):
         self._transport.send_signal(signal)
@@ -240,7 +224,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         async for line in self.stderr:
             log("remote stderr {}: {}".format(self.pid, line[:-1].decode()))
-            await self.queue_err.put(line)
+            # await self.queue_err.put(line)
 
     async def receive(self):
         receiving = asyncio.gather(
@@ -256,10 +240,11 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             await self.receiving
 
         except asyncio.CancelledError:
+            try:
+                self.terminate()
 
-            log("remote cancel", pid=self.pid)
-            self.terminate()
-            pass
+            except ProcessLookupError:
+                pass
 
         finally:
             self.receiving = None
@@ -300,13 +285,10 @@ async def _execute_command(remote, line):
         return result
 
 
-# import pympler.tracker
-
-
 async def feed_stdin_to_remotes(**options):
-    # tracker = pympler.tracker.SummaryTracker()
 
     remote = await Remote.launch(code=core,
+                                 # target=Target(host='localhost'),
                                  python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
                                  options=options)
 
@@ -319,7 +301,6 @@ async def feed_stdin_to_remotes(**options):
 
                 core.logger.debug("sending: %s", line)
 
-                # line = await stdin_reader.readline()
                 if line is b'':
                     break
 
@@ -330,32 +311,13 @@ async def feed_stdin_to_remotes(**options):
                 if remote.returncode is None:
                     result = await _execute_command(remote, line)
                     print("< {}\n > ".format(result), end='')
-                    core.logger.info("pending futures: %s", core.Execute.pending_futures)
-                    core.logger.info("command instances: %s", len(core.Command.command_instances))
-                    core.logger.info("command names: %s", len(core.Command.command_instance_names))
-                    # core.logger.info("mem:\n%s", '\n'.join(tracker.format_diff()))
-                    # all_objects = pympler.muppy.get_objects()
-                    # core.logger.info("objects: %s", len(all_objects))
-
-                else:
-                    await remote.wait()
-                    break
-
-            if not remote_task.done():
-                remote_task.cancel()
-                await remote.wait()
 
     except asyncio.CancelledError:
-        core.logger.info('XXXXXXXXXXXXXXXXXXXXXXX')
-        # wait for remote to complete
-        remote_task.cancel()
-        await remote_task
-        if remote.returncode is None:
-            await remote.wait()
+        pass
 
-        await remote_task
-        # raise
-        # remote.terminate()
+    if remote.returncode is None:
+        remote.terminate()
+        await remote.wait()
 
 
 class ExecutorConsoleHandler(StreamHandler):
@@ -373,6 +335,15 @@ class ExecutorConsoleHandler(StreamHandler):
         asyncio.get_event_loop().run_in_executor(self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record))
 
 
+async def serve_tcp_10000(reader, writer):
+    try:
+        while True:
+            writer.write(b"Hello World\n")
+            await asyncio.sleep(1)
+
+    except asyncio.CancelledError:
+        writer.close()
+
 def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
         logging_handler = ExecutorConsoleHandler(logging_executor)
@@ -383,6 +354,7 @@ def main():
         try:
             asyncio.get_event_loop().run_until_complete(
                 core.run(
+                    # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
                     feed_stdin_to_remotes(),
                 )
             )
