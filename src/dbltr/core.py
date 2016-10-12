@@ -262,6 +262,7 @@ class Plugin(metaclass=MetaPlugin):
     @classmethod
     def create_from_entry_point(cls, entry_point):
         plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
+        cls.add(plugin)
 
         return plugin
 
@@ -273,10 +274,10 @@ class Plugin(metaclass=MetaPlugin):
         entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
 
         module = create_module(module_name)
-        c = compile(code, "<string>", "exec", optimize=2)
-        exec(c, module.__dict__)
-
         plugin = cls.create_from_entry_point(entry_point)
+
+        c = compile(code, "<{}>".format(module_name), "exec", optimize=2)
+        exec(c, module.__dict__)
 
         return plugin
 
@@ -473,15 +474,17 @@ class Execute(Command):
 
         # XXX TODO create a context and remove future when done
         future = self.pending_futures[command.channel_name]
-        result = await command.local(queue_out=remote.queue_in, future=future)
-        future.result()
-        del self.pending_futures[command.channel_name]
-
         try:
+            result = await command.local(queue_out=remote.queue_in, future=future)
+            future.result()
+
             return result
 
+        except:
+            logger.error("Error while executing command: %s\n%s", command, traceback.format_exc())
+
         finally:
-            del command
+            del self.pending_futures[command.channel_name]
 
     async def _create_remote_command(self, remote):
         channel_out = JsonChannel(
@@ -527,10 +530,10 @@ class Execute(Command):
                 pass
 
             # teardown here
-            for fut in cls.pending_futures:
+            for channel_name, fut in cls.pending_futures.items():
                 fut.cancel()
 
-        async def distribute_commands():
+        async def distribute_responses():
             try:
                 async for line in remote.stdout:
                     if line is b'':
@@ -560,7 +563,7 @@ class Execute(Command):
 
             # teardown here
 
-        asyncio.ensure_future(distribute_commands())
+        asyncio.ensure_future(distribute_responses())
         asyncio.ensure_future(resolve_pending_futures())
 
     async def remote(self, queue_out):
@@ -608,9 +611,12 @@ class Execute(Command):
 
                     execute = cls(message['command_name'], *message['args'], command_uid=uid, **message['kwargs'])
 
+                    # TODO spawn Task for each command which might be canceled by local side errors
                     result = await execute.remote(queue_out=queue_out)
 
                     logger.debug("result: %s", result)
+                    if 'exception' in result:
+                        logger.error("traceback:\n%s", result['exception']['traceback'])
 
                     async with channel_out.message(uid) as send:
                         await send(result, compress='gzip')
@@ -671,87 +677,32 @@ class Import(Command):
         }
 
         channel_out = self.channel(JsonChannel, queue=queue_out)
+        # iterator = JsonChannelIterator(channel_out)
+        # await iterator.send([plugin_data])
+
         async with channel_out.message() as send:
             await send(plugin_data)
 
-        result = await cmd(code, project_name, entry_point_name, module_name)
+        result = await future
 
         return result
 
     async def remote(self, queue_out):
         channel_in = self.channel(JsonChannel)
+        # iterator = JsonChannelIterator(channel_in)
 
-        async for uid, module_data in channel_in: break
+        logger.info("start import")
 
-        plugin = Plugin.create_from_code(code, project_name, entry_point_name, module_name)
-        Plugin.add(plugin)
+        async for uid, plugin_data in channel_in:
+            break
 
-        # collect commands
-        logger.debug("--> %s, commands: %s", id(Commander), Commander.commands)
-        commands = list(Commander.commands.keys())
+        logger.info("plugin data: %s", plugin_data)
+
+        plugin = Plugin.create_from_code(**plugin_data)
 
         return {
-            'commands': commands,
+            'commands': list(Command.commands.keys()),
             'plugins': list(Plugin.plugins.keys())
-        }
-
-
-class Echo(Command):
-    def __init__(self, *args, **kwargs):
-        super(Echo, self).__init__()
-
-        self.args = args
-        self.kwargs = kwargs
-
-    async def local(self, queue_out, future):
-        logger.info("local running %s", self)
-        channel_in = self.channel(JsonChannel)
-        channel_out = self.channel(JsonChannel, queue=queue_out)
-
-        incomming = []
-
-        # custom protocol
-        # first receive
-        async for i, (uid, msg) in aenumerate(channel_in):
-            incomming.append(msg)
-            if i == 9:
-                break
-
-        # second send
-        for i in range(10):
-            async with channel_out.message() as send:
-                await send({'i': i})
-
-        result = await future
-        logger.info("local future finished: %s", result)
-        return [result, incomming]
-
-    async def remote(self, queue_out):
-        logger.info("remote running %s", self)
-
-        channel_in = self.channel(JsonChannel)
-        channel_out = self.channel(JsonChannel, queue=queue_out)
-
-        data = []
-
-        # first send
-        for i in range(10):
-            async with channel_out.message() as send:
-                await send({'i': str(i ** 2)})
-
-        # second receive
-        async for uid, msg in channel_in:
-            logger.info("\t\t--> data incomming: %s", msg)
-            data.append(msg)
-
-            if msg['i'] == 9:
-                break
-
-        # raise Exception("foo")
-        return {
-            'args': self.args,
-            'kwargs': self.kwargs,
-            'data': data
         }
 
 
@@ -1050,31 +1001,32 @@ class JsonChannel(EncodedBufferChannel):
         return data
 
 
-async def import_plugin(cmd, plugin_name):
-    plugin = Plugin[plugin_name]
+class JsonChannelIterator:
+    def __init__(self, channel):
+        assert isinstance(channel, JsonChannel), "channel must be a JsonChannel instance"
 
-    code = inspect.getsource(plugin.module)
-    module_name = plugin.module.__name__
+        self.channel = channel
 
-    project_name, entry_point_name = plugin.name.split('#')
+    async def send(self, iterable):
+        for item in iterable:
+            async with self.channel.message() as send:
+                data = {
+                    'item': item,
+                }
 
-    result = await cmd(code, project_name, entry_point_name, module_name)
+                await send(data)
 
-    return result
+        await self.channel.send({'stop_iteration': True})
 
+    async def __aiter__(self):
+        return self
 
-async def import_plugin(code, project_name, entry_point_name, module_name):
-    plugin = Plugin.create_from_code(code, project_name, entry_point_name, module_name)
-    Plugin.add(plugin)
+    async def __anext__(self):
+        value = await self.channel.__anext__()
+        if value.get('stop_iteration', False):
+            raise StopAsyncIteration()
 
-    # collect commands
-    logger.debug("--> %s, commands: %s", id(Commander), Commander.commands)
-    commands = list(Commander.commands.keys())
-
-    return {
-        'commands': commands,
-        'plugins': list(Plugin.plugins.keys())
-    }
+        return value
 
 
 async def run(*tasks):

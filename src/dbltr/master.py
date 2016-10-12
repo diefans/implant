@@ -33,7 +33,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
         'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr");'
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'
-        'c = compile(lzma.decompress(base64.b64decode(b"{code}")), "<string>", "exec");'
+        'c = compile(lzma.decompress(base64.b64decode(b"{code}")), "<dbltr.core>", "exec");'
         'exec(c, core.__dict__); core.main(**core.decode_options(b"{options}"));'
     )
     """Bootstrapping of core module on remote."""
@@ -305,8 +305,11 @@ async def feed_stdin_to_remotes(**options):
                     break
 
                 if not line[:-1]:
-                    line = b'dbltr.core:Echo foo bar=123\n'
+                    line = b'debellator#core:Echo foo bar=123\n'
                     print(line)
+
+                if line == b'i\n':
+                    line = b'dbltr.core:Import debellator#core\n'
 
                 if remote.returncode is None:
                     result = await _execute_command(remote, line)
