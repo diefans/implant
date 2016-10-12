@@ -12,10 +12,10 @@ import inspect
 import lzma
 
 from collections import namedtuple
-
-from dbltr import core, utils, plugins
-
 from logging import StreamHandler
+
+from dbltr import core, utils
+
 
 log = core.log
 
@@ -196,10 +196,10 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         finally:
             await remote.process_launched()
 
-    async def send(self, input):
+    async def send(self, data):
         """Send input to remote process."""
 
-        self.stdin.write(input)
+        self.stdin.write(data)
         await self.stdin.drain()
 
     async def _connect_stdin(self):
@@ -293,23 +293,21 @@ async def feed_stdin_to_remotes(**options):
                                  options=options)
 
     remote_task = asyncio.ensure_future(remote.receive())
-    core.logger.info("fooo")
     try:
         async with core.Incomming(pipe=sys.stdin) as reader:
             while True:
                 line = await reader.readline()
-
-                core.logger.debug("sending: %s", line)
 
                 if line is b'':
                     break
 
                 if not line[:-1]:
                     line = b'debellator#core:Echo foo bar=123\n'
-                    print(line)
 
                 if line == b'i\n':
                     line = b'dbltr.core:Import debellator#core\n'
+
+                core.logger.debug("sending: %s", line)
 
                 if remote.returncode is None:
                     result = await _execute_command(remote, line)
@@ -335,7 +333,9 @@ class ExecutorConsoleHandler(StreamHandler):
     # TODO FIXME it still occurs...
 
     def emit(self, record):
-        asyncio.get_event_loop().run_in_executor(self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record))
+        asyncio.get_event_loop().run_in_executor(
+            self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record)
+        )
 
 
 async def serve_tcp_10000(reader, writer):

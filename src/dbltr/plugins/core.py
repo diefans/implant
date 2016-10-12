@@ -12,8 +12,7 @@ class Echo(core.Command):
         self.args = args
         self.kwargs = kwargs
 
-    async def local(self, queue_out, future):
-        core.logger.info("local running %s", self)
+    async def local(self, queue_out, remote_future):
         channel_in = self.channel(core.JsonChannel)
         channel_out = self.channel(core.JsonChannel, queue=queue_out)
 
@@ -21,40 +20,27 @@ class Echo(core.Command):
 
         # custom protocol
         # first receive
-        async for i, (uid, msg) in core.aenumerate(channel_in):
+        async for i, msg in core.aenumerate(core.JsonChannelIterator(channel_in)):
             incomming.append(msg)
-            if i == 9:
-                break
 
         # second send
-        for i in range(10):
-            async with channel_out.message() as send:
-                await send({'i': i})
+        await core.JsonChannelIterator(channel_out).send({'i': i} for i in range(10))
 
-        result = await future
-        core.logger.info("local future finished: %s", result)
+        result = await remote_future
         return [result, incomming]
 
     async def remote(self, queue_out):
-        core.logger.info("remote running %s", self)
-
         channel_in = self.channel(core.JsonChannel)
         channel_out = self.channel(core.JsonChannel, queue=queue_out)
 
         data = []
 
         # first send
-        for i in range(10):
-            async with channel_out.message() as send:
-                await send({'i': str(i ** 2)})
+        await core.JsonChannelIterator(channel_out).send({'i': str(i ** 2) for i in range(10)})
 
         # second receive
-        async for uid, msg in channel_in:
-            core.logger.info("\t\t--> data incomming: %s", msg)
+        async for msg in core.JsonChannelIterator(channel_in):
             data.append(msg)
-
-            if msg['i'] == 9:
-                break
 
         # raise Exception("foo")
         return {

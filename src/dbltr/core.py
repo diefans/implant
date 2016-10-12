@@ -6,7 +6,6 @@ import sys
 import asyncio
 import signal
 import functools
-import itertools
 import os
 import base64
 import json
@@ -14,7 +13,6 @@ import uuid
 import types
 import gzip
 import lzma
-import contextlib
 import logging
 import weakref
 import traceback
@@ -111,7 +109,7 @@ def create_loop(*, debug=False):
 
     if sys.platform == 'win32':
         loop_ = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
-        asyncio.set_event_loop(loop)
+        asyncio.set_event_loop(loop_)
 
     else:
         loop_ = asyncio.get_event_loop()
@@ -149,7 +147,7 @@ class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
         """Shutdown process"""
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
-        logger.warn("Connection lost! Shutting down...")
+        logger.warning("Connection lost! Shutting down...")
         os.kill(os.getpid(), signal.SIGHUP)
 
 
@@ -420,12 +418,12 @@ class Command(metaclass=CommandMeta):
 
 class RemoteException(Exception):
 
-    def __init__(self, *, fqin, traceback, type):
+    def __init__(self, *, fqin, traceback, exc_type):
         super(RemoteException, self).__init__()
 
         self.fqin = fqin
         self.traceback = traceback
-        self.type = type
+        self.type = exc_type
 
 
 class Execute(Command):
@@ -469,13 +467,10 @@ class Execute(Command):
 
         await self._create_remote_command(remote)
 
-        # future_create = self.pending_futures[self.fqin]
-        # await future_create
-
         # XXX TODO create a context and remove future when done
         future = self.pending_futures[command.channel_name]
         try:
-            result = await command.local(queue_out=remote.queue_in, future=future)
+            result = await command.local(queue_out=remote.queue_in, remote_future=future)
             future.result()
 
             return result
@@ -493,13 +488,10 @@ class Execute(Command):
         )
 
         # create remote command
-        async with channel_out.message(self.uid) as send:
-            await send(self.params)
+        await channel_out.send(self.params, uid=self.uid)
 
         # wait for sync
-        async for msg in self.channel(JsonChannel):
-            logger.info("sync: %s", msg)
-            break
+        await self.channel(JsonChannel)
 
     @classmethod
     async def local_setup(cls, remote):
@@ -510,7 +502,7 @@ class Execute(Command):
 
         async def resolve_pending_futures():
             try:
-                async for uid, message in channel_in:
+                async for _, message in channel_in:
                     fqin = message['fqin'].encode()
                     future = cls.pending_futures[fqin]
 
@@ -520,7 +512,7 @@ class Execute(Command):
                     elif 'exception' in message:
                         ex = RemoteException(
                             fqin=fqin,
-                            type=message['exception']['type'],
+                            exc_type=message['exception']['type'],
                             traceback=message['exception']['traceback'],
                         )
                         ex_unpickled = pickle.loads(base64.b64decode(message['exception']['pickle']))
@@ -530,19 +522,16 @@ class Execute(Command):
                 pass
 
             # teardown here
-            for channel_name, fut in cls.pending_futures.items():
+            for fut in cls.pending_futures.values():
                 fut.cancel()
 
         async def distribute_responses():
             try:
                 async for line in remote.stdout:
                     if line is b'':
-                        logger.warning('Remote send EOF')
                         break
 
                     channel_name, _, _, _ = Chunk.view(line)
-
-                    logger.debug("\t\t<-- incomming: %s", line)
 
                     # split command channel from other plugin channels
                     # we want to execute a command
@@ -555,7 +544,6 @@ class Execute(Command):
                             await cls[channel_name].queue.put(line)
 
                         except KeyError:
-                            from pdb import set_trace; set_trace()       # XXX BREAKPOINT
                             logger.error("Channel instance not found: %s", channel_name.tobytes())
 
             except asyncio.CancelledError:
@@ -567,18 +555,15 @@ class Execute(Command):
         asyncio.ensure_future(resolve_pending_futures())
 
     async def remote(self, queue_out):
-
         command = self.create_command()
-        logger.info("remote executing %s for %s", command, self.params)
 
         result_message = {
             'fqin': command.channel_name.decode(),
         }
 
         # trigger sync for awaiting local method
-        channel = self.channel(JsonChannel, queue=queue_out)
-        async with channel.message() as send:
-            await send(None)
+        channel_out = self.channel(JsonChannel, queue=queue_out)
+        await channel_out.send(None)
 
         try:
             result = await command.remote(
@@ -607,19 +592,15 @@ class Execute(Command):
         async def execute_commands():
             try:
                 async for uid, message in channel_in:
-                    logger.info("retrieved command: %s", message)
-
                     execute = cls(message['command_name'], *message['args'], command_uid=uid, **message['kwargs'])
 
                     # TODO spawn Task for each command which might be canceled by local side errors
                     result = await execute.remote(queue_out=queue_out)
-
-                    logger.debug("result: %s", result)
                     if 'exception' in result:
                         logger.error("traceback:\n%s", result['exception']['traceback'])
 
-                    async with channel_out.message(uid) as send:
-                        await send(result, compress='gzip')
+                    await channel_out.send(result, compress='gzip')
+
             except asyncio.CancelledError:
                 pass
 
@@ -634,8 +615,6 @@ class Execute(Command):
                             break
 
                         channel_name, _, _, _ = Chunk.view(line)
-
-                        logger.debug("\t\t--> incomming: %s", line)
 
                         # split command channel from other plugin channels
                         # we want to execute a command
@@ -661,7 +640,7 @@ class Import(Command):
 
         self.plugin_name = plugin_name
 
-    async def local(self, queue_out, future):
+    async def local(self, queue_out, remote_future):
         plugin = Plugin[self.plugin_name]
 
         code = inspect.getsource(plugin.module)
@@ -677,28 +656,16 @@ class Import(Command):
         }
 
         channel_out = self.channel(JsonChannel, queue=queue_out)
-        # iterator = JsonChannelIterator(channel_out)
-        # await iterator.send([plugin_data])
+        await channel_out.send(plugin_data)
 
-        async with channel_out.message() as send:
-            await send(plugin_data)
-
-        result = await future
+        result = await remote_future
 
         return result
 
     async def remote(self, queue_out):
         channel_in = self.channel(JsonChannel)
-        # iterator = JsonChannelIterator(channel_in)
-
-        logger.info("start import")
-
-        async for uid, plugin_data in channel_in:
-            break
-
-        logger.info("plugin data: %s", plugin_data)
-
-        plugin = Plugin.create_from_code(**plugin_data)
+        _, plugin_data = await channel_in
+        Plugin.create_from_code(**plugin_data)
 
         return {
             'commands': list(Command.commands.keys()),
@@ -720,7 +687,6 @@ class Chunk:
     separator = b'|'
 
     compressor = {
-        True: gzip,
         'gzip': gzip,
         'lzma': lzma
     }
@@ -832,37 +798,15 @@ class ChunkChannel:
         self.name = name
         self.queue = queue or asyncio.Queue()
 
-        self.futures = {}
-        """Register a message uid to be a resolvable future.
-        If that uid is received the futures result will be set.
-
-        For this to work a task must iterate the channel.
-        """
-
     async def __aiter__(self):
         return self
 
     async def __anext__(self):
-        uid, data = await self.data_received()
-
-        # trigger waiting futures
-        if uid in self.futures:
-            self.futures[uid].set_result(data)
+        uid, data = await self
 
         return uid, data
 
-    @contextlib.contextmanager
-    def waiting_for(self, uid):
-        """Create a context with a future to wait for."""
-        # TODO XXX does this make only sense for complete (json) messages?
-
-        self.futures[uid] = future = asyncio.Future()
-
-        yield future
-
-        del self.futures[uid]
-
-    async def data_received(self):
+    async def __await__(self):
         """:returns: a tuple (uid, chunk) from the queue of this channel."""
 
         line = await self.queue.get()
@@ -902,24 +846,6 @@ class ChunkChannel:
 
         await self.queue.put(chunk.encode(compress=False))
 
-    def message(self, uid=None):
-
-        if uid is None:
-            uid = uuid.uuid1().hex.encode()
-
-        class _context:
-            def __init__(self, channel):
-                self.channel = channel
-
-            async def __aenter__(self):
-                return functools.partial(self.channel.send, uid=uid)
-
-            async def __aexit__(self, exc_type, exc, tb):
-                # send EOM
-                await self.channel.send_eom(uid=uid)
-
-        return _context(self)
-
 
 def split_data(data, size=1024):
     """A generator to yield splitted data."""
@@ -946,12 +872,12 @@ class EncodedBufferChannel(ChunkChannel):
         # holds message parts until decoding is complete
         self.buffer = {}
 
-    async def data_received(self):
+    async def __await__(self):
         """Wait until a message is completed by sending an empty chunk."""
 
         while True:
             # wait for the next data
-            uid, chunk = await super(EncodedBufferChannel, self).data_received()
+            uid, chunk = await super(EncodedBufferChannel, self).__await__()
 
             # create buffer if uid is new
             if uid not in self.buffer:
@@ -980,14 +906,16 @@ class EncodedBufferChannel(ChunkChannel):
 
     async def send(self, data, *, uid=None, compress=False):
 
+        if uid is None:
+            uid = uuid.uuid1().hex.encode()
+
         if isinstance(data, Chunk):
             data = data.data
 
         encoded_data = self.encode(data).encode()
 
-        await super(EncodedBufferChannel, self).send(
-            encoded_data, uid=uid, compress=compress
-        )
+        await super(EncodedBufferChannel, self).send(encoded_data, uid=uid, compress=compress)
+        await super(EncodedBufferChannel, self).send_eom(uid=uid)
 
 
 class JsonChannel(EncodedBufferChannel):
@@ -1009,20 +937,18 @@ class JsonChannelIterator:
 
     async def send(self, iterable):
         for item in iterable:
-            async with self.channel.message() as send:
-                data = {
+            await self.channel.send(
+                {
                     'item': item,
-                }
-
-                await send(data)
-
-        await self.channel.send({'stop_iteration': True})
+                }, compress='gzip')
+        else:
+            await self.channel.send({'stop_iteration': True})
 
     async def __aiter__(self):
         return self
 
     async def __anext__(self):
-        value = await self.channel.__anext__()
+        _, value = await self.channel
         if value.get('stop_iteration', False):
             raise StopAsyncIteration()
 
@@ -1044,26 +970,23 @@ async def run(*tasks):
     for signame in ('SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'):
         sig = getattr(signal, signame)
 
-        def log_signal():
+        def exit_with_signal(sig):
             logger.info("SIGNAL: %s", sig)
             try:
                 running.set_result(sig)
 
             except asyncio.InvalidStateError:
-                logger.warn("running already done!")
+                logger.warning("running already done!")
 
-        asyncio.get_event_loop().add_signal_handler(sig, log_signal)
+        asyncio.get_event_loop().add_signal_handler(sig, functools.partial(exit_with_signal, sig))
 
     # wait for running completed
     result = await running
-    logger.info("\n\n\n")
-    logger.info("shutdown".join([' - '] * 10))
 
     return result
 
 
 def cancel_pending_tasks():
-    logger.info("Shutdown pending tasks")
     loop = asyncio.get_event_loop()
 
     for task in asyncio.Task.all_tasks():
@@ -1077,7 +1000,7 @@ def cancel_pending_tasks():
         except asyncio.CancelledError:
             pass
 
-        logger.info("*** Task shutdown: %s", task)
+        logger.debug("*** Task shutdown: %s", task)
 
 
 async def log_tcp_10001():
