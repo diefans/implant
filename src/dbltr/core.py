@@ -121,10 +121,6 @@ def create_loop(*, debug=False):
     return loop_
 
 
-# loop is global
-loop = create_loop(debug=True)
-
-
 class Incomming:
 
     """A context for an incomming pipe."""
@@ -1148,6 +1144,8 @@ async def log_tcp_10001():
 
 def main(**kwargs):
 
+    loop = create_loop(debug=True)
+
     queue_out = asyncio.Queue()
 
     # setup all plugin commands
@@ -1171,14 +1169,6 @@ def decode_options(b64):
 
 def encode_options(**options):
     return base64.b64encode(json.dumps(options).encode()).decode()
-
-
-def config_logging():
-    file_handler = logging.FileHandler('/tmp/dbltr.log')
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.DEBUG)
-
-    print("handlers", logger.handlers, file=sys.stderr)
 
 
 if __name__ == '__main__':

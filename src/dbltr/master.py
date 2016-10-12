@@ -223,7 +223,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         """Collect error messages from remote in stderr queue."""
 
         async for line in self.stderr:
-            log("remote stderr {}: {}".format(self.pid, line[:-1].decode()))
+            log("\t\tremote stderr {}: {}".format(self.pid, line[:-1].decode()))
             # await self.queue_err.put(line)
 
     async def receive(self):
@@ -288,7 +288,7 @@ async def _execute_command(remote, line):
 async def feed_stdin_to_remotes(**options):
 
     remote = await Remote.launch(code=core,
-                                 # target=Target(host='localhost'),
+                                 target=Target(host='localhost'),
                                  python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
                                  options=options)
 
@@ -331,7 +331,7 @@ class ExecutorConsoleHandler(StreamHandler):
 
     # TODO FIXME it still occurs...
 
-    def _emit(self, record):
+    def emit(self, record):
         asyncio.get_event_loop().run_in_executor(self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record))
 
 
@@ -344,7 +344,10 @@ async def serve_tcp_10000(reader, writer):
     except asyncio.CancelledError:
         writer.close()
 
+
 def main():
+    loop = core.create_loop(debug=True)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
         logging_handler = ExecutorConsoleHandler(logging_executor)
         core.logger.propagate = False
@@ -352,7 +355,7 @@ def main():
         # core.logger.setLevel('INFO')
 
         try:
-            asyncio.get_event_loop().run_until_complete(
+            loop.run_until_complete(
                 core.run(
                     # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
                     feed_stdin_to_remotes(),
@@ -364,4 +367,4 @@ def main():
             core.logger.info("* FINAL *".join('*' * 10))
 
         finally:
-            asyncio.get_event_loop().close()
+            loop.close()
