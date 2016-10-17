@@ -105,9 +105,10 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     def __init__(self, **options):
         super(Remote, self).__init__(limit=asyncio.streams._DEFAULT_LIMIT, loop=asyncio.get_event_loop())
 
-        self.queue_in = asyncio.Queue()
-        self.queue_out = asyncio.Queue()
-        self.queue_err = asyncio.Queue()
+        self.io_queues = core.IoQueues()
+
+        self.queue_in = self.io_queues.send
+        self.queue_out = self.io_queues.receive
         self.pid = None
         self.returncode = None
 
@@ -224,11 +225,12 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         async for line in self.stderr:
             log("\t\tremote stderr {}: {}".format(self.pid, line[:-1].decode()))
-            # await self.queue_err.put(line)
 
     async def receive(self):
+
         receiving = asyncio.gather(
-            asyncio.ensure_future(self._connect_stdin()),
+            self.io_queues.send_to_writer(self.stdin),
+            # asyncio.ensure_future(self._connect_stdin()),
             # asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
             # asyncio.ensure_future(self._commander.resolve_pending()),

@@ -17,7 +17,7 @@ import logging
 import weakref
 import traceback
 import pickle
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import pkg_resources
 
 
@@ -117,6 +117,32 @@ def create_loop(*, debug=False):
     loop_.set_debug(debug)
 
     return loop_
+
+
+class IoQueues(namedtuple('IoQueues', ('receive', 'send', 'error'))):
+
+    """Just to keep send and receive queues together."""
+
+    def __new__(cls, receive=None, send=None, error=None):
+        if receive is None:
+            receive = asyncio.Queue()
+
+        if send is None:
+            send = asyncio.Queue()
+
+        return super(IoQueues, cls).__new__(cls, receive, send, error)
+
+    async def send_to_writer(self, writer):
+        """A continuos task to send all data in the send queue to a stream writer."""
+
+        while True:
+            data = await self.send.get()
+            try:
+                writer.write(data)
+                await writer.drain()
+
+            finally:
+                self.send.task_done()
 
 
 class Incomming:
@@ -1022,6 +1048,7 @@ def main(**kwargs):
     loop = create_loop(debug=True)
 
     queue_out = asyncio.Queue()
+    io_queues = IoQueues()
 
     # setup all plugin commands
     loop.run_until_complete(Command.remote_setup(queue_out))
