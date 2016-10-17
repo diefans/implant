@@ -702,6 +702,34 @@ class Import(Command):
 DEFAULT_CHANNEL_NAME = b''
 
 
+class BinaryChunk:
+
+    """
+    structure:
+    - channel_name length must be less than 1024 characters
+    -
+
+    [header length = 30 bytes]
+    [!I: 4 bytes]             [!Q: 8 bytes]                     [!16s]     [!H: 2 bytes]
+    {overall length[0..65536]}{flags: compression|eom|stop_iter}{data uuid}{channel_name length}{channel_name}{data}
+
+
+    """
+
+    def __init__(self, data=None, *, channel_name=DEFAULT_CHANNEL_NAME, uid=None):
+        self.data = data and memoryview(data) or None
+        self.channel_name = channel_name
+        self.uid = uid
+
+    @classmethod
+    def decode(cls, raw):
+        pass
+
+    def encode(self, compress=False):
+        pass
+
+
+
 class Chunk:
 
     """
