@@ -45,99 +45,6 @@ def test_split_data():
     assert result == [b'012', b'345', b'678', b'9']
 
 
-def _compression_value(value):
-    return {
-        False: 0,
-        True: 1,
-        'gzip': 1,
-        'lzma': 2,
-        'zlib': 3,
-        # 0: False,
-        # 1: 'gzip',
-        # 2: 'lzma',
-        # 3: 'zlib',
-    }.get(value, value)
-
-
-class ChunkFlags(dict):
-
-    _masks = {
-        'eom': (1, 0, int, bool),
-        'stop_iter': (1, 1, int, bool),
-        'compression': (3, 2, {
-            False: 0,
-            True: 1,
-            'gzip': 1,
-            'lzma': 2,
-            'zlib': 3,
-        }.get, {
-            0: False,
-            1: 'gzip',
-            2: 'lzma',
-            3: 'zlib'
-        }.get),
-    }
-
-    def __init__(self, *, eom=True, stop_iter=False, compression=False):
-        self.__dict__ = self
-        super(ChunkFlags, self).__init__()
-
-        self.eom = eom
-        self.stop_iter = stop_iter
-        self.compression = compression is True and 'gzip' or compression
-
-    def encode(self):
-        def _mask_value(k, v):
-            mask, shift, enc, dec = self._masks[k]
-            return (enc(v) & mask) << shift
-
-        return sum(_mask_value(k, v) for k, v in self.items())
-
-    @classmethod
-    def decode(cls, value):
-        def _unmask_value(k, v):
-            mask, shift, enc, dec = v
-            return dec((value >> shift) & mask)
-
-        return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
-
-
-@pytest.mark.parametrize('kwargs, result', [
-    ({'eom': False, 'stop_iter': False, 'compression': False}, 0),
-    ({'eom': True, 'stop_iter': False, 'compression': False}, 1),
-    ({'eom': False, 'stop_iter': True, 'compression': False}, 2),
-    ({'eom': True, 'stop_iter': True, 'compression': False}, 3),
-
-    ({'eom': False, 'stop_iter': False, 'compression': 'gzip'}, 4),
-    ({'eom': True, 'stop_iter': False, 'compression': 'gzip'}, 5),
-    ({'eom': False, 'stop_iter': True, 'compression': 'gzip'}, 6),
-    ({'eom': True, 'stop_iter': True, 'compression': 'gzip'}, 7),
-
-    ({'eom': False, 'stop_iter': False, 'compression': True}, 4),
-    ({'eom': True, 'stop_iter': False, 'compression': True}, 5),
-    ({'eom': False, 'stop_iter': True, 'compression': True}, 6),
-    ({'eom': True, 'stop_iter': True, 'compression': True}, 7),
-
-    ({'eom': False, 'stop_iter': False, 'compression': 'lzma'}, 8),
-    ({'eom': True, 'stop_iter': False, 'compression': 'lzma'}, 9),
-    ({'eom': False, 'stop_iter': True, 'compression': 'lzma'}, 10),
-    ({'eom': True, 'stop_iter': True, 'compression': 'lzma'}, 11),
-
-    ({'eom': False, 'stop_iter': False, 'compression': 'zlib'}, 12),
-    ({'eom': True, 'stop_iter': False, 'compression': 'zlib'}, 13),
-    ({'eom': False, 'stop_iter': True, 'compression': 'zlib'}, 14),
-    ({'eom': True, 'stop_iter': True, 'compression': 'zlib'}, 15),
-])
-def test_flags(kwargs, result):
-    flags = ChunkFlags(**kwargs)
-
-    encoded = flags.encode()
-
-    assert result == encoded
-
-    decoded = ChunkFlags.decode(encoded)
-
-    assert flags == decoded
 
 
 import struct
@@ -194,7 +101,6 @@ class BinaryChunk:
         flags_encoded, uid_bytes, channel_name_length, data_length = struct.unpack('!Q16sHI', header)
 
         return ChunkFlags.decode(flags_encoded), uuid.UUID(bytes=uid_bytes), channel_name_length, data_length
-
 
 def test_binary_chunk():
     uid = uuid.uuid1()
