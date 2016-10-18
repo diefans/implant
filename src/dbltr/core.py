@@ -17,6 +17,7 @@ import logging
 import weakref
 import traceback
 import pickle
+import struct
 from collections import defaultdict, namedtuple
 import pkg_resources
 
@@ -119,18 +120,16 @@ def create_loop(*, debug=False):
     return loop_
 
 
-class IoQueues(namedtuple('IoQueues', ('receive', 'send', 'error'))):
-
+class IoQueues:
     """Just to keep send and receive queues together."""
 
-    def __new__(cls, receive=None, send=None, error=None):
-        if receive is None:
-            receive = asyncio.Queue()
-
+    def __init__(self, send=None, error=None):
         if send is None:
             send = asyncio.Queue()
 
-        return super(IoQueues, cls).__new__(cls, receive, send, error)
+        self.send = send
+
+        self.receive = defaultdict(asyncio.Queue)
 
     async def send_to_writer(self, writer):
         """A continuos task to send all data in the send queue to a stream writer."""
@@ -181,13 +180,14 @@ class Outgoing:
 
     """A context for an outgoing pipe."""
 
-    def __init__(self, *, pipe=sys.stdout):
+    def __init__(self, *, pipe=sys.stdout, shutdown=False):
         self.pipe = pipe
         self.transport = None
+        self.shutdown = shutdown
 
     async def __aenter__(self):
         self.transport, protocol = await asyncio.get_event_loop().connect_write_pipe(
-            ShutdownOnConnectionLost,
+            ShutdownOnConnectionLost if self.shutdown else asyncio.streams.FlowControlMixin,
             # sys.stdout
             os.fdopen(self.pipe.fileno(), 'wb')
         )
@@ -208,6 +208,210 @@ async def send_outgoing_queue(queue, pipe=sys.stdout):
             writer.write(data)
             await writer.drain()
             queue.task_done()
+
+
+class ChunkFlags(dict):
+
+    _masks = {
+        'eom': (1, 0, int, bool),
+        'stop_iter': (1, 1, int, bool),
+        'send_ack': (1, 2, int, bool),
+        'recv_ack': (1, 3, int, bool),
+        'compression': (3, 4, {
+            False: 0,
+            True: 1,
+            'gzip': 1,
+            'lzma': 2,
+            'zlib': 3,
+        }.get, {
+            0: False,
+            1: 'gzip',
+            2: 'lzma',
+            3: 'zlib'
+        }.get),
+    }
+
+    def __init__(self, *, send_ack=False, recv_ack=False, eom=False, stop_iter=False, compression=False):
+        self.__dict__ = self
+        super(ChunkFlags, self).__init__()
+
+        self.eom = eom
+        self.stop_iter = stop_iter
+        self.send_ack = send_ack
+        self.recv_ack = recv_ack
+        self.compression = compression is True and 'gzip' or compression
+
+    def encode(self):
+        def _mask_value(k, v):
+            mask, shift, enc, dec = self._masks[k]
+            return (enc(v) & mask) << shift
+
+        return sum(_mask_value(k, v) for k, v in self.items())
+
+    @classmethod
+    def decode(cls, value):
+        def _unmask_value(k, v):
+            mask, shift, enc, dec = v
+            return dec((value >> shift) & mask)
+
+        return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
+
+
+HEADER_FMT = '!16sQHI'
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
+
+
+class Channel:
+
+    chunk_size = 0x8000
+
+    acknowledgements = weakref.WeakValueDictionary()
+    """Global acknowledgment futures distinctive by uuid."""
+
+    def __init__(self, name=None, *, io_queues=None):
+        self.name = name
+        self.io_queues = io_queues or IoQueues()
+        self.io_outgoing = self.io_queues.send
+        self.io_incomming = self.io_queues.receive[self.name]
+
+    @staticmethod
+    def _encode_header(uid, channel_name=None, data=None, *, flags=None):
+        """
+        [header length = 30 bytes]
+        [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
+        {data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
+        """
+        assert isinstance(uid, uuid.UUID), "uid must be an UUID instance"
+
+        if flags is None:
+            flags = {}
+
+        if channel_name:
+            name = channel_name.encode()
+            channel_name_length = len(name)
+        else:
+            channel_name_length = 0
+
+        data_length = data and len(data) or 0
+        chunk_flags = ChunkFlags(**flags)
+
+        header = struct.pack(HEADER_FMT, uid.bytes, chunk_flags.encode(), channel_name_length, data_length)
+
+        return header
+
+    @staticmethod
+    def _decode_header(header):
+        uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header)
+
+        return uuid.UUID(bytes=uid_bytes), ChunkFlags.decode(flags_encoded), channel_name_length, data_length
+
+    async def send(self, data, ack=False):
+        compression = False
+        uid = uuid.uuid1()
+        name = self.name.encode()
+
+        pickled_data = pickle.dumps(data)
+
+        for part in split_data(pickled_data, self.chunk_size):
+
+            header = self._encode_header(uid, self.name, part, flags={
+                'eom': False, 'send_ack': False, 'compression': compression
+            })
+
+            await self.io_outgoing.put(header)
+            await self.io_outgoing.put(name)
+            await self.io_outgoing.put(part)
+
+        header = self._encode_header(uid, self.name, None, flags={
+            'eom': True, 'send_ack': ack, 'compression': False
+        })
+        await self.io_outgoing.put(header)
+        await self.io_outgoing.put(name)
+
+        # if acknowledgement is asked for
+        # we return a future to let the caller wait for
+        if ack:
+            ack_future = asyncio.Future()
+            self.acknowledgements[uid] = ack_future
+
+            return ack_future
+
+    async def receive(self):
+        """Receive the next message in this channel."""
+
+        msg = await self.io_incomming.get()
+        try:
+            return msg
+        finally:
+            self.io_incomming.task_done()
+
+    @classmethod
+    async def _send_ack(cls, io_queues, uid):
+        # no channel_name, no data
+        header = cls._encode_header(uid, None, None, flags={
+            'eom': True, 'recv_ack': True
+        })
+
+        await io_queues.send.put(header)
+
+    @classmethod
+    async def communicate(cls, io_queues, reader, writer):
+        return asyncio.gather(
+            cls._send_writer(io_queues, writer),
+            cls._receive_reader(io_queues, reader)
+        )
+
+    @classmethod
+    async def _send_writer(cls, io_queues, writer):
+        # send outgoing queue to writer
+        queue = io_queues.send
+
+        try:
+            while True:
+                data = await queue.get()
+                writer.write(data)
+                queue.task_done()
+                await writer.drain()
+
+        except asyncio.CancelledError:
+            pass
+
+    @classmethod
+    async def _receive_reader(cls, io_queues, reader):
+        # receive incomming data into queues
+
+        buffer = {}
+
+        try:
+            while True:
+                # read header
+                raw_header = await reader.readexactly(HEADER_SIZE)
+                uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
+
+                if uid not in buffer:
+                    buffer[uid] = bytearray()
+
+                if channel_name_length:
+                    channel_name = (await reader.readexactly(channel_name_length)).decode()
+
+                if data_length:
+                    buffer[uid].extend(await reader.readexactly(data_length))
+
+                if flags.send_ack:
+                    # we have to acknowledge the reception
+                    await cls._send_ack(io_queues, uid)
+
+                if flags.eom:
+                    # put message into channel queue
+                    await io_queues.receive[channel_name].put(pickle.loads(buffer[uid]))
+                    del buffer[uid]
+
+                    # acknowledge reception
+                    ack_future = cls.acknowledgements.get(uid)
+                    if ack_future:
+                        ack_future.set_result()
+        except asyncio.CancelledError:
+            pass
 
 
 ######################################################################################

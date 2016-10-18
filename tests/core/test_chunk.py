@@ -59,8 +59,8 @@ class BinaryChunk:
     -
 
     [header length = 30 bytes]
-    [!Q: 8 bytes]                     [!16s]     [!H: 2 bytes]        [!I: 4 bytes]
-    {flags: compression|eom|stop_iter}{data uuid}{channel_name length}{data length}{channel_name}{data}
+    [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
+    {data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
 
 
     """
