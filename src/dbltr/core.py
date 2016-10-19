@@ -18,7 +18,8 @@ import weakref
 import traceback
 import pickle
 import struct
-from collections import defaultdict, namedtuple
+import time
+from collections import defaultdict, namedtuple, Iterable
 import pkg_resources
 
 
@@ -83,6 +84,10 @@ def create_module(module_name, is_package=False):
     return sys.modules[module_name]
 
 
+def uuid1_time(uid):
+    return (uid.time - 0x01b21dd213814000) * 100 / 1e9
+
+
 def log(_msg, **kwargs):
     if sys.stderr.isatty():
         colors = {
@@ -144,26 +149,49 @@ class IoQueues:
                 self.send.task_done()
 
 
-class Incomming:
+class Incomming(asyncio.StreamReader):
 
     """A context for an incomming pipe."""
 
     def __init__(self, *, pipe=sys.stdin):
+        super(Incomming, self).__init__()
+
         self.pipe = os.fdopen(pipe) if isinstance(pipe, int) else pipe
-        self.transport = None
 
     async def __aenter__(self):
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
+        protocol = asyncio.StreamReaderProtocol(self)
 
-        self.transport, _ = await asyncio.get_event_loop().connect_read_pipe(
+        await asyncio.get_event_loop().connect_read_pipe(
             lambda: protocol,
             self.pipe,
         )
-        return reader
+        return self
 
     async def __aexit__(self, exc_type, value, tb):
-        self.transport.close()
+        self._transport.close()
+
+    async def readexactly(self, n):
+        # see https://github.com/python/asyncio/issues/394
+        buffer = bytearray()
+
+        missing = n
+
+        while missing:
+            if not self._buffer:
+                await self._wait_for_data('readexactly')
+
+            if self._eof or not self._buffer:
+                raise asyncio.IncompleteReadError(bytes(buffer), n)
+
+            length = min(len(self._buffer), missing)
+            buffer.extend(self._buffer[:length])
+            del self._buffer[:length]
+
+            missing -= length
+
+            self._maybe_resume_transport()
+
+        return buffer
 
 
 class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
@@ -200,7 +228,7 @@ class Outgoing:
 async def send_outgoing_queue(queue, pipe=sys.stdout):
     """Write data from queue to stdout."""
 
-    async with Outgoing(pipe=pipe) as writer:
+    async with Outgoing(pipe=pipe, shutdown=True) as writer:
         while True:
             data = await queue.get()
             writer.write(data)
@@ -311,28 +339,25 @@ class Channel:
         pickled_data = pickle.dumps(data)
 
         for part in split_data(pickled_data, self.chunk_size):
-
             header = self._encode_header(uid, self.name, part, flags={
                 'eom': False, 'send_ack': False, 'compression': compression
             })
 
-            await self.io_outgoing.put(header)
-            await self.io_outgoing.put(name)
-            await self.io_outgoing.put(part)
+            await self.io_outgoing.put((header, name, part))
 
         header = self._encode_header(uid, self.name, None, flags={
             'eom': True, 'send_ack': ack, 'compression': False
         })
-        await self.io_outgoing.put(header)
-        await self.io_outgoing.put(name)
+        await self.io_outgoing.put((header, name))
 
         # if acknowledgement is asked for
-        # we return a future to let the caller wait for
+        # we await this future and return its result
+        # see _receive_reader for resolution of future
         if ack:
             ack_future = asyncio.Future()
             self.acknowledgements[uid] = ack_future
 
-            return ack_future
+            return await ack_future
 
     async def receive(self):
         """Receive the next message in this channel."""
@@ -360,15 +385,6 @@ class Channel:
         )
 
         await fut_send_recv
-        # fut_com = asyncio.ensure_future(fut_send_recv)
-
-        # def shutdown_send_recv(fut):
-        #     logger.warn("\n\nshutdown send and recv")
-        #     fut_send_recv.cancel()
-
-        # fut_com.add_done_callback(shutdown_send_recv)
-
-        # return fut_com
 
     @classmethod
     async def _send_writer(cls, io_queues, writer):
@@ -376,15 +392,56 @@ class Channel:
         queue = io_queues.send
 
         try:
-            logger.info("sending queue to writer")
+            logger.debug("sending queue to writer")
             while True:
                 data = await queue.get()
-                writer.write(data)
+                if isinstance(data, tuple):
+                    for part in data:
+                        writer.write(part)
+                else:
+                    writer.write(data)
+
                 queue.task_done()
                 await writer.drain()
 
         except asyncio.CancelledError as ex:
-            logger.error("exception: %s", ex)
+            if queue.qsize():
+                logger.warn("Send queue was not empty when canceld!")
+
+    @classmethod
+    async def _receive_single_message(cls, io_queues, reader, buffer):
+        # read header
+        raw_header = await reader.readexactly(HEADER_SIZE)
+        uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
+
+        if channel_name_length:
+            channel_name = (await reader.readexactly(channel_name_length)).decode()
+
+        if data_length:
+            if uid not in buffer:
+                buffer[uid] = bytearray()
+
+            buffer[uid].extend(await reader.readexactly(data_length))
+
+        if flags.send_ack:
+            # we have to acknowledge the reception
+            await cls._send_ack(io_queues, uid)
+
+        if flags.eom:
+            # put message into channel queue
+            if uid in buffer:
+                msg = pickle.loads(buffer[uid])
+                await io_queues.receive[channel_name].put(msg)
+                del buffer[uid]
+
+            # acknowledge reception
+            ack_future = cls.acknowledgements.get(uid)
+            if ack_future and flags.recv_ack:
+                # TODO is there a meaningful result for an acknowledgement
+                # - timestamp of reception
+                # - duration of roundtrip
+                duration = time.time() - uuid1_time(uid)
+                ack_future.set_result((uid, duration))
 
     @classmethod
     async def _receive_reader(cls, io_queues, reader):
@@ -393,36 +450,13 @@ class Channel:
         buffer = {}
 
         try:
-            logger.info("receiving reader into queues")
+            logger.debug("receiving reader into queues")
             while True:
-                # read header
-                raw_header = await reader.readexactly(HEADER_SIZE)
-                uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
+                await cls._receive_single_message(io_queues, reader, buffer)
 
-                if uid not in buffer:
-                    buffer[uid] = bytearray()
-
-                if channel_name_length:
-                    channel_name = (await reader.readexactly(channel_name_length)).decode()
-
-                if data_length:
-                    buffer[uid].extend(await reader.readexactly(data_length))
-
-                if flags.send_ack:
-                    # we have to acknowledge the reception
-                    await cls._send_ack(io_queues, uid)
-
-                if flags.eom:
-                    # put message into channel queue
-                    await io_queues.receive[channel_name].put(pickle.loads(buffer[uid]))
-                    del buffer[uid]
-
-                    # acknowledge reception
-                    ack_future = cls.acknowledgements.get(uid)
-                    if ack_future:
-                        ack_future.set_result()
         except asyncio.CancelledError as ex:
-            logger.error("exception: %s", ex)
+            if buffer:
+                log.warn("Receive buffer was not empty when canceled!")
 
 
 ######################################################################################
