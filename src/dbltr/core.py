@@ -9,6 +9,7 @@ import functools
 import os
 import base64
 import json
+import hashlib
 import uuid
 import types
 import gzip
@@ -322,12 +323,15 @@ class Channel:
         chunk_flags = ChunkFlags(**flags)
 
         header = struct.pack(HEADER_FMT, uid.bytes, chunk_flags.encode(), channel_name_length, data_length)
+        check = hashlib.md5(header).digest()
 
-        return header
+        return b''.join((header, check))
 
     @staticmethod
     def _decode_header(header):
-        uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header)
+        assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
+        uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
+
 
         return uuid.UUID(bytes=uid_bytes), ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
@@ -411,37 +415,45 @@ class Channel:
     @classmethod
     async def _receive_single_message(cls, io_queues, reader, buffer):
         # read header
-        raw_header = await reader.readexactly(HEADER_SIZE)
-        uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
+        try:
+            logger.debug("waiting for header...")
+            raw_header = await reader.readexactly(HEADER_SIZE + 16)
+            uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
+            logger.debug("\t<-- header: %s, sizes: %s/%s, %s", uid, channel_name_length, data_length, flags)
 
-        if channel_name_length:
-            channel_name = (await reader.readexactly(channel_name_length)).decode()
+            if channel_name_length:
+                channel_name = (await reader.readexactly(channel_name_length)).decode()
 
-        if data_length:
-            if uid not in buffer:
-                buffer[uid] = bytearray()
+            if data_length:
+                if uid not in buffer:
+                    buffer[uid] = bytearray()
 
-            buffer[uid].extend(await reader.readexactly(data_length))
+                buffer[uid].extend(await reader.readexactly(data_length))
 
-        if flags.send_ack:
-            # we have to acknowledge the reception
-            await cls._send_ack(io_queues, uid)
+            if flags.send_ack:
+                # we have to acknowledge the reception
+                await cls._send_ack(io_queues, uid)
 
-        if flags.eom:
-            # put message into channel queue
-            if uid in buffer:
-                msg = pickle.loads(buffer[uid])
-                await io_queues.receive[channel_name].put(msg)
-                del buffer[uid]
+            if flags.eom:
+                # put message into channel queue
+                if uid in buffer:
+                    msg = pickle.loads(buffer[uid])
+                    await io_queues.receive[channel_name].put(msg)
+                    del buffer[uid]
 
-            # acknowledge reception
-            ack_future = cls.acknowledgements.get(uid)
-            if ack_future and flags.recv_ack:
-                # TODO is there a meaningful result for an acknowledgement
-                # - timestamp of reception
-                # - duration of roundtrip
-                duration = time.time() - uuid1_time(uid)
-                ack_future.set_result((uid, duration))
+                # acknowledge reception
+                ack_future = cls.acknowledgements.get(uid)
+                if ack_future and flags.recv_ack:
+                    # TODO is there a meaningful result for an acknowledgement
+                    # - timestamp of reception
+                    # - duration of roundtrip
+                    duration = time.time() - uuid1_time(uid)
+                    ack_future.set_result((uid, duration))
+        except asyncio.CancelledError:
+            raise
+
+        except:
+            logger.error("Error while receiving:\n%s", traceback.format_exc())
 
     @classmethod
     async def _receive_reader(cls, io_queues, reader):
@@ -453,6 +465,7 @@ class Channel:
             logger.debug("receiving reader into queues")
             while True:
                 await cls._receive_single_message(io_queues, reader, buffer)
+                logger.info("Message received")
 
         except asyncio.CancelledError as ex:
             if buffer:
@@ -1320,19 +1333,25 @@ async def log_tcp_10001():
         writer.close()
 
 
+async def communicate(io_queues):
+    async with Incomming(pipe=sys.stdin) as reader:
+        async with Outgoing(pipe=sys.stdout, shutdown=True) as writer:
+            await Channel.communicate(io_queues, reader, writer)
+
+
 def main(**kwargs):
 
     loop = create_loop(debug=True)
 
-    queue_out = asyncio.Queue()
     io_queues = IoQueues()
 
     # setup all plugin commands
-    loop.run_until_complete(Command.remote_setup(queue_out))
+    loop.run_until_complete(Command.remote_setup(io_queues))
     try:
         loop.run_until_complete(
             run(
-                send_outgoing_queue(queue_out, sys.stdout),
+                communicate(io_queues)
+                # send_outgoing_queue(queue_out, sys.stdout),
                 # log_tcp_10001()
             )
         )
