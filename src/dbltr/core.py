@@ -149,7 +149,7 @@ class Incomming:
     """A context for an incomming pipe."""
 
     def __init__(self, *, pipe=sys.stdin):
-        self.pipe = pipe
+        self.pipe = os.fdopen(pipe) if isinstance(pipe, int) else pipe
         self.transport = None
 
     async def __aenter__(self):
@@ -158,8 +158,7 @@ class Incomming:
 
         self.transport, _ = await asyncio.get_event_loop().connect_read_pipe(
             lambda: protocol,
-            # sys.stdin
-            os.fdopen(self.pipe.fileno(), 'r')
+            self.pipe,
         )
         return reader
 
@@ -181,15 +180,14 @@ class Outgoing:
     """A context for an outgoing pipe."""
 
     def __init__(self, *, pipe=sys.stdout, shutdown=False):
-        self.pipe = pipe
+        self.pipe = os.fdopen(pipe) if isinstance(pipe, int) else pipe
         self.transport = None
         self.shutdown = shutdown
 
     async def __aenter__(self):
         self.transport, protocol = await asyncio.get_event_loop().connect_write_pipe(
             ShutdownOnConnectionLost if self.shutdown else asyncio.streams.FlowControlMixin,
-            # sys.stdout
-            os.fdopen(self.pipe.fileno(), 'wb')
+            self.pipe
         )
         writer = asyncio.streams.StreamWriter(self.transport, protocol, None, asyncio.get_event_loop())
 
@@ -356,10 +354,21 @@ class Channel:
 
     @classmethod
     async def communicate(cls, io_queues, reader, writer):
-        return asyncio.gather(
+        fut_send_recv = asyncio.gather(
             cls._send_writer(io_queues, writer),
             cls._receive_reader(io_queues, reader)
         )
+
+        await fut_send_recv
+        # fut_com = asyncio.ensure_future(fut_send_recv)
+
+        # def shutdown_send_recv(fut):
+        #     logger.warn("\n\nshutdown send and recv")
+        #     fut_send_recv.cancel()
+
+        # fut_com.add_done_callback(shutdown_send_recv)
+
+        # return fut_com
 
     @classmethod
     async def _send_writer(cls, io_queues, writer):
@@ -367,14 +376,15 @@ class Channel:
         queue = io_queues.send
 
         try:
+            logger.info("sending queue to writer")
             while True:
                 data = await queue.get()
                 writer.write(data)
                 queue.task_done()
                 await writer.drain()
 
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError as ex:
+            logger.error("exception: %s", ex)
 
     @classmethod
     async def _receive_reader(cls, io_queues, reader):
@@ -383,6 +393,7 @@ class Channel:
         buffer = {}
 
         try:
+            logger.info("receiving reader into queues")
             while True:
                 # read header
                 raw_header = await reader.readexactly(HEADER_SIZE)
@@ -410,8 +421,8 @@ class Channel:
                     ack_future = cls.acknowledgements.get(uid)
                     if ack_future:
                         ack_future.set_result()
-        except asyncio.CancelledError:
-            pass
+        except asyncio.CancelledError as ex:
+            logger.error("exception: %s", ex)
 
 
 ######################################################################################

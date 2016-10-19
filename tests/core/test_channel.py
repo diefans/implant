@@ -93,7 +93,7 @@ class TestChannel:
                         id(part) == id(c.name)
 
     @pytest.mark.asyncio
-    async def test_communicate(self):
+    async def test_communicate(self, event_loop):
         import os
         import asyncio
         from dbltr import core
@@ -103,26 +103,21 @@ class TestChannel:
 
         # TODO mock Outgoing/os.kill to prevent shutdown of test run
         # alternativelly think about some other means to shutdown remote process if ssh closes
-        async with core.Incomming(pipe=os.fdopen(r_pipe, 'r')) as reader:
-            async with core.Outgoing(pipe=os.fdopen(w_pipe, 'wb')) as writer:
+        async with core.Incomming(pipe=r_pipe) as reader:
+            async with core.Outgoing(pipe=w_pipe) as writer:
                 com_future = asyncio.ensure_future(core.Channel.communicate(io_queues, reader, writer))
 
-                c = core.Channel('foo', io_queues=io_queues)
+                try:
+                    c = core.Channel('foo', io_queues=io_queues)
 
-                await c.send('bar')
+                    await c.send('bar')
+                    msg = await c.receive()
+                    assert msg == 'bar'
 
-                msg = await c.receive()
+                    await c.send('baz', ack=True)
+                    msg = await c.receive()
+                    assert msg == 'baz'
 
-                assert msg == 'bar'
-
-                await c.send('baz', ack=True)
-
-                msg = await c.receive()
-
-                assert msg == 'baz'
-
-                com_future.cancel()
-                await com_future
-
-                # TODO OSError: [Errno 9] Bad file descriptor
-                # on test shutdown
+                finally:
+                    com_future.cancel()
+                    await com_future
