@@ -20,7 +20,7 @@ import traceback
 import pickle
 import struct
 import time
-from collections import defaultdict, namedtuple, Iterable
+from collections import defaultdict
 import pkg_resources
 
 
@@ -200,6 +200,7 @@ class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
         """Shutdown process"""
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
+        # XXX FIXME is not called
         logger.warning("Connection lost! Shutting down...")
         os.kill(os.getpid(), signal.SIGHUP)
 
@@ -270,7 +271,7 @@ class ChunkFlags(dict):
 
     def encode(self):
         def _mask_value(k, v):
-            mask, shift, enc, dec = self._masks[k]
+            mask, shift, enc, _ = self._masks[k]
             return (enc(v) & mask) << shift
 
         return sum(_mask_value(k, v) for k, v in self.items())
@@ -278,7 +279,7 @@ class ChunkFlags(dict):
     @classmethod
     def decode(cls, value):
         def _unmask_value(k, v):
-            mask, shift, enc, dec = v
+            mask, shift, _, dec = v
             return dec((value >> shift) & mask)
 
         return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
@@ -331,7 +332,6 @@ class Channel:
     def _decode_header(header):
         assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
         uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
-
 
         return uuid.UUID(bytes=uid_bytes), ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
@@ -408,9 +408,9 @@ class Channel:
                 queue.task_done()
                 await writer.drain()
 
-        except asyncio.CancelledError as ex:
+        except asyncio.CancelledError:
             if queue.qsize():
-                logger.warn("Send queue was not empty when canceld!")
+                logger.warning("Send queue was not empty when canceld!")
 
     @classmethod
     async def _receive_single_message(cls, io_queues, reader, buffer):
@@ -467,7 +467,7 @@ class Channel:
                 await cls._receive_single_message(io_queues, reader, buffer)
                 logger.info("Message received")
 
-        except asyncio.CancelledError as ex:
+        except asyncio.CancelledError:
             if buffer:
                 log.warn("Receive buffer was not empty when canceled!")
 
@@ -706,11 +706,11 @@ class Command(metaclass=CommandMeta):
 
 class RemoteException(Exception):
 
-    def __init__(self, *, fqin, traceback, exc_type):
+    def __init__(self, *, fqin, tb, exc_type):
         super(RemoteException, self).__init__()
 
         self.fqin = fqin
-        self.traceback = traceback
+        self.traceback = tb
         self.type = exc_type
 
 
