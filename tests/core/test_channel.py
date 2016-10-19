@@ -1,5 +1,5 @@
-import pytest
 from unittest import mock
+import pytest
 
 
 @pytest.mark.parametrize('result, kwargs', [
@@ -101,15 +101,12 @@ class TestChannel:
                 chunk_count = (chunk_size + (1 if rest else 0)) + 1
                 assert len(chunks) == chunk_count
 
-                for i, part in enumerate(chunks):
-                    if i % 2 == 0:
-                        id(part) == id(c.name)
-
     @pytest.mark.asyncio
     async def test_communicate(self, event_loop):
         import os
         import time
         import asyncio
+        import uuid
         from dbltr import core
 
         r_pipe, w_pipe = os.pipe()
@@ -130,12 +127,12 @@ class TestChannel:
                         msg = await c.receive()
                         assert msg == 'bar'
 
-                        fut_ack = await c.send('baz', ack=True)
+                        uid, duration = await c.send('baz', ack=True)
+                        assert isinstance(uid, uuid.UUID)
+                        assert isinstance(duration, float)
 
                         msg = await c.receive()
                         assert msg == 'baz'
-
-                        await asyncio.sleep(1)
 
                         # parallel send
                         t1 = time.time()
