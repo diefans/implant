@@ -54,10 +54,13 @@ def test_flags(kwargs, result):
 
 @pytest.yield_fixture
 def event_loop():
-    import asyncio
-    import uvloop
-    loop = uvloop.new_event_loop()
-    # asyncio.set_event_loop(loop)
+    try:
+        import uvloop
+        loop = uvloop.new_event_loop()
+
+    except ImportError:
+        import asyncio
+        loop = asyncio.new_event_loop()
 
     yield loop
 
