@@ -124,14 +124,14 @@ class TestChannel:
                         c = core.Channel('foo', io_queues=io_queues)
 
                         await c.send('bar')
-                        msg = await c.receive()
+                        msg = await c
                         assert msg == 'bar'
 
                         uid, duration = await c.send('baz', ack=True)
                         assert isinstance(uid, uuid.UUID)
                         assert isinstance(duration, float)
 
-                        msg = await c.receive()
+                        msg = await c
                         assert msg == 'baz'
 
                         # parallel send
@@ -146,11 +146,11 @@ class TestChannel:
 
                         msgs = []
 
-                        msgs.append(await c.receive())
-                        msgs.append(await c.receive())
-                        msgs.append(await c.receive())
-                        msgs.append(await c.receive())
-                        msgs.append(await c.receive())
+                        msgs.append(await c)
+                        msgs.append(await c)
+                        msgs.append(await c)
+                        msgs.append(await c)
+                        msgs.append(await c)
 
                         # just check for existence
                         short_msgs = [m[0] for m in msgs]

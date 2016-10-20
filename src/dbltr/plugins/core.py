@@ -6,41 +6,36 @@ from dbltr import core
 
 
 class Echo(core.Command):
-    def __init__(self, *args, **kwargs):
-        super(Echo, self).__init__()
+    def __init__(self, io_queues, *args, **kwargs):
+        super(Echo, self).__init__(io_queues)
 
         self.args = args
         self.kwargs = kwargs
 
-    async def local(self, queue_out, remote_future):
-        channel_in = self.channel(core.JsonChannel)
-        channel_out = self.channel(core.JsonChannel, queue=queue_out)
-
+    async def local(self, remote_future):
         incomming = []
 
-        # custom protocol
-        # first receive
-        async for i, msg in core.aenumerate(core.JsonChannelIterator(channel_in)):
-            incomming.append(msg)
+        # # custom protocol
+        # # first receive
+        # async for i, msg in core.aenumerate(core.JsonChannelIterator(channel_in)):
+        #     incomming.append(msg)
 
-        # second send
-        await core.JsonChannelIterator(channel_out).send({'i': i} for i in range(10))
+        # # second send
+        # await core.JsonChannelIterator(channel_out).send({'i': i} for i in range(10))
 
         result = await remote_future
         return [result, incomming]
 
-    async def remote(self, queue_out):
-        channel_in = self.channel(core.JsonChannel)
-        channel_out = self.channel(core.JsonChannel, queue=queue_out)
+    async def remote(self):
 
         data = []
 
-        # first send
-        await core.JsonChannelIterator(channel_out).send({'i': str(i ** 2) for i in range(10)})
+        # # first send
+        # await core.JsonChannelIterator(channel_out).send({'i': str(i ** 2) for i in range(10)})
 
-        # second receive
-        async for msg in core.JsonChannelIterator(channel_in):
-            data.append(msg)
+        # # second receive
+        # async for msg in core.JsonChannelIterator(channel_in):
+        #     data.append(msg)
 
         # raise Exception("foo")
         return {

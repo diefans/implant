@@ -142,7 +142,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
     async def process_launched(self):
         # setup all plugin commands for this remote
-        await core.Command.local_setup(self)
+        await core.Command.local_setup(self.io_queues)
         core.logger.info('\n%s', '\n'.join(['-' * 80] * 1))
 
     async def wait(self):
@@ -229,11 +229,12 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     async def receive(self):
 
         receiving = asyncio.gather(
-            self.io_queues.send_to_writer(self.stdin),
-            # asyncio.ensure_future(self._connect_stdin()),
-            # asyncio.ensure_future(self._connect_stdout()),
+            asyncio.ensure_future(core.Channel.communicate(self.io_queues, self.stdout, self.stdin)),
+        #     self.io_queues.send_to_writer(self.stdin),
+        #     # asyncio.ensure_future(self._connect_stdin()),
+        #     # asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
-            # asyncio.ensure_future(self._commander.resolve_pending()),
+        #     # asyncio.ensure_future(self._commander.resolve_pending()),
         )
 
         self.receiving = receiving
@@ -275,8 +276,8 @@ async def _execute_command(remote, line):
     command_name, args, kwargs = parse_command(line[:-1].decode())
 
     try:
-        cmd = core.Execute(command_name, *args, **kwargs)
-        result = await cmd.local(remote)
+        cmd = core.Execute(remote.io_queues, command_name, *args, **kwargs)
+        result = await cmd.local(remote.io_queues)
 
     except (TypeError, KeyError) as ex:
         print("< {}\n > ".format(ex), end='')

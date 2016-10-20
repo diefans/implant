@@ -302,6 +302,41 @@ class Channel:
         self.io_outgoing = self.io_queues.send
         self.io_incomming = self.io_queues.receive[self.name]
 
+    def __repr__(self):
+        return '<{0.name} {in_size} / {out_size}>'.format(
+            self,
+            in_size=self.io_incomming.qsize(),
+            out_size=self.io_outgoing.qsize(),
+        )
+
+    async def receive(self):
+        """Receive the next message in this channel."""
+
+        msg = await self.io_incomming.get()
+        try:
+            return msg
+        finally:
+            self.io_incomming.task_done()
+
+    def __await__(self):
+        """Receive the next message in this channel."""
+
+        msg = yield from self.io_incomming.get()
+
+        try:
+            return msg
+        finally:
+            self.io_incomming.task_done()
+
+    async def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        # TODO use iterator and stop_iter header to raise AsyncStopIteration
+        data = await self
+
+        return data
+
     @staticmethod
     def _encode_header(uid, channel_name=None, data=None, *, flags=None):
         """
@@ -362,15 +397,6 @@ class Channel:
             self.acknowledgements[uid] = ack_future
 
             return await ack_future
-
-    async def receive(self):
-        """Receive the next message in this channel."""
-
-        msg = await self.io_incomming.get()
-        try:
-            return msg
-        finally:
-            self.io_incomming.task_done()
 
     @classmethod
     async def _send_ack(cls, io_queues, uid):
@@ -454,6 +480,12 @@ class Channel:
 
         except:
             logger.error("Error while receiving:\n%s", traceback.format_exc())
+            raise
+
+    @classmethod
+    def _log_io_queues(cls, io_queues):
+        for name, q in io_queues.receive.items():
+            logger.debug("\t\tqueue: %s, %s", name, q.qsize())
 
     @classmethod
     async def _receive_reader(cls, io_queues, reader):
@@ -466,10 +498,12 @@ class Channel:
             while True:
                 await cls._receive_single_message(io_queues, reader, buffer)
                 logger.info("Message received")
+                cls._log_io_queues(io_queues)
 
         except asyncio.CancelledError:
             if buffer:
                 log.warn("Receive buffer was not empty when canceled!")
+
 
 
 ######################################################################################
@@ -615,6 +649,10 @@ class CommandMeta(type):
         def _tuple(value):
             return cls.command_instances[value]
 
+        @_get.register(str)
+        def _str(value):
+            return cls.command_instances[tuple(value.split('/', 1))]
+
         @_get.register(bytes)
         def _bytes(value):
             return cls.command_instances[tuple(value.split(b'/', 1))]
@@ -627,7 +665,9 @@ class CommandMeta(type):
 
     @property
     def fqn(cls):
-        return ':'.join((cls.plugin.module_name, cls.__name__)).encode()
+        return ':'.join((cls.plugin.module_name, cls.__name__))
+
+    fqin = fqn
 
     @classmethod
     def _lookup_command_classmethods(mcs, *names):
@@ -658,7 +698,7 @@ class CommandMeta(type):
         inst = super(CommandMeta, cls).__call__(*args, **kwargs)
 
         if command_uid is None:
-            command_uid = uuid.uuid1().hex.encode()
+            command_uid = uuid.uuid1().hex
 
         cls._create_reference(command_uid, inst)
 
@@ -671,7 +711,8 @@ class Command(metaclass=CommandMeta):
 
     channels = defaultdict(asyncio.Queue)
 
-    def __init__(self):
+    def __init__(self, io_queues):
+        self.io_queues = io_queues
         self.queue = asyncio.Queue()
 
     def local(self):
@@ -694,14 +735,14 @@ class Command(metaclass=CommandMeta):
 
     @reify
     def channel_name(self):
-        return b'/'.join(self.fqin)
+        return '/'.join(self.fqin)
 
-    @functools.lru_cache(maxsize=10, typed=True)
-    def channel(self, channel_type, *, queue=None):
-        return channel_type(self.channel_name, queue=queue or self.queue)
+    @reify
+    def channel(self):
+        return Channel(self.channel_name, io_queues=self.io_queues)
 
     def __repr__(self):
-        return self.channel_name.decode()
+        return self.channel_name
 
 
 class RemoteException(Exception):
@@ -720,8 +761,8 @@ class Execute(Command):
 
     pending_futures = defaultdict(asyncio.Future)
 
-    def __init__(self, command_name, *args, **kwargs):
-        super(Execute, self).__init__()
+    def __init__(self, io_queues, command_name, *args, **kwargs):
+        super(Execute, self).__init__(io_queues)
 
         self.command_name = command_name
         self.args = args
@@ -733,6 +774,7 @@ class Execute(Command):
             'command_name': self.command_name,
             'args': self.args,
             'kwargs': self.kwargs,
+            'uid': self.uid
         }
         return params
 
@@ -744,7 +786,7 @@ class Execute(Command):
         if inspect.isclass(command_class) and issubclass(command_class, Command):
 
             # do something and return result
-            command = command_class(*self.args, command_uid=self.uid, **self.kwargs)
+            command = command_class(self.io_queues, *self.args, command_uid=self.uid, **self.kwargs)
 
             return command
 
@@ -753,12 +795,16 @@ class Execute(Command):
     async def local(self, remote):
         command = self.create_command()
 
-        await self._create_remote_command(remote)
+        channel = Channel(self.__class__.fqn, io_queues=self.io_queues)
+        await channel.send(self.params, ack=True)
 
         # XXX TODO create a context and remove future when done
         future = self.pending_futures[command.channel_name]
         try:
-            result = await command.local(queue_out=remote.queue_in, remote_future=future)
+            logger.debug("pending futures: %s", self.pending_futures)
+            logger.debug("execute local command: %s", command)
+            result = await command.local(remote_future=future)
+            logger.debug("finished local command: %s=%s", command, result)
             future.result()
 
             return result
@@ -782,17 +828,21 @@ class Execute(Command):
         await self.channel(JsonChannel)
 
     @classmethod
-    async def local_setup(cls, remote):
+    async def local_setup(cls, io_queues):
         # distibute to local instances
         logger.info("create local instance distributor")
 
-        channel_in = JsonChannel()
+        channel = Channel(cls.fqn, io_queues=io_queues)
 
         async def resolve_pending_futures():
             try:
-                async for _, message in channel_in:
-                    fqin = message['fqin'].encode()
+                async for message in channel:
+                    logger.debug("received remote result: %s", message)
+
+                    fqin = message['fqin']
                     future = cls.pending_futures[fqin]
+
+                    logger.debug("pending futures: %s", cls.pending_futures)
 
                     if 'result' in message:
                         future.set_result(message['result'])
@@ -839,25 +889,21 @@ class Execute(Command):
 
             # teardown here
 
-        asyncio.ensure_future(distribute_responses())
+        # asyncio.ensure_future(distribute_responses())
         asyncio.ensure_future(resolve_pending_futures())
 
-    async def remote(self, queue_out):
+    async def remote(self):
         command = self.create_command()
 
         result_message = {
-            'fqin': command.channel_name.decode(),
+            'fqin': command.channel_name,
         }
 
         # trigger sync for awaiting local method
-        channel_out = self.channel(JsonChannel, queue=queue_out)
-        await channel_out.send(None)
+        # await channel_out.send(None)
 
         try:
-            result = await command.remote(
-                queue_out=queue_out,
-            )
-
+            result = await command.remote()
             result_message['result'] = result
 
         except Exception as ex:
@@ -870,24 +916,30 @@ class Execute(Command):
         return result_message
 
     @classmethod
-    async def remote_setup(cls, queue_out):
-        channel_out = JsonChannel(cls.fqn, queue=queue_out)
-
+    async def remote_setup(cls, io_queues):
         # our incomming command queue
-        queue_in = asyncio.Queue()
-        channel_in = JsonChannel(queue=queue_in)
+        channel = Channel(cls.fqin, io_queues=io_queues)
 
         async def execute_commands():
             try:
-                async for uid, message in channel_in:
-                    execute = cls(message['command_name'], *message['args'], command_uid=uid, **message['kwargs'])
+                logger.debug("execute commands in %s ...", channel)
+                async for message in channel:
+                    logger.debug("\t--> execute: %s", message)
+
+                    execute = cls(
+                        io_queues,
+                        message['command_name'],
+                        *message['args'],
+                        command_uid=message['uid'],
+                        **message['kwargs']
+                    )
 
                     # TODO spawn Task for each command which might be canceled by local side errors
-                    result = await execute.remote(queue_out=queue_out)
+                    result = await execute.remote()
                     if 'exception' in result:
                         logger.error("traceback:\n%s", result['exception']['traceback'])
 
-                    await channel_out.send(result, compress='gzip')
+                    await channel.send(result)
 
             except asyncio.CancelledError:
                 pass
@@ -919,16 +971,16 @@ class Execute(Command):
 
         # create a teardown background task to be called when this process finishes
         asyncio.ensure_future(execute_commands())
-        asyncio.ensure_future(distribute_commands())
+        # asyncio.ensure_future(distribute_commands())
 
 
 class Import(Command):
-    def __init__(self, plugin_name):
-        super(Import, self).__init__()
+    def __init__(self, io_queues, plugin_name):
+        super(Import, self).__init__(io_queues)
 
         self.plugin_name = plugin_name
 
-    async def local(self, queue_out, remote_future):
+    async def local(self, remote_future):
         plugin = Plugin[self.plugin_name]
 
         code = inspect.getsource(plugin.module)
@@ -943,17 +995,22 @@ class Import(Command):
             'module_name': module_name,
         }
 
-        channel_out = self.channel(JsonChannel, queue=queue_out)
-        await channel_out.send(plugin_data)
+        await self.channel.send(plugin_data)
+
+        logger.debug("waiting for remote import to finish...")
 
         result = await remote_future
 
         return result
 
-    async def remote(self, queue_out):
-        channel_in = self.channel(JsonChannel)
-        _, plugin_data = await channel_in
-        Plugin.create_from_code(**plugin_data)
+    async def remote(self):
+        logger.debug("start remote import, waiting for plugin data")
+
+        plugin_data = await self.channel
+        logger.debug("plugin data received")
+
+        plugin = Plugin.create_from_code(**plugin_data)
+        logger.debug("plugin created: %s", plugin)
 
         return {
             'commands': list(Command.commands.keys()),
