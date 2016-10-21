@@ -238,6 +238,21 @@ async def send_outgoing_queue(queue, pipe=sys.stdout):
             queue.task_done()
 
 
+def split_data(data, size=1024):
+    """A generator to yield splitted data."""
+
+    data_view = memoryview(data)
+    data_len = len(data_view)
+    start = 0
+
+    while start < data_len:
+        end = min(start + size, data_len)
+
+        yield data_view[start:end]
+
+        start = end
+
+
 class ChunkFlags(dict):
 
     _masks = {
@@ -462,7 +477,7 @@ class Channel:
 
             if flags.eom:
                 # put message into channel queue
-                if uid in buffer:
+                if uid in buffer and channel_name_length:
                     msg = pickle.loads(buffer[uid])
                     await io_queues.receive[channel_name].put(msg)
                     del buffer[uid]
@@ -470,11 +485,9 @@ class Channel:
                 # acknowledge reception
                 ack_future = cls.acknowledgements.get(uid)
                 if ack_future and flags.recv_ack:
-                    # TODO is there a meaningful result for an acknowledgement
-                    # - timestamp of reception
-                    # - duration of roundtrip
                     duration = time.time() - uuid1_time(uid)
                     ack_future.set_result((uid, duration))
+
         except asyncio.CancelledError:
             raise
 
@@ -745,16 +758,6 @@ class Command(metaclass=CommandMeta):
         return self.channel_name
 
 
-class RemoteException(Exception):
-
-    def __init__(self, *, fqin, tb, exc_type):
-        super(RemoteException, self).__init__()
-
-        self.fqin = fqin
-        self.traceback = tb
-        self.type = exc_type
-
-
 class Execute(Command):
 
     """The executor of all commands."""
@@ -792,46 +795,12 @@ class Execute(Command):
 
         raise KeyError('The command `{}` does not exist!'.format(self.command_name))
 
-    async def local(self, remote):
-        command = self.create_command()
-
-        channel = Channel(self.__class__.fqn, io_queues=self.io_queues)
-        await channel.send(self.params, ack=True)
-
-        # XXX TODO create a context and remove future when done
-        future = self.pending_futures[command.channel_name]
-        try:
-            logger.debug("pending futures: %s", self.pending_futures)
-            logger.debug("execute local command: %s", command)
-            result = await command.local(remote_future=future)
-            logger.debug("finished local command: %s=%s", command, result)
-            future.result()
-
-            return result
-
-        except:
-            logger.error("Error while executing command: %s\n%s", command, traceback.format_exc())
-
-        finally:
-            del self.pending_futures[command.channel_name]
-
-    async def _create_remote_command(self, remote):
-        channel_out = JsonChannel(
-            self.__class__.fqn,
-            queue=remote.queue_in
-        )
-
-        # create remote command
-        await channel_out.send(self.params, uid=self.uid)
-
-        # wait for sync
-        await self.channel(JsonChannel)
-
     @classmethod
     async def local_setup(cls, io_queues):
         # distibute to local instances
         logger.info("create local instance distributor")
 
+        # listen to the global execute channel
         channel = Channel(cls.fqn, io_queues=io_queues)
 
         async def resolve_pending_futures():
@@ -848,14 +817,10 @@ class Execute(Command):
                         future.set_result(message['result'])
 
                     elif 'exception' in message:
-                        ex = RemoteException(
-                            fqin=fqin,
-                            exc_type=message['exception']['type'],
-                            traceback=message['exception']['traceback'],
-                        )
-                        ex_unpickled = pickle.loads(base64.b64decode(message['exception']['pickle']))
+                        logger.error("Remote exception for %s:\n%s", fqin, message['exception']['traceback'])
+                        ex = message['exception']['inst']
+                        future.set_exception(ex)
 
-                        future.set_exception(ex_unpickled)
             except asyncio.CancelledError:
                 pass
 
@@ -863,62 +828,12 @@ class Execute(Command):
             for fut in cls.pending_futures.values():
                 fut.cancel()
 
-        async def distribute_responses():
-            try:
-                async for line in remote.stdout:
-                    if line is b'':
-                        break
-
-                    channel_name, _, _, _ = Chunk.view(line)
-
-                    # split command channel from other plugin channels
-                    # we want to execute a command
-                    if channel_name == cls.fqn:
-                        await channel_in.forward(line)
-
-                    else:
-                        # forward arbitrary data to their instances
-                        try:
-                            await cls[channel_name].queue.put(line)
-
-                        except KeyError:
-                            logger.error("Channel instance not found: %s", channel_name.tobytes())
-
-            except asyncio.CancelledError:
-                pass
-
-            # teardown here
-
-        # asyncio.ensure_future(distribute_responses())
         asyncio.ensure_future(resolve_pending_futures())
-
-    async def remote(self):
-        command = self.create_command()
-
-        result_message = {
-            'fqin': command.channel_name,
-        }
-
-        # trigger sync for awaiting local method
-        # await channel_out.send(None)
-
-        try:
-            result = await command.remote()
-            result_message['result'] = result
-
-        except Exception as ex:
-            result_message['exception'] = {
-                'traceback': traceback.format_exc(),
-                'type': ex.__class__.__name__,
-                'pickle': base64.b64encode(pickle.dumps(ex)).decode()
-            }
-
-        return result_message
 
     @classmethod
     async def remote_setup(cls, io_queues):
-        # our incomming command queue
-        channel = Channel(cls.fqin, io_queues=io_queues)
+        # our incomming command queue is global
+        channel = Channel(cls.fqn, io_queues=io_queues)
 
         async def execute_commands():
             try:
@@ -926,6 +841,7 @@ class Execute(Command):
                 async for message in channel:
                     logger.debug("\t--> execute: %s", message)
 
+                    # create remote execution context
                     execute = cls(
                         io_queues,
                         message['command_name'],
@@ -935,6 +851,7 @@ class Execute(Command):
                     )
 
                     # TODO spawn Task for each command which might be canceled by local side errors
+                    # TODO raise remote exception in future
                     result = await execute.remote()
                     if 'exception' in result:
                         logger.error("traceback:\n%s", result['exception']['traceback'])
@@ -944,34 +861,54 @@ class Execute(Command):
             except asyncio.CancelledError:
                 pass
 
-            # teardown here
-
-        async def distribute_commands():
-            try:
-                async with Incomming(pipe=sys.stdin) as reader:
-                    while True:
-                        line = await reader.readline()
-                        if line is b'':
-                            break
-
-                        channel_name, _, _, _ = Chunk.view(line)
-
-                        # split command channel from other plugin channels
-                        # we want to execute a command
-                        if channel_name == cls.fqn:
-                            await channel_in.forward(line)
-
-                        else:
-                            # forward arbitrary data to their instances
-                            await cls[channel_name].queue.put(line)
-            except asyncio.CancelledError:
-                pass
-
-            # teardown here
-
-        # create a teardown background task to be called when this process finishes
         asyncio.ensure_future(execute_commands())
-        # asyncio.ensure_future(distribute_commands())
+
+    async def local(self, remote):
+
+        # create remote command
+        channel = Channel(self.__class__.fqn, io_queues=self.io_queues)
+        await channel.send(self.params, ack=True)
+
+        command = self.create_command()
+        # XXX TODO create a context and remove future when done
+        future = self.pending_futures[command.channel_name]
+        try:
+            logger.debug("pending futures: %s", self.pending_futures)
+            logger.debug("execute local command: %s", command)
+
+            # execute local side of command
+            result = await command.local(remote_future=future)
+
+            logger.debug("finished local command: %s=%s", command, result)
+            future.result()
+
+            return result
+
+        except:
+            logger.error("Error while executing command: %s\n%s", command, traceback.format_exc())
+
+        finally:
+            del self.pending_futures[command.channel_name]
+
+    async def remote(self):
+        command = self.create_command()
+
+        result_message = {
+            'fqin': command.channel_name,
+        }
+
+        try:
+            # execute remote side of command
+            result = await command.remote()
+            result_message['result'] = result
+
+        except Exception as ex:
+            result_message['exception'] = {
+                'traceback': traceback.format_exc(),
+                'inst': ex,
+            }
+
+        return result_message
 
 
 class Import(Command):
@@ -1018,323 +955,11 @@ class Import(Command):
         }
 
 
-DEFAULT_CHANNEL_NAME = b''
-
-
-class BinaryChunk:
-
-    """
-    structure:
-    - channel_name length must be less than 1024 characters
-    -
-
-    [header length = 30 bytes]
-    [!I: 4 bytes]             [!Q: 8 bytes]                     [!16s]     [!H: 2 bytes]
-    {overall length[0..65536]}{flags: compression|eom|stop_iter}{data uuid}{channel_name length}{channel_name}{data}
-
-
-    """
-
-    def __init__(self, data=None, *, channel_name=DEFAULT_CHANNEL_NAME, uid=None):
-        self.data = data and memoryview(data) or None
-        self.channel_name = channel_name
-        self.uid = uid
-
-    @classmethod
-    def decode(cls, raw):
-        pass
-
-    def encode(self, compress=False):
-        pass
-
-
-
-class Chunk:
-
-    """
-    Abstracts the format of the wire data.
-
-    We split messages into chunks to allow parallel communication of messages.
-    """
-
-    separator = b'|'
-
-    compressor = {
-        'gzip': gzip,
-        'lzma': lzma
-    }
-
-    def __init__(self, data=None, *, channel=None, uid=None):
-        self.data = data
-        self.channel = channel
-        self.uid = uid
-
-    @classmethod
-    @functools.lru_cache(typed=True)
-    def view(cls, raw):
-        raw_view = memoryview(raw)
-
-        # split raw data at separators
-        sep_ord = ord(cls.separator)
-
-        def _gen_separator_index():
-            count = 0
-            for i, byte in enumerate(raw_view):
-                if byte == sep_ord:
-                    yield i
-                    count += 1
-
-            assert count == 3, 'A Chunk must be composed by three separators, '\
-                'e.g. `channel|uid|payload`!'
-        channel_end, uid_end, compressor_end = _gen_separator_index()
-
-        raw_len = len(raw_view)
-        # 10 == \n: skip newline
-        raw_end = raw_len - 1 if raw_view[-1] == 10 else raw_len
-
-        channel_view = raw_view[0:channel_end]
-        uid_view = raw_view[channel_end + 1:uid_end]
-        compressor_view = raw_view[uid_end + 1:compressor_end]
-        data_view = raw_view[compressor_end + 1:raw_end]
-
-        return channel_view, uid_view, compressor_view, data_view
-
-    @classmethod
-    def decode(cls, raw):
-        """Decodes a bytes string with or without ending \n into a Chunk."""
-
-        channel_view, uid_view, compressor_view, data_view = cls.view(raw)
-
-        data = base64.b64decode(data_view)
-        if compressor_view.tobytes().decode() in cls.compressor:
-            data = cls.compressor[compressor_view.tobytes().decode()].decompress(data)
-
-        return cls(data, channel=channel_view.tobytes(), uid=uid_view.tobytes())
-
-    def encode(self, eol=True, *, compress=False):
-        """Encode the chunk into a bytes string."""
-
-        def _gen_parts():
-            yield self.channel or DEFAULT_CHANNEL_NAME
-            yield self.separator
-            yield self.uid or b''
-            yield self.separator
-            yield compress and compress.encode() or b''
-            yield self.separator
-
-            data = self.data or b''
-            if compress in self.compressor:
-                data = self.compressor[compress].compress(data)
-            yield base64.b64encode(data)
-
-            if eol:
-                yield b'\n'
-
-        return b''.join(_gen_parts())
-
-    def __repr__(self):
-        def _gen():
-            yield b'<Chunk'
-            if self.uid or self.channel:
-                yield b' '
-
-            if self.uid:
-                yield self.uid
-
-            if self.channel:
-                yield b'@'
-                yield self.channel
-
-            if self.data:
-                yield b' len='
-                yield str(len(self.data)).encode()
-
-            else:
-                yield b' EOM'
-
-            yield b'>'
-
-        return b''.join(_gen()).decode()
-
-    @property
-    def is_eom(self):
-        return self.data == b''
-
-
-class ChunkChannel:
-
-    """Iterator over a queues own chunks."""
-
-    max_size = 10240
-
-    def __init__(self, name=DEFAULT_CHANNEL_NAME, *, queue=None):
-        self.name = name
-        self.queue = queue or asyncio.Queue()
-
-    async def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        uid, data = await self
-
-        return uid, data
-
-    async def __await__(self):
-        """:returns: a tuple (uid, chunk) from the queue of this channel."""
-
-        line = await self.queue.get()
-
-        try:
-            chunk = Chunk.decode(line)
-            # logger.debug('Chunk received at %s: %s', self, chunk)
-
-            return chunk.uid, chunk
-
-        finally:
-            self.queue.task_done()
-
-    async def forward(self, line):
-        await self.queue.put(line)
-
-    async def inject_chunk(self, chunk, compress=False):
-        """Allows forwarding of a chunk as is into the queue."""
-
-        await self.queue.put(chunk.encode(compress=compress))
-
-    async def send(self, data, *, uid=None, compress=False):
-        """Create a chunk from data and uid and send it to the queue of this channel."""
-
-        if isinstance(data, Chunk):
-            data = data.data
-
-        for part in split_data(data, self.max_size):
-            chunk = Chunk(part, channel=self.name, uid=uid)
-
-            await self.inject_chunk(chunk, compress=compress)
-
-    async def send_eom(self, *, uid=None):
-        """Send EOM (end of message) to the queue."""
-
-        chunk = Chunk(None, channel=self.name, uid=uid)
-
-        await self.queue.put(chunk.encode(compress=False))
-
-
-def split_data(data, size=1024):
-    """A generator to yield splitted data."""
-
-    data_view = memoryview(data)
-    data_len = len(data_view)
-    start = 0
-
-    while start < data_len:
-        end = min(start + size, data_len)
-
-        yield data_view[start:end]
-
-        start = end
-
-
-class EncodedBufferChannel(ChunkChannel):
-
-    """Buffers chunks, combines them and tries to decode them."""
-
-    def __init__(self, *args, **kwargs):
-        super(EncodedBufferChannel, self).__init__(*args, **kwargs)
-
-        # holds message parts until decoding is complete
-        self.buffer = {}
-
-    async def __await__(self):
-        """Wait until a message is completed by sending an empty chunk."""
-
-        while True:
-            # wait for the next data
-            uid, chunk = await super(EncodedBufferChannel, self).__await__()
-
-            # create buffer if uid is new
-            if uid not in self.buffer:
-                self.buffer[uid] = bytearray()
-
-            # message completed -> return decoded chunks
-            if chunk.is_eom:
-                return uid, self._pop_from_buffer(uid)
-
-            # append data to buffer
-            self.buffer[uid].extend(chunk.data)
-
-    def _pop_from_buffer(self, uid):
-        try:
-            data = self.decode(self.buffer[uid].decode())
-            return data
-
-        finally:
-            del self.buffer[uid]
-
-    def decode(self, data):
-        return data
-
-    def encode(self, data):
-        return data
-
-    async def send(self, data, *, uid=None, compress=False):
-
-        if uid is None:
-            uid = uuid.uuid1().hex.encode()
-
-        if isinstance(data, Chunk):
-            data = data.data
-
-        encoded_data = self.encode(data).encode()
-
-        await super(EncodedBufferChannel, self).send(encoded_data, uid=uid, compress=compress)
-        await super(EncodedBufferChannel, self).send_eom(uid=uid)
-
-
-class JsonChannel(EncodedBufferChannel):
-
-    def decode(self, data):
-        data = json.loads(data)
-        return data
-
-    def encode(self, data):
-        data = json.dumps(data)
-        return data
-
-
-class JsonChannelIterator:
-    def __init__(self, channel):
-        assert isinstance(channel, JsonChannel), "channel must be a JsonChannel instance"
-
-        self.channel = channel
-
-    async def send(self, iterable):
-        for item in iterable:
-            await self.channel.send(
-                {
-                    'item': item,
-                }, compress='gzip')
-        else:
-            await self.channel.send({'stop_iteration': True})
-
-    async def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        _, value = await self.channel
-        if value.get('stop_iteration', False):
-            raise StopAsyncIteration()
-
-        return value
-
-
 async def run(*tasks):
     """Schedules all tasks and wait for running is done or canceled"""
 
     # create indicator for running messenger
     running = asyncio.Future()
-
-    # shutdown_tasks = []
 
     for task in tasks:
         fut = asyncio.ensure_future(task)
