@@ -279,7 +279,7 @@ async def _execute_command(remote, line):
         cmd = core.Execute(remote.io_queues, command_name, *args, **kwargs)
         result = await cmd.local(remote.io_queues)
 
-    except (TypeError, KeyError) as ex:
+    except Exception as ex:
         print("< {}\n > ".format(ex), end='')
         import traceback
         traceback.print_exc()
@@ -313,7 +313,11 @@ async def feed_stdin_to_remotes(**options):
                 core.logger.debug("sending: %s", line)
 
                 if remote.returncode is None:
-                    result = await _execute_command(remote, line)
+                    result = await asyncio.gather(
+                        _execute_command(remote, line),
+                        _execute_command(remote, line),
+                    )
+
                     print("< {}\n > ".format(result), end='')
 
     except asyncio.CancelledError:
