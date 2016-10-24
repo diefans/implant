@@ -22,20 +22,6 @@ from collections import defaultdict, namedtuple
 import pkg_resources
 
 
-if sys.platform == 'win32':
-    loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
-
-else:
-    try:
-        import uvloop
-        loop = uvloop.new_event_loop()      # noqa
-
-    except ImportError:
-        loop = asyncio.new_event_loop()
-
-asyncio.set_event_loop(loop)
-
-
 pkg_environment = pkg_resources.Environment()
 
 
@@ -364,6 +350,8 @@ class Channel:
 
         pickled_data = pickle.dumps(data)
 
+        logger.debug("Channel %s sends: %s bytes", self.name, len(pickled_data))
+
         for part in split_data(pickled_data, self.chunk_size):
             header = self._encode_header(uid, self.name, part, flags={
                 'eom': False, 'send_ack': False, 'compression': compression
@@ -374,7 +362,9 @@ class Channel:
         header = self._encode_header(uid, self.name, None, flags={
             'eom': True, 'send_ack': ack, 'compression': False
         })
+
         await self.io_outgoing.put((header, name))
+        logger.debug("Channel send queue: %s", self.io_outgoing)
 
         # if acknowledgement is asked for we await this future and return its result
         # see _receive_reader for resolution of future
@@ -412,14 +402,17 @@ class Channel:
                 data = await queue.get()
                 if isinstance(data, tuple):
                     for part in data:
+                        logger.debug("send to writer: %s bytes", len(part))
                         writer.write(part)
                 else:
+                    logger.debug("send to writer: %s bytes", len(data))
                     writer.write(data)
 
                 queue.task_done()
                 await writer.drain()
 
         except asyncio.CancelledError:
+            logger.error("Error:\n%s", traceback.format_exc())
             if queue.qsize():
                 logger.warning("Send queue was not empty when canceld!")
 
@@ -437,6 +430,12 @@ class Channel:
                 buffer[uid] = bytearray()
 
             buffer[uid].extend(await reader.readexactly(data_length))
+
+        if channel_name_length:
+            logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
+
+        else:
+            logger.debug("Message %s, received: %s", uid, flags)
 
         if flags.send_ack:
             # we have to acknowledge the reception
@@ -701,6 +700,7 @@ class Command(metaclass=CommandMeta):
         """Executes the command by delegating to execution command."""
 
         execute = Execute(self.io_queues, self)
+        logger.debug("execute local: %s", execute)
         result = await execute.local()
 
         return result
@@ -928,9 +928,7 @@ async def run(*tasks):
     return result
 
 
-def cancel_pending_tasks():
-    loop = asyncio.get_event_loop()
-
+def cancel_pending_tasks(loop):
     for task in asyncio.Task.all_tasks():
         if task.done() or task.cancelled():
             continue
@@ -965,6 +963,7 @@ async def communicate(io_queues):
 
 def main(**kwargs):
 
+    loop = asyncio.get_event_loop()
     loop.set_debug(True)
     io_queues = IoQueues()
 
@@ -977,7 +976,7 @@ def main(**kwargs):
                 # log_tcp_10001()
             )
         )
-        cancel_pending_tasks()
+        cancel_pending_tasks(loop)
 
     finally:
         loop.close()

@@ -15,6 +15,13 @@ import zlib
 from collections import namedtuple
 from logging import StreamHandler
 
+try:
+    import uvloop_
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+except ImportError:
+    pass
+
 from dbltr import core
 
 
@@ -257,6 +264,7 @@ def parse_command(line):
 
 async def _execute_command(remote, line):
     command_name, _, params = parse_command(line[:-1].decode())
+    print("sending:", command_name, params)
 
     try:
         cmd = core.Command.create_command(remote.io_queues, command_name, **params)
@@ -292,13 +300,14 @@ async def feed_stdin_to_remotes(**options):
                 if line == b'i\n':
                     line = b'dbltr.core:Export plugin_name=debellator#core\n'
 
-                core.logger.debug("sending: %s", line)
 
                 if remote.returncode is None:
-                    result = await asyncio.gather(
-                        _execute_command(remote, line),
-                        _execute_command(remote, line),
-                    )
+                    result = await _execute_command(remote, line)
+                    # result = await asyncio.ensure_future(_execute_command(remote, line))
+                    # result = await asyncio.gather(
+                    #     # _execute_command(remote, line),
+                    #     _execute_command(remote, line),
+                    # )
 
                     print("< {}\n > ".format(result), end='')
 
@@ -338,7 +347,8 @@ async def serve_tcp_10000(reader, writer):
 
 
 def main():
-    core.loop.set_debug(True)
+    loop = asyncio.get_event_loop()
+    loop.set_debug(True)
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
@@ -347,14 +357,14 @@ def main():
             core.logger.addHandler(logging_handler)
             # core.logger.setLevel('INFO')
 
-            core.loop.run_until_complete(
+            loop.run_until_complete(
                 core.run(
                     # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
                     feed_stdin_to_remotes(),
                 )
             )
 
-            core.cancel_pending_tasks()
+            core.cancel_pending_tasks(loop)
 
     finally:
-        core.loop.close()
+        loop.close()
