@@ -10,7 +10,7 @@ import traceback
 import functools
 import concurrent.futures
 import inspect
-import lzma
+import zlib
 
 from collections import namedtuple
 from logging import StreamHandler
@@ -18,7 +18,26 @@ from logging import StreamHandler
 from dbltr import core
 
 
-log = core.log
+def log(_msg, **kwargs):
+    if sys.stderr.isatty():
+        colors = {
+            'color': '\033[01;31m',
+            'nocolor': '\033[0m'
+        }
+
+    else:
+        colors = {
+            'color': '',
+            'nocolor': ''
+        }
+
+    if kwargs:
+        error_msg = "{color}{msg} {kwargs}{nocolor}".format(msg=_msg, kwargs=kwargs, **colors)
+
+    else:
+        error_msg = "{color}{msg}{nocolor}".format(msg=_msg, **colors)
+
+    core.logger.debug(error_msg)
 
 
 def get_python_source(obj):
@@ -30,11 +49,11 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
     """A unique representation of a Remote."""
 
     bootstrap = (
-        'import sys, imp, base64, json, lzma;'
+        'import sys, imp, base64, zlib;'
         'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr");'
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'
-        'c = compile(lzma.decompress(base64.b64decode(b"{code}")), "<dbltr.core>", "exec");'
+        'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "<dbltr.core>", "exec");'
         'exec(c, core.__dict__); core.main(**core.decode_options(b"{options}"));'
     )
     """Bootstrapping of core module on remote."""
@@ -86,7 +105,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
                 bootstrap = self.bootstrap
 
             yield bootstrap.format(
-                code=base64.b64encode(lzma.compress(code)).decode(),
+                code=base64.b64encode(zlib.compress(code)).decode(),
                 options=core.encode_options(**options),
             )
 
@@ -104,12 +123,13 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     """
 
     def __init__(self, **options):
-        super(Remote, self).__init__(limit=asyncio.streams._DEFAULT_LIMIT, loop=asyncio.get_event_loop())
+        super(Remote, self).__init__(
+            limit=asyncio.streams._DEFAULT_LIMIT,       # noqa
+            loop=asyncio.get_event_loop()
+        )
 
         self.io_queues = core.IoQueues()
 
-        self.queue_in = self.io_queues.send
-        self.queue_out = self.io_queues.receive
         self.pid = None
         self.returncode = None
 
@@ -120,8 +140,6 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         super(Remote, self).connection_made(transport)
         self.pid = transport.get_pid()
 
-        log('launched process', pid=self.pid)
-
     def process_exited(self):
         self._transport.close()
         self.returncode = self._transport.get_returncode()
@@ -131,22 +149,18 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         if self.receiving is not None:
             self.receiving.cancel()
 
-        # inform future
-        core.logger.info("process exited: %s", self.returncode)
-
     def add_finalizer(self, func):
         self.finalizer.append(func)
 
     async def process_launched(self):
         # setup all plugin commands for this remote
         await core.Command.local_setup(self.io_queues)
-        core.logger.info('\n%s', '\n'.join(['-' * 80] * 1))
 
     async def wait(self):
         """Wait until the process exit and return the process return code.
 
         This method is a coroutine."""
-        return await self._transport._wait()
+        return await self._transport._wait()        # noqa
 
     def send_signal(self, signal):
         self._transport.send_signal(signal)
@@ -164,13 +178,11 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
                      python_bin=sys.executable, code=None,
                      options=None, **kwargs):
         """Create a remote process."""
-        core.logger.info('\n%s', '\n'.join(['+' * 80] * 1))
 
         if target is None:
             target = Target()
 
         if code is None:
-            # our default receiver is myself
             code = sys.modules[__name__]
 
         if isinstance(code, types.ModuleType):
@@ -194,44 +206,18 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         finally:
             await remote.process_launched()
 
-    async def send(self, data):
-        """Send input to remote process."""
-
-        self.stdin.write(data)
-        await self.stdin.drain()
-
-    async def _connect_stdin(self):
-        """Send messesges from stdin queue to remote."""
-
-        while True:
-            data = await self.queue_in.get()
-            await self.send(data)
-
-            self.queue_in.task_done()
-
-    async def _connect_stdout(self):
-        """Collect messages from remote in stdout queue."""
-
-        async for line in self.stdout:
-            log("remote stdout", pid=self.pid, line=line)
-
-            await self.channels.distribute(line)
-
     async def _connect_stderr(self):
         """Collect error messages from remote in stderr queue."""
 
         async for line in self.stderr:
-            log("\t\tremote stderr {}: {}".format(self.pid, line[:-1].decode()))
+            log("\tremote stderr {}: {}".format(self.pid, line[:-1].decode()))
 
-    async def receive(self):
+    async def __await__(self):
+        """Start channel communication."""
 
         receiving = asyncio.gather(
             asyncio.ensure_future(core.Channel.communicate(self.io_queues, self.stdout, self.stdin)),
-        #     self.io_queues.send_to_writer(self.stdin),
-        #     # asyncio.ensure_future(self._connect_stdin()),
-        #     # asyncio.ensure_future(self._connect_stdout()),
             asyncio.ensure_future(self._connect_stderr()),
-        #     # asyncio.ensure_future(self._commander.resolve_pending()),
         )
 
         self.receiving = receiving
@@ -270,13 +256,13 @@ def parse_command(line):
 
 
 async def _execute_command(remote, line):
-    command_name, args, params = parse_command(line[:-1].decode())
+    command_name, _, params = parse_command(line[:-1].decode())
 
     try:
         cmd = core.Command.create_command(remote.io_queues, command_name, **params)
         result = await cmd
 
-    except Exception as ex:
+    except Exception as ex:     # noqa
         core.logger.error("Error:\n%s", traceback.format_exc())
         print("Error: {}\n > ".format(ex))
 
@@ -291,7 +277,7 @@ async def feed_stdin_to_remotes(**options):
                                  python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
                                  options=options)
 
-    remote_task = asyncio.ensure_future(remote.receive())
+    asyncio.ensure_future(remote)
     try:
         async with core.Incomming(pipe=sys.stdin) as reader:
             while True:
@@ -304,7 +290,7 @@ async def feed_stdin_to_remotes(**options):
                     line = b'debellator#core:Echo foo=bar bar=123\n'
 
                 if line == b'i\n':
-                    line = b'dbltr.core:Import plugin_name=debellator#core\n'
+                    line = b'dbltr.core:Export plugin_name=debellator#core\n'
 
                 core.logger.debug("sending: %s", line)
 
@@ -352,16 +338,16 @@ async def serve_tcp_10000(reader, writer):
 
 
 def main():
-    loop = core.create_loop(debug=True)
+    core.loop.set_debug(True)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
-        logging_handler = ExecutorConsoleHandler(logging_executor)
-        core.logger.propagate = False
-        core.logger.addHandler(logging_handler)
-        # core.logger.setLevel('INFO')
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
+            logging_handler = ExecutorConsoleHandler(logging_executor)
+            core.logger.propagate = False
+            core.logger.addHandler(logging_handler)
+            # core.logger.setLevel('INFO')
 
-        try:
-            loop.run_until_complete(
+            core.loop.run_until_complete(
                 core.run(
                     # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
                     feed_stdin_to_remotes(),
@@ -370,7 +356,5 @@ def main():
 
             core.cancel_pending_tasks()
 
-            core.logger.info("* FINAL *".join('*' * 10))
-
-        finally:
-            loop.close()
+    finally:
+        core.loop.close()

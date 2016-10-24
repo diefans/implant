@@ -12,17 +12,28 @@ import json
 import hashlib
 import uuid
 import types
-import gzip
-import lzma
 import logging
 import weakref
 import traceback
 import pickle
 import struct
 import time
-import contextlib
 from collections import defaultdict, namedtuple
 import pkg_resources
+
+
+if sys.platform == 'win32':
+    loop = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
+
+else:
+    try:
+        import uvloop
+        loop = uvloop.new_event_loop()      # noqa
+
+    except ImportError:
+        loop = asyncio.new_event_loop()
+
+asyncio.set_event_loop(loop)
 
 
 pkg_environment = pkg_resources.Environment()
@@ -30,7 +41,6 @@ pkg_environment = pkg_resources.Environment()
 
 logging.basicConfig(level='DEBUG')
 logger = logging.getLogger(__name__)
-logger.info('\n%s', '\n'.join(['*' * 80] * 3))
 
 
 class aenumerate:
@@ -90,43 +100,6 @@ def uuid1_time(uid):
     return (uid.time - 0x01b21dd213814000) * 100 / 1e9
 
 
-def log(_msg, **kwargs):
-    if sys.stderr.isatty():
-        colors = {
-            'color': '\033[01;31m',
-            'nocolor': '\033[0m'
-        }
-
-    else:
-        colors = {
-            'color': '',
-            'nocolor': ''
-        }
-
-    if kwargs:
-        error_msg = "{color}{msg} {kwargs}{nocolor}".format(msg=_msg, kwargs=kwargs, **colors)
-
-    else:
-        error_msg = "{color}{msg}{nocolor}".format(msg=_msg, **colors)
-
-    logger.debug(error_msg)
-
-
-def create_loop(*, debug=False):
-    """Create the appropriate loop."""
-
-    if sys.platform == 'win32':
-        loop_ = asyncio.ProactorEventLoop()  # for subprocess' pipes on Windows
-        asyncio.set_event_loop(loop_)
-
-    else:
-        loop_ = asyncio.get_event_loop()
-
-    loop_.set_debug(debug)
-
-    return loop_
-
-
 class IoQueues:
     """Just to keep send and receive queues together."""
 
@@ -135,36 +108,18 @@ class IoQueues:
             send = asyncio.Queue()
 
         self.send = send
-
         self.receive = defaultdict(asyncio.Queue)
-        # self.receive = weakref.WeakValueDictionary()
 
     def __getitem__(self, channel_name):
+        return self.receive[channel_name]
+
+    def __delitem__(self, channel_name):
         try:
-            return self.receive[channel_name]
+            del self.receive[channel_name]
 
         except KeyError:
-            queue = self.receive[channel_name] = asyncio.Queue()
-            logger.info("CREATING: %s, %s", channel_name, id(queue))
-
-            return queue
-
-    async def send_to_writer(self, writer):
-        """A continuos task to send all data in the send queue to a stream writer."""
-
-        while True:
-            data = await self.send.get()
-            try:
-                writer.write(data)
-                await writer.drain()
-
-            finally:
-                self.send.task_done()
-
-    def _log(self):
-        logger.debug("\tIoQueues: %s", self)
-        for name, q in self.receive.items():
-            logger.debug("\t\tqueue: %s, %s, %s", name, id(q), q.qsize())
+            # we ignore missing queues, since not all commands use it
+            pass
 
 
 class Incomming(asyncio.StreamReader):
@@ -332,17 +287,7 @@ class Channel:
         self.name = name
         self.io_queues = io_queues or IoQueues()
         self.io_outgoing = self.io_queues.send
-
-        if self.name in self.io_queues.receive:
-            self.io_incomming = self.io_queues.receive[self.name]
-
-        else:
-            queue = asyncio.Queue()
-            self.io_incomming = queue
-            self.io_queues.receive[self.name] = queue
-
-        # self.io_incomming = self.io_queues[self.name]
-        logger.info("Channel incomming: %s", id(self.io_incomming))
+        self.io_incomming = self.io_queues[self.name]
 
     def __repr__(self):
         return '<{0.name} {in_size} / {out_size}>'.format(
@@ -429,11 +374,9 @@ class Channel:
         header = self._encode_header(uid, self.name, None, flags={
             'eom': True, 'send_ack': ack, 'compression': False
         })
-        logger.debug("\n\n--> send to %s: %s", self.name, uid)
         await self.io_outgoing.put((header, name))
 
-        # if acknowledgement is asked for
-        # we await this future and return its result
+        # if acknowledgement is asked for we await this future and return its result
         # see _receive_reader for resolution of future
         if ack:
             ack_future = asyncio.Future()
@@ -465,7 +408,6 @@ class Channel:
         queue = io_queues.send
 
         try:
-            logger.debug("sending queue to writer")
             while True:
                 data = await queue.get()
                 if isinstance(data, tuple):
@@ -484,55 +426,34 @@ class Channel:
     @classmethod
     async def _receive_single_message(cls, io_queues, reader, buffer):
         # read header
-        try:
-            logger.debug("waiting for header...")
+        raw_header = await reader.readexactly(HEADER_SIZE + 16)
+        uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
 
-            try:
-                raw_header = await reader.readexactly(HEADER_SIZE + 16)
+        if channel_name_length:
+            channel_name = (await reader.readexactly(channel_name_length)).decode()
 
-            except asyncio.IncompleteReadError as ex:
-                # if 0 bytes are read, we assume a Cancellation
-                if len(ex.partial) == 0:
-                    raise asyncio.CancelledError("While waiting for header, we received EOF!")
+        if data_length:
+            if uid not in buffer:
+                buffer[uid] = bytearray()
 
-                raise
+            buffer[uid].extend(await reader.readexactly(data_length))
 
-            uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
-            logger.debug("\t<-- header: %s, sizes: %s/%s, %s", uid, channel_name_length, data_length, flags)
+        if flags.send_ack:
+            # we have to acknowledge the reception
+            await cls._send_ack(io_queues, uid)
 
-            if channel_name_length:
-                channel_name = (await reader.readexactly(channel_name_length)).decode()
-                logger.debug("\t<-- channel_name: %s", channel_name)
+        if flags.eom:
+            # put message into channel queue
+            if uid in buffer and channel_name_length:
+                msg = pickle.loads(buffer[uid])
+                await io_queues[channel_name].put(msg)
+                del buffer[uid]
 
-            if data_length:
-                if uid not in buffer:
-                    buffer[uid] = bytearray()
-
-                buffer[uid].extend(await reader.readexactly(data_length))
-
-            if flags.send_ack:
-                # we have to acknowledge the reception
-                await cls._send_ack(io_queues, uid)
-
-            if flags.eom:
-                # put message into channel queue
-                if uid in buffer and channel_name_length:
-                    msg = pickle.loads(buffer[uid])
-                    await io_queues[channel_name].put(msg)
-                    del buffer[uid]
-
-                # acknowledge reception
-                ack_future = cls.acknowledgements.get(uid)
-                if ack_future and flags.recv_ack:
-                    duration = time.time() - uuid1_time(uid)
-                    ack_future.set_result((uid, duration))
-
-        except asyncio.CancelledError:
-            raise
-
-        except:
-            logger.error("Error while receiving:\n%s", traceback.format_exc())
-            raise
+            # acknowledge reception
+            ack_future = cls.acknowledgements.get(uid)
+            if ack_future and flags.recv_ack:
+                duration = time.time() - uuid1_time(uid)
+                ack_future.set_result((uid, duration))
 
     @classmethod
     async def _receive_reader(cls, io_queues, reader):
@@ -541,15 +462,20 @@ class Channel:
         buffer = {}
 
         try:
-            logger.debug("receiving reader into queues")
             while True:
                 await cls._receive_single_message(io_queues, reader, buffer)
-                io_queues._log()
+
+        except asyncio.IncompleteReadError:
+            # incomplete is always a cancellation
+            logger.warning("While waiting for data, we received EOF!")
 
         except asyncio.CancelledError:
             if buffer:
-                log.warn("Receive buffer was not empty when canceled!")
+                logger.warning("Receive buffer was not empty when canceled!")
 
+        except:
+            logger.error("Error while receiving:\n%s", traceback.format_exc())
+            raise
 
 
 ######################################################################################
@@ -593,7 +519,7 @@ class MetaPlugin(type):
 
     def __contains__(cls, name):
         try:
-            cls[name]
+            cls[name]       # noqa
             return True
 
         except KeyError:
@@ -643,7 +569,7 @@ class Plugin(metaclass=MetaPlugin):
         plugin = cls.create_from_entry_point(entry_point)
 
         c = compile(code, "<{}>".format(module_name), "exec", optimize=2)
-        exec(c, module.__dict__)
+        exec(c, module.__dict__)        # noqa
 
         return plugin
 
@@ -657,10 +583,8 @@ def exclusive(fun):
     lock = asyncio.Lock()
 
     async def locked_fun(*args, **kwargs):
-        logger.debug("\n\n---\n\nlocking %s: %s", lock, fun)
         async with lock:
             return await fun(*args, **kwargs)
-        logger.debug("\n\n---\n\nreleasing %s: %s", lock, fun)
 
     return locked_fun
 
@@ -669,7 +593,6 @@ class CommandMeta(type):
 
     base = None
     commands = {}
-    typed_commands = weakref.WeakSet()
 
     command_instances = weakref.WeakValueDictionary()
     """Holds references to all active Instances of Commands, to forward to their queue"""
@@ -702,31 +625,7 @@ class CommandMeta(type):
             mcs.commands[name] = cls
 
     def __getitem__(cls, value):
-        @functools.singledispatch
-        def _get(value):
-            return None
-
-        @_get.register(tuple)
-        def _tuple(value):
-            return cls.command_instances[value]
-
-        @_get.register(str)
-        def _str(value):
-            return cls.command_instances[tuple(value.split('/', 1))]
-
-        @_get.register(bytes)
-        def _bytes(value):
-            return cls.command_instances[tuple(value.split(b'/', 1))]
-
-        @_get.register(memoryview)
-        def _memoryview(value):
-            return cls.command_instances[tuple(value.tobytes().split(b'/', 1))]
-
-        return _get(value)
-
-    @property
-    def fqn(cls):
-        return ':'.join((cls.plugin.module_name, cls.__name__))
+        return cls.command_instances[value]
 
     @classmethod
     def _lookup_command_classmethods(mcs, *names):
@@ -748,31 +647,28 @@ class CommandMeta(type):
         for _, _, func in mcs._lookup_command_classmethods('remote_setup'):
             await func(*args, **kwargs)
 
-    def _create_reference(cls, uid, inst):
+    def create_reference(cls, uid, inst):
         fqin = (cls.fqn, uid)
         cls.command_instance_names[inst] = fqin
         cls.command_instances[fqin] = inst
 
-    def __call__(cls, *args, command_uid=None, **kwargs):
-        inst = super(CommandMeta, cls).__call__(*args, **kwargs)
-
-        if command_uid is None:
-            command_uid = uuid.uuid1()
-
-        cls._create_reference(command_uid, inst)
-
-        return inst
+    def __init__(cls, name, bases, dct):
+        type.__init__(cls, name, bases, dct)
+        cls.command_name = cls.fqn = ':'.join((cls.plugin.module_name, cls.__name__))
 
 
 class Command(metaclass=CommandMeta):
 
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
-    def __init__(self, io_queues, **params):
+    def __init__(self, io_queues, command_uid=None, **params):
         super(Command, self).__init__()
 
+        self.uid = command_uid or uuid.uuid1()
         self.io_queues = io_queues
         self.params = params
+
+        self.__class__.create_reference(self.uid, self)
 
     def __getattr__(self, name):
         try:
@@ -819,24 +715,16 @@ class Command(metaclass=CommandMeta):
         """An empty remote part."""
 
     @reify
-    def uid(self):
-        _, uid = self.fqin
-
-        return uid
-
-    @reify
     def fqin(self):
         """The fully qualified instance name."""
 
-        return self.__class__.command_instance_names[self]
+        return (self.command_name, self.uid)
 
     @reify
     def channel_name(self):
-        return '/'.join(map(str, self.fqin))
+        """Channel name is used in header."""
 
-    @reify
-    def command_name(self):
-        return self.__class__.fqn
+        return '/'.join(map(str, self.fqin))
 
     @reify
     def channel(self):
@@ -845,15 +733,9 @@ class Command(metaclass=CommandMeta):
     def __repr__(self):
         return self.channel_name
 
-    def __del___(self):
-        # cleanup io_queues
-        if self.channel_name in self.io_queues.receive:
-            del self.io_queues.receive[self.channel_name]
-
-
 
 class RemoteResult(namedtuple('RemoteResult', ('fqin', 'result', 'exception', 'traceback'))):
-    def __new__(cls, fqin, result=None, exception=None, traceback=None):
+    def __new__(cls, fqin, result=None, exception=None, traceback=None):        # noqa
         tb = traceback.format_exc() if exception else traceback
 
         return super(RemoteResult, cls).__new__(cls, fqin, result, exception, tb)
@@ -890,17 +772,16 @@ class Execute(Command):
         async def resolve_pending_commands():
             # listen to the global execute channel
             channel = Channel(cls.fqn, io_queues=io_queues)
-            # logger.info("more channel incomming: %s", id(channel.io_incomming))
 
             try:
-                async for fqin, result, exception, traceback in channel:
+                async for fqin, result, exception, tb in channel:
                     future = cls.pending_commands[fqin]
 
                     if not exception:
                         future.set_result(result)
 
                     else:
-                        logger.error("Remote exception for %s:\n%s", fqin, traceback)
+                        logger.error("Remote exception for %s:\n%s", fqin, tb)
                         future.set_exception(exception)
 
             except asyncio.CancelledError:
@@ -908,19 +789,11 @@ class Execute(Command):
 
             # teardown here
             for fqin, fut in cls.pending_commands.items():
-                logger.warn("Teardown pending command: %s, %s", fqin, fut)
+                logger.warning("Teardown pending command: %s, %s", fqin, fut)
                 fut.cancel()
                 del cls.pending_commands[fqin]
 
-        pending = asyncio.ensure_future(resolve_pending_commands())
-        def log_pending_result(fut):
-            try:
-                logger.debug(fut.result)
-
-            except:
-                logger.error("Error:\n%s", traceback.format_exc())
-
-        pending.add_done_callback(log_pending_result)
+        asyncio.ensure_future(resolve_pending_commands())
 
     @classmethod
     async def remote_setup(cls, io_queues):
@@ -939,24 +812,22 @@ class Execute(Command):
 
         asyncio.ensure_future(execute_commands())
 
-    def remote_future(self):
+    def remote_future(self):        # noqa
         """Create remote command and yield its future."""
 
         class _context:
-            async def __aenter__(ctx):
+            async def __aenter__(ctx):      # noqa
                 await self.channel.send((self.command.fqin, self.command.params), ack=True)
                 future = self.pending_commands[self.command.channel_name]
 
                 return future
 
-            async def __aexit__(ctx, *args):
+            async def __aexit__(ctx, *args):        # noqa
                 del self.pending_commands[self.command.channel_name]
 
         return _context()
 
     async def local(self):
-        # create remote command
-
         async with self.remote_future() as future:
             try:
                 # execute local side of command
@@ -964,11 +835,14 @@ class Execute(Command):
                 future.result()
                 return result
 
-            except:
+            except:     # noqa
                 logger.error("Error while executing command: %s\n%s", self.command, traceback.format_exc())
 
-    async def remote(self):
+            finally:
+                # cleanup channel
+                del self.io_queues[self.command.channel_name]
 
+    async def remote(self):
         fqin = self.command.channel_name
 
         try:
@@ -984,17 +858,18 @@ class Execute(Command):
 
             raise
 
+        finally:
+            # cleanup channel
+            del self.io_queues[self.command.channel_name]
 
-class Import(Command):
 
-    def __init__(self, io_queues, **params):
-        super(Import, self).__init__(io_queues, **params)
+class Export(Command):
 
-        logger.debug("\n\nImporting %s", self.plugin_name)
+    """Export a plugin to remote."""
 
     @exclusive
     async def __await__(self):
-        return await super(Import, self).__await__()
+        return await super(Export, self).__await__()
 
     async def local(self, remote_future):
         plugin = Plugin[self.plugin_name]
@@ -1019,7 +894,7 @@ class Import(Command):
 
     async def remote(self):
         plugin_data = await self.channel
-        plugin = Plugin.create_from_code(**plugin_data)
+        Plugin.create_from_code(**plugin_data)
 
         return {
             'commands': list(Command.commands.keys()),
@@ -1032,16 +907,13 @@ async def run(*tasks):
 
     # create indicator for running messenger
     running = asyncio.Future()
-
-    for task in tasks:
-        fut = asyncio.ensure_future(task)
+    asyncio.ensure_future(asyncio.gather(*tasks))
 
     # exit on sigterm or sigint
     for signame in ('SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'):
         sig = getattr(signal, signame)
 
         def exit_with_signal(sig):
-            logger.info("SIGNAL: %s", sig)
             try:
                 running.set_result(sig)
 
@@ -1070,8 +942,6 @@ def cancel_pending_tasks():
         except asyncio.CancelledError:
             pass
 
-        logger.debug("*** Task shutdown: %s", task)
-
 
 async def log_tcp_10001():
     try:
@@ -1095,8 +965,7 @@ async def communicate(io_queues):
 
 def main(**kwargs):
 
-    loop = create_loop(debug=True)
-
+    loop.set_debug(True)
     io_queues = IoQueues()
 
     # setup all plugin commands
@@ -1105,7 +974,6 @@ def main(**kwargs):
         loop.run_until_complete(
             run(
                 communicate(io_queues)
-                # send_outgoing_queue(queue_out, sys.stdout),
                 # log_tcp_10001()
             )
         )
