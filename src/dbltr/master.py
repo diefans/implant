@@ -15,7 +15,7 @@ import lzma
 from collections import namedtuple
 from logging import StreamHandler
 
-from dbltr import core, utils
+from dbltr import core
 
 
 log = core.log
@@ -115,10 +115,6 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         # a future indicating a receiving remote
         self.receiving = None
-
-    @utils.reify
-    def execute(self):
-        return self._commander.execute
 
     def connection_made(self, transport):
         super(Remote, self).connection_made(transport)
