@@ -6,6 +6,7 @@ import asyncio
 import shlex
 import base64
 import types
+import traceback
 import functools
 import concurrent.futures
 import inspect
@@ -276,13 +277,12 @@ async def _execute_command(remote, line):
     command_name, args, kwargs = parse_command(line[:-1].decode())
 
     try:
-        cmd = core.Execute(remote.io_queues, command_name, *args, **kwargs)
-        result = await cmd.local(remote.io_queues)
+        cmd = core.Command.create_command(remote.io_queues, command_name, *args, **kwargs)
+        result = await cmd
 
     except Exception as ex:
-        print("< {}\n > ".format(ex), end='')
-        import traceback
-        traceback.print_exc()
+        core.logger.error("Error:\n%s", traceback.format_exc())
+        print("Error: {}\n > ".format(ex))
 
     else:
         return result

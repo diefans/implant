@@ -20,7 +20,8 @@ import traceback
 import pickle
 import struct
 import time
-from collections import defaultdict
+import contextlib
+from collections import defaultdict, namedtuple
 import pkg_resources
 
 
@@ -631,8 +632,6 @@ class Plugin(metaclass=MetaPlugin):
 
 def exclusive(fun):
     """Makes an async function call exclusive."""
-    1/0
-    # FIXME we should use an async Command.register(self) to implement exclusive
 
     lock = asyncio.Lock()
 
@@ -708,8 +707,6 @@ class CommandMeta(type):
     def fqn(cls):
         return ':'.join((cls.plugin.module_name, cls.__name__))
 
-    fqin = fqn
-
     @classmethod
     def _lookup_command_classmethods(mcs, *names):
         valid_names = set(['local_setup', 'remote_setup'])
@@ -763,13 +760,37 @@ class Command(metaclass=CommandMeta):
 
     def __init__(self, io_queues):
         self.io_queues = io_queues
-        self.queue = asyncio.Queue()
 
-    def local(self):
+    @classmethod
+    def create_command(cls, io_queues, command_name, *args, **kwargs):
+        """Create a new Command instance and assign a uid to it."""
+
+        command_class = cls.commands.get(command_name)
+
+        if inspect.isclass(command_class) and issubclass(command_class, Command):
+            # do something and return result
+            command = command_class(io_queues, *args, **kwargs)
+
+            return command
+
+        raise KeyError('The command `{}` does not exist!'.format(command_name))
+
+    async def __await__(self):
+        """Executes the command by delegating to execution command."""
+
+        execute = Execute(self.io_queues, self)
+        result = await execute.local()
+
+        return result
+
+    async def local(self, remote_future):
         raise NotImplementedError(
-            'You have to implement at least a `local` method'
+            'You have to implement a `local` method'
             'for your Command to work: {}'.format(self.__class__)
         )
+
+    async def remote(self):
+        """An empty remote part."""
 
     @reify
     def uid(self):
@@ -788,11 +809,22 @@ class Command(metaclass=CommandMeta):
         return '/'.join(map(str, self.fqin))
 
     @reify
+    def command_name(self):
+        return self.__class__.fqn
+
+    @reify
     def channel(self):
         return Channel(self.channel_name, io_queues=self.io_queues)
 
     def __repr__(self):
         return self.channel_name
+
+
+class RemoteResult(namedtuple('RemoteResult', ('fqin', 'result', 'exception', 'traceback'))):
+    def __new__(cls, fqin, result=None, exception=None, traceback=None):
+        tb = traceback.format_exc() if exception else traceback
+
+        return super(RemoteResult, cls).__new__(cls, fqin, result, exception, tb)
 
 
 class Execute(Command):
@@ -801,75 +833,50 @@ class Execute(Command):
 
     pending_commands = defaultdict(asyncio.Future)
 
-    def __init__(self, io_queues, command_name, *args, **kwargs):
+    def __init__(self, io_queues, command, *args, **kwargs):
         super(Execute, self).__init__(io_queues)
 
-        self.command_name = command_name
-        self.args = args
-        self.kwargs = kwargs
+        self.command = command
 
-    @property
-    def params(self):
-        params = {
-            'command_name': self.command_name,
-            'args': self.args,
-            'kwargs': self.kwargs,
-            'uid': self.uid
-        }
-        return params
+    async def __await__(self):
+        """Executes the command."""
+
+        result = await self.command
+        return result
 
     @reify
-    def command_class(self):
-        command_class = Command.commands.get(self.command_name)
+    def channel_name(self):
+        """Execution is always run on the class channel."""
 
-        return command_class
-
-    def create_command(self):
-        """Create a new Command instance and assign a uid to it."""
-
-        command_class = Command.commands.get(self.command_name)
-
-        if inspect.isclass(command_class) and issubclass(command_class, Command):
-
-            # do something and return result
-            command = command_class(self.io_queues, *self.args, command_uid=self.uid, **self.kwargs)
-
-            return command
-
-        raise KeyError('The command `{}` does not exist!'.format(self.command_name))
+        return self.__class__.fqn
 
     @classmethod
     async def local_setup(cls, io_queues):
-        # distibute to local instances
-        logger.info("create local instance distributor")
+        """Waits for RemoteResult messages and resolves waiting futures."""
 
         # listen to the global execute channel
         channel = Channel(cls.fqn, io_queues=io_queues)
 
         async def resolve_pending_commands():
             try:
-                async for message in channel:
-                    logger.debug("received remote result: %s", message)
-
-                    fqin = message['fqin']
+                async for fqin, result, exception, traceback in channel:
                     future = cls.pending_commands[fqin]
 
-                    logger.debug("pending futures: %s", cls.pending_commands)
+                    if not exception:
+                        future.set_result(result)
 
-                    if 'result' in message:
-                        future.set_result(message['result'])
-
-                    elif 'exception' in message:
-                        logger.error("Remote exception for %s:\n%s", fqin, message['exception']['traceback'])
-                        ex = message['exception']['inst']
-                        future.set_exception(ex)
+                    else:
+                        logger.error("Remote exception for %s:\n%s", fqin, traceback)
+                        future.set_exception(exception)
 
             except asyncio.CancelledError:
                 pass
 
             # teardown here
-            for fut in cls.pending_commands.values():
+            for fqin, fut in cls.pending_commands.items():
+                logger.warn("Teardown pending command: %s, %s", fqin, fut)
                 fut.cancel()
+                del cls.pending_commands[fqin]
 
         asyncio.ensure_future(resolve_pending_commands())
 
@@ -880,77 +887,56 @@ class Execute(Command):
 
         async def execute_commands():
             try:
-                logger.debug("execute commands in %s ...", channel)
-                async for message in channel:
-                    logger.debug("\t--> execute: %s", message)
-
-                    # create remote execution context
-                    execute = cls(
-                        io_queues,
-                        message['command_name'],
-                        *message['args'],
-                        command_uid=message['uid'],
-                        **message['kwargs']
-                    )
-
-                    async def _execute():
-                        # TODO spawn Task for each command which might be canceled by local side errors
-                        # TODO raise remote exception in future
-                        result = await execute.remote()
-                        if 'exception' in result:
-                            logger.error("traceback:\n%s", result['exception']['traceback'])
-
-                        await channel.send(result)
-
-                    asyncio.ensure_future(_execute())
+                async for args, kwargs in channel:
+                    command = cls.create_command(io_queues, *args, **kwargs)
+                    execute = cls(io_queues, command)
+                    asyncio.ensure_future(execute.remote())
 
             except asyncio.CancelledError:
                 pass
 
         asyncio.ensure_future(execute_commands())
 
-    async def local(self, remote):
-
-        # create remote command
-        channel = Channel(self.__class__.fqn, io_queues=self.io_queues)
-        await channel.send(self.params, ack=True)
-
-        command = self.create_command()
-        # XXX TODO create a context and remove future when done
-        future = self.pending_commands[command.channel_name]
+    @contextlib.contextmanager
+    def remote_future(self):
+        future = self.pending_commands[self.command.channel_name]
         try:
-            # execute local side of command
-            result = await command.local(remote_future=future)
-
-            future.result()
-
-            return result
-
-        except:
-            logger.error("Error while executing command: %s\n%s", command, traceback.format_exc())
+            yield future
 
         finally:
-            del self.pending_commands[command.channel_name]
+            del self.pending_commands[self.command.channel_name]
+
+    async def local(self):
+        # create remote command
+        await self.channel.send(self.command.args, ack=True)
+
+        # XXX TODO create a context and remove future when done
+        with self.remote_future() as future:
+            try:
+                # execute local side of command
+                result = await self.command.local(remote_future=future)
+                future.result()
+                return result
+
+            except:
+                logger.error("Error while executing command: %s\n%s", command, traceback.format_exc())
 
     async def remote(self):
-        command = self.create_command()
 
-        result_message = {
-            'fqin': command.channel_name,
-        }
+        fqin = self.command.channel_name
 
         try:
             # execute remote side of command
-            result = await command.remote()
-            result_message['result'] = result
+            result = await self.command.remote()
+            await self.channel.send(RemoteResult(fqin, result=result))
+
+            return result
 
         except Exception as ex:
-            result_message['exception'] = {
-                'traceback': traceback.format_exc(),
-                'inst': ex,
-            }
+            logger.error("traceback:\n%s", traceback.format_exc())
+            await self.channel.send(RemoteResult(fqin, exception=ex))
 
-        return result_message
+            raise
 
 
 class Import(Command):
@@ -962,7 +948,18 @@ class Import(Command):
 
         logger.debug("\n\nImporting %s", plugin_name)
 
+    @property
+    def args(self):
+        args = (self.command_name, self.plugin_name,)
+        kwargs = {
+            'command_uid': self.uid
+        }
+        return args, kwargs
+
     @exclusive
+    async def __await__(self):
+        return await super(Import, self).__await__()
+
     async def local(self, remote_future):
         plugin = Plugin[self.plugin_name]
 
