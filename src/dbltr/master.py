@@ -274,10 +274,10 @@ def parse_command(line):
 
 
 async def _execute_command(remote, line):
-    command_name, args, kwargs = parse_command(line[:-1].decode())
+    command_name, args, params = parse_command(line[:-1].decode())
 
     try:
-        cmd = core.Command.create_command(remote.io_queues, command_name, *args, **kwargs)
+        cmd = core.Command.create_command(remote.io_queues, command_name, **params)
         result = await cmd
 
     except Exception as ex:
@@ -305,10 +305,10 @@ async def feed_stdin_to_remotes(**options):
                     break
 
                 if not line[:-1]:
-                    line = b'debellator#core:Echo foo bar=123\n'
+                    line = b'debellator#core:Echo foo=bar bar=123\n'
 
                 if line == b'i\n':
-                    line = b'dbltr.core:Import debellator#core\n'
+                    line = b'dbltr.core:Import plugin_name=debellator#core\n'
 
                 core.logger.debug("sending: %s", line)
 

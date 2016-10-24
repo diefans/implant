@@ -6,12 +6,6 @@ from dbltr import core
 
 
 class Echo(core.Command):
-    def __init__(self, io_queues, *args, **kwargs):
-        super(Echo, self).__init__(io_queues)
-
-        self.args = args
-        self.kwargs = kwargs
-
     async def local(self, remote_future):
         incomming = []
 
@@ -39,8 +33,7 @@ class Echo(core.Command):
 
         # raise Exception("foo")
         return {
-            'args': self.args,
-            'kwargs': self.kwargs,
+            'params': self.params,
             'data': data
         }
 
@@ -50,5 +43,3 @@ class Echo(core.Command):
 
 # provide all control structures
 # sequence, choice, if, loop
-core.logger.debug("core: %s, commands: %s", id(core.Command), core.Command.commands)
-core.logger.info('...core plugins loaded')
