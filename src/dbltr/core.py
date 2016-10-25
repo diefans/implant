@@ -25,7 +25,7 @@ import pkg_resources
 pkg_environment = pkg_resources.Environment()
 
 
-logging.basicConfig(level='DEBUG')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -696,14 +696,17 @@ class Command(metaclass=CommandMeta):
 
         raise KeyError('The command `{}` does not exist!'.format(command_name))
 
-    async def __await__(self):
-        """Executes the command by delegating to execution command."""
-
+    async def __call__(self):
         execute = Execute(self.io_queues, self)
         logger.debug("execute local: %s", execute)
         result = await execute.local()
 
         return result
+
+    def __await__(self):
+        """Executes the command by delegating to execution command."""
+
+        return self().__await__()
 
     async def local(self, remote_future):
         raise NotImplementedError(
@@ -868,8 +871,8 @@ class Export(Command):
     """Export a plugin to remote."""
 
     @exclusive
-    async def __await__(self):
-        return await super(Export, self).__await__()
+    async def __acall__(self):
+        return super(Export, self).__acall__()
 
     async def local(self, remote_future):
         plugin = Plugin[self.plugin_name]
@@ -961,10 +964,16 @@ async def communicate(io_queues):
             await Channel.communicate(io_queues, reader, writer)
 
 
-def main(**kwargs):
+def main(debug=False, **kwargs):
 
     loop = asyncio.get_event_loop()
-    loop.set_debug(True)
+    if debug:
+        logger.setLevel(logging.DEBUG)
+
+    loop.set_debug(debug)
+
+    logger.info("debug: %s", debug)
+
     io_queues = IoQueues()
 
     # setup all plugin commands

@@ -15,13 +15,6 @@ import zlib
 from collections import namedtuple
 from logging import StreamHandler
 
-try:
-    import uvloop_
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
-except ImportError:
-    pass
-
 from dbltr import core
 
 
@@ -129,7 +122,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     Embodies a remote python process.
     """
 
-    def __init__(self, **options):
+    def __init__(self):
         super(Remote, self).__init__(
             limit=asyncio.streams._DEFAULT_LIMIT,       # noqa
             loop=asyncio.get_event_loop()
@@ -197,7 +190,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         command_args = target.command_args(code, options=options, python_bin=python_bin)
 
-        remote = cls(**options)
+        remote = cls()
         await asyncio.get_event_loop().subprocess_exec(
             lambda: remote,
             *command_args,
@@ -300,14 +293,13 @@ async def feed_stdin_to_remotes(**options):
                 if line == b'i\n':
                     line = b'dbltr.core:Export plugin_name=debellator#core\n'
 
-
                 if remote.returncode is None:
-                    result = await _execute_command(remote, line)
+                    # result = await _execute_command(remote, line)
                     # result = await asyncio.ensure_future(_execute_command(remote, line))
-                    # result = await asyncio.gather(
-                    #     # _execute_command(remote, line),
-                    #     _execute_command(remote, line),
-                    # )
+                    result = await asyncio.gather(
+                        _execute_command(remote, line),
+                        _execute_command(remote, line),
+                    )
 
                     print("< {}\n > ".format(result), end='')
 
@@ -328,8 +320,6 @@ class ExecutorConsoleHandler(StreamHandler):
 
         super(ExecutorConsoleHandler, self).__init__()
 
-    # TODO FIXME it still occurs...
-
     def emit(self, record):
         asyncio.get_event_loop().run_in_executor(
             self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record)
@@ -348,7 +338,10 @@ async def serve_tcp_10000(reader, writer):
 
 def main():
     loop = asyncio.get_event_loop()
-    loop.set_debug(True)
+
+    options = {
+        'debug': loop.get_debug()
+    }
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
@@ -360,7 +353,7 @@ def main():
             loop.run_until_complete(
                 core.run(
                     # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
-                    feed_stdin_to_remotes(),
+                    feed_stdin_to_remotes(**options),
                 )
             )
 
