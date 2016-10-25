@@ -4,28 +4,28 @@ Remote process
 import inspect
 import sys
 import asyncio
+import concurrent
 import signal
 import functools
 import os
 import base64
-import json
 import hashlib
 import uuid
 import types
 import logging
+import logging.config
 import weakref
 import traceback
 import pickle
 import struct
 import time
+import zlib
 from collections import defaultdict, namedtuple
 import pkg_resources
 
 
 pkg_environment = pkg_resources.Environment()
 
-
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -218,18 +218,7 @@ class ChunkFlags(dict):
         'stop_iter': (1, 1, int, bool),
         'send_ack': (1, 2, int, bool),
         'recv_ack': (1, 3, int, bool),
-        'compression': (3, 4, {
-            False: 0,
-            True: 1,
-            'gzip': 1,
-            'lzma': 2,
-            'zlib': 3,
-        }.get, {
-            0: False,
-            1: 'gzip',
-            2: 'lzma',
-            3: 'zlib'
-        }.get),
+        'compression': (0b1111, 4, int, bool),
     }
 
     def __init__(self, *, send_ack=False, recv_ack=False, eom=False, stop_iter=False, compression=False):
@@ -240,7 +229,7 @@ class ChunkFlags(dict):
         self.stop_iter = stop_iter
         self.send_ack = send_ack
         self.recv_ack = recv_ack
-        self.compression = compression is True and 'gzip' or compression
+        self.compression = compression
 
     def encode(self):
         def _mask_value(k, v):
@@ -343,8 +332,7 @@ class Channel:
 
         return uuid.UUID(bytes=uid_bytes), ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
-    async def send(self, data, ack=False):
-        compression = False
+    async def send(self, data, ack=False, compression=6):
         uid = uuid.uuid1()
         name = self.name.encode()
 
@@ -353,8 +341,15 @@ class Channel:
         logger.debug("Channel %s sends: %s bytes", self.name, len(pickled_data))
 
         for part in split_data(pickled_data, self.chunk_size):
+            if compression:
+                raw_len = len(part)
+                part = zlib.compress(part, compression)
+                comp_len = len(part)
+
+                logger.debug("Compression ratio of %s -> %s: %.2f%%", raw_len, comp_len, comp_len * 100 / raw_len)
+
             header = self._encode_header(uid, self.name, part, flags={
-                'eom': False, 'send_ack': False, 'compression': compression
+                'eom': False, 'send_ack': False, 'compression': bool(compression)
             })
 
             await self.io_outgoing.put((header, name, part))
@@ -364,7 +359,7 @@ class Channel:
         })
 
         await self.io_outgoing.put((header, name))
-        logger.debug("Channel send queue: %s", self.io_outgoing)
+        logger.debug("Channel send queue: %s", self.io_outgoing.qsize())
 
         # if acknowledgement is asked for we await this future and return its result
         # see _receive_reader for resolution of future
@@ -412,9 +407,8 @@ class Channel:
                 await writer.drain()
 
         except asyncio.CancelledError:
-            logger.error("Error:\n%s", traceback.format_exc())
             if queue.qsize():
-                logger.warning("Send queue was not empty when canceld!")
+                logger.warning("Send queue was not empty when canceled!")
 
     @classmethod
     async def _receive_single_message(cls, io_queues, reader, buffer):
@@ -429,7 +423,11 @@ class Channel:
             if uid not in buffer:
                 buffer[uid] = bytearray()
 
-            buffer[uid].extend(await reader.readexactly(data_length))
+            part = await reader.readexactly(data_length)
+            if flags.compression:
+                part = zlib.decompress(part)
+
+            buffer[uid].extend(part)
 
         if channel_name_length:
             logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
@@ -909,8 +907,7 @@ async def run(*tasks):
     """Schedules all tasks and wait for running is done or canceled"""
 
     # create indicator for running messenger
-    running = asyncio.Future()
-    asyncio.ensure_future(asyncio.gather(*tasks))
+    running = asyncio.ensure_future(asyncio.gather(*tasks))
 
     # exit on sigterm or sigint
     for signame in ('SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'):
@@ -918,7 +915,7 @@ async def run(*tasks):
 
         def exit_with_signal(sig):
             try:
-                running.set_result(sig)
+                running.cancel()
 
             except asyncio.InvalidStateError:
                 logger.warning("running already done!")
@@ -964,15 +961,58 @@ async def communicate(io_queues):
             await Channel.communicate(io_queues, reader, writer)
 
 
-def main(debug=False, **kwargs):
+class ExecutorConsoleHandler(logging.StreamHandler):
 
-    loop = asyncio.get_event_loop()
+    """Run logging in a separate executor, to not block on console output."""
+
+    def __init__(self, *args, **kwargs):
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=150)
+
+        super(ExecutorConsoleHandler, self).__init__(*args, **kwargs)
+
+    def emit(self, record):
+        # FIXME is not really working on sys.stdout
+        asyncio.get_event_loop().run_in_executor(
+            None, functools.partial(super(ExecutorConsoleHandler, self).emit, record)
+        )
+
+
+def main(debug=False, log_config=None, **kwargs):
+    if log_config is None:
+        log_config = {
+            'version': 1,
+            'formatters': {
+                'simple': {
+                    'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+                }
+            },
+            'handlers': {
+                'console': {
+                    'class': 'logging.StreamHandler',
+                    'formatter': 'simple',
+                    'level': 'DEBUG',
+                    'stream': 'ext://sys.stderr'
+                }
+            },
+            'loggers': {
+                'dbltr': {
+                    'handlers': ['console'],
+                    'level': 'INFO',
+                    'propagate': False
+                }
+            },
+            'root': {
+                'handlers': ['console'],
+                'level': 'DEBUG'
+            },
+        }
+
+    logging.config.dictConfig(log_config)
     if debug:
         logger.setLevel(logging.DEBUG)
 
+    loop = asyncio.get_event_loop()
     loop.set_debug(debug)
-
-    logger.info("debug: %s", debug)
 
     io_queues = IoQueues()
 
@@ -992,11 +1032,11 @@ def main(debug=False, **kwargs):
 
 
 def decode_options(b64):
-    return json.loads(base64.b64decode(b64).decode())
+    return pickle.loads(base64.b64decode(b64))
 
 
 def encode_options(**options):
-    return base64.b64encode(json.dumps(options).encode()).decode()
+    return base64.b64encode(pickle.dumps(options)).decode()
 
 
 if __name__ == '__main__':

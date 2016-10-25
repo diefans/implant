@@ -92,6 +92,7 @@ setup(
 
     install_requires=[
         'click',
+        'pyyaml'
     ],
 
     tests_require=['tox'],

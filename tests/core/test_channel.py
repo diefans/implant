@@ -18,25 +18,9 @@ import pytest
     (0b00000110, {'eom': False, 'stop_iter': True, 'send_ack': True}),
     (0b00000111, {'eom': True, 'stop_iter': True, 'send_ack': True}),
 
-    (0b00010000, {'eom': False, 'stop_iter': False, 'compression': 'gzip'}),
-    (0b00010001, {'eom': True, 'stop_iter': False, 'compression': 'gzip'}),
-    (0b00010010, {'eom': False, 'stop_iter': True, 'compression': 'gzip'}),
-    (0b00010011, {'eom': True, 'stop_iter': True, 'compression': 'gzip'}),
-
-    (0b00010000, {'eom': False, 'stop_iter': False, 'compression': True}),
+    (0b00000000, {'eom': False, 'stop_iter': False, 'compression': 0}),
+    (0b00010001, {'eom': True, 'stop_iter': False, 'compression': 1}),
     (0b00010001, {'eom': True, 'stop_iter': False, 'compression': True}),
-    (0b00010010, {'eom': False, 'stop_iter': True, 'compression': True}),
-    (0b00010011, {'eom': True, 'stop_iter': True, 'compression': True}),
-
-    (0b00100000, {'eom': False, 'stop_iter': False, 'compression': 'lzma'}),
-    (0b00100001, {'eom': True, 'stop_iter': False, 'compression': 'lzma'}),
-    (0b00100010, {'eom': False, 'stop_iter': True, 'compression': 'lzma'}),
-    (0b00100011, {'eom': True, 'stop_iter': True, 'compression': 'lzma'}),
-
-    (0b00110000, {'eom': False, 'stop_iter': False, 'compression': 'zlib'}),
-    (0b00110001, {'eom': True, 'stop_iter': False, 'compression': 'zlib'}),
-    (0b00110010, {'eom': False, 'stop_iter': True, 'compression': 'zlib'}),
-    (0b00110011, {'eom': True, 'stop_iter': True, 'compression': 'zlib'}),
 ])
 def test_flags(kwargs, result):
     from dbltr import core

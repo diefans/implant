@@ -7,37 +7,15 @@ import shlex
 import base64
 import types
 import traceback
-import functools
-import concurrent.futures
 import inspect
 import zlib
-
 from collections import namedtuple
-from logging import StreamHandler
+import logging
 
 from dbltr import core
 
 
-def log(_msg, **kwargs):
-    if sys.stderr.isatty():
-        colors = {
-            'color': '\033[01;31m',
-            'nocolor': '\033[0m'
-        }
-
-    else:
-        colors = {
-            'color': '',
-            'nocolor': ''
-        }
-
-    if kwargs:
-        error_msg = "{color}{msg} {kwargs}{nocolor}".format(msg=_msg, kwargs=kwargs, **colors)
-
-    else:
-        error_msg = "{color}{msg}{nocolor}".format(msg=_msg, **colors)
-
-    core.logger.debug(error_msg)
+logger = logging.getLogger(__name__)
 
 
 def get_python_source(obj):
@@ -54,14 +32,15 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'
         'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "<dbltr.core>", "exec");'
-        'exec(c, core.__dict__); core.main(**core.decode_options(b"{options}"));'
+        'exec(c, core.__dict__);'
+        'core.main(**core.decode_options(b"{options}"));'
     )
     """Bootstrapping of core module on remote."""
 
     def __new__(cls, host=None, user=None, sudo=None):
         return super(Target, cls).__new__(cls, host, user, sudo)
 
-    def command_args(self, code, options=None, python_bin=sys.executable):
+    def command_args(self, code, *, options=None, python_bin=sys.executable):
         """generates the command argsuments to execute a python process"""
 
         if options is None:
@@ -105,7 +84,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
                 bootstrap = self.bootstrap
 
             yield bootstrap.format(
-                code=base64.b64encode(zlib.compress(code)).decode(),
+                code=base64.b64encode(zlib.compress(code, 9)).decode(),
                 options=core.encode_options(**options),
             )
 
@@ -172,11 +151,7 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         self._transport.kill()
 
     @classmethod
-    async def launch(cls,
-                     target=None,
-                     # host=None, user=None, sudo=None,
-                     python_bin=sys.executable, code=None,
-                     options=None, **kwargs):
+    async def launch(cls, target=None, *, python_bin=sys.executable, code=None, options=None, **kwargs):
         """Create a remote process."""
 
         if target is None:
@@ -210,9 +185,9 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
         """Collect error messages from remote in stderr queue."""
 
         async for line in self.stderr:
-            log("\tremote stderr {}: {}".format(self.pid, line[:-1].decode()))
+            logger.debug("\tRemote #%s: %s", self.pid, line[:-1].decode())
 
-    async def __await__(self):
+    async def communicate(self):
         """Start channel communication."""
 
         receiving = asyncio.gather(
@@ -255,16 +230,16 @@ def parse_command(line):
     return command, args, kwargs
 
 
-async def _execute_command(remote, line):
+async def _execute_command(io_queues, line):
     command_name, _, params = parse_command(line[:-1].decode())
     print("sending:", command_name, params)
 
     try:
-        cmd = core.Command.create_command(remote.io_queues, command_name, **params)
+        cmd = core.Command.create_command(io_queues, command_name, **params)
         result = await cmd
 
     except Exception as ex:     # noqa
-        core.logger.error("Error:\n%s", traceback.format_exc())
+        logger.error("Error:\n%s", traceback.format_exc())
         print("Error: {}\n > ".format(ex))
 
     else:
@@ -273,12 +248,15 @@ async def _execute_command(remote, line):
 
 async def feed_stdin_to_remotes(**options):
 
-    remote = await Remote.launch(code=core,
-                                 target=Target(host='localhost'),
-                                 python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
-                                 options=options)
+    remote = await Remote.launch(
+        code=core,
+        target=Target(host='localhost'),
+        python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
+        options=options
+    )
 
-    asyncio.ensure_future(remote)
+    # start remote communication
+    asyncio.ensure_future(remote.communicate())
     try:
         async with core.Incomming(pipe=sys.stdin) as reader:
             while True:
@@ -297,8 +275,8 @@ async def feed_stdin_to_remotes(**options):
                     # result = await _execute_command(remote, line)
                     # result = await asyncio.ensure_future(_execute_command(remote, line))
                     result = await asyncio.gather(
-                        _execute_command(remote, line),
-                        _execute_command(remote, line),
+                        _execute_command(remote.io_queues, line),
+                        _execute_command(remote.io_queues, line),
                     )
 
                     print("< {}\n > ".format(result), end='')
@@ -311,21 +289,6 @@ async def feed_stdin_to_remotes(**options):
         await remote.wait()
 
 
-class ExecutorConsoleHandler(StreamHandler):
-
-    """Run logging in a separate executor, to not block on console output."""
-
-    def __init__(self, executor):
-        self.executor = executor
-
-        super(ExecutorConsoleHandler, self).__init__()
-
-    def emit(self, record):
-        asyncio.get_event_loop().run_in_executor(
-            self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record)
-        )
-
-
 async def serve_tcp_10000(reader, writer):
     try:
         while True:
@@ -336,28 +299,34 @@ async def serve_tcp_10000(reader, writer):
         writer.close()
 
 
-def main():
+def main(debug=False, log_config=None):
     loop = asyncio.get_event_loop()
 
     options = {
-        'debug': loop.get_debug()
+        'debug': loop.get_debug(),
+        'log_config': log_config,
     }
 
+    if debug:
+        logger.setLevel(logging.DEBUG)
+
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
-            logging_handler = ExecutorConsoleHandler(logging_executor)
-            core.logger.propagate = False
-            core.logger.addHandler(logging_handler)
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
+        #     log_formatter = logging.Formatter(style='{')
+        #     log_handler = ExecutorConsoleHandler(logging_executor)
+        #     log_handler.setFormatter(log_formatter)
+        #     logger.propagate = False
+        #     logger.addHandler(log_handler)
             # core.logger.setLevel('INFO')
 
-            loop.run_until_complete(
-                core.run(
-                    # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
-                    feed_stdin_to_remotes(**options),
-                )
+        loop.run_until_complete(
+            core.run(
+                # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
+                feed_stdin_to_remotes(**options),
             )
+        )
 
-            core.cancel_pending_tasks(loop)
+        core.cancel_pending_tasks(loop)
 
     finally:
         loop.close()
