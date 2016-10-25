@@ -248,6 +248,11 @@ async def _execute_command(io_queues, line):
 
 async def feed_stdin_to_remotes(**options):
 
+    lines = [
+        b'dbltr.core:Export plugin_name=debellator#core\n',
+        b'debellator#core:Echo foo=bar bar=123\n',
+    ]
+
     remote = await Remote.launch(
         code=core,
         target=Target(host='localhost'),
@@ -257,6 +262,7 @@ async def feed_stdin_to_remotes(**options):
 
     # start remote communication
     asyncio.ensure_future(remote.communicate())
+
     try:
         async with core.Incomming(pipe=sys.stdin) as reader:
             while True:
@@ -289,6 +295,43 @@ async def feed_stdin_to_remotes(**options):
         await remote.wait()
 
 
+async def feed_lines_to_remotes(**options):
+
+    lines = [
+        b'dbltr.core:Export plugin_name=debellator#core\n',
+        b'debellator#core:Echo foo=bar bar=123\n',
+    ]
+
+    remote = await Remote.launch(
+        code=core,
+        target=Target(host='localhost'),
+        python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
+        options=options
+    )
+
+    # start remote communication
+    asyncio.ensure_future(remote.communicate())
+
+    try:
+        for line in lines:
+            if remote.returncode is None:
+                # result = await _execute_command(remote, line)
+                # result = await asyncio.ensure_future(_execute_command(remote, line))
+                result = await asyncio.gather(
+                    _execute_command(remote.io_queues, line),
+                    _execute_command(remote.io_queues, line),
+                )
+
+                print("< {}\n > ".format(result), end='')
+
+    except asyncio.CancelledError:
+        pass
+
+    if remote.returncode is None:
+        remote.terminate()
+        await remote.wait()
+
+
 async def serve_tcp_10000(reader, writer):
     try:
         while True:
@@ -297,6 +340,13 @@ async def serve_tcp_10000(reader, writer):
 
     except asyncio.CancelledError:
         writer.close()
+
+
+async def print_debug(loop):
+    while True:
+        print(chr(27) + "[2J")  # clear screen
+        loop.print_debug_info()
+        await asyncio.sleep(0.5, loop=loop)
 
 
 def main(debug=False, log_config=None):
@@ -321,6 +371,7 @@ def main(debug=False, log_config=None):
 
         loop.run_until_complete(
             core.run(
+                # print_debug(loop),
                 # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
                 feed_stdin_to_remotes(**options),
             )

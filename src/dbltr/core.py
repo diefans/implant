@@ -923,9 +923,12 @@ async def run(*tasks):
         asyncio.get_event_loop().add_signal_handler(sig, functools.partial(exit_with_signal, sig))
 
     # wait for running completed
-    result = await running
+    try:
+        result = await running
+        return result
 
-    return result
+    except asyncio.CancelledError:
+        pass
 
 
 def cancel_pending_tasks(loop):
@@ -962,6 +965,8 @@ async def communicate(io_queues):
 
 
 class ExecutorConsoleHandler(logging.StreamHandler):
+
+    # FIXME TODO Executor seems to disturb uvloop so that it hangs randomly
 
     """Run logging in a separate executor, to not block on console output."""
 
