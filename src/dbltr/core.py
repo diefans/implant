@@ -1,28 +1,26 @@
-"""
-Remote process
-"""
-import inspect
-import sys
+"""The core module is transfered to the remote process and will bootstrap pipe communication."""
 import asyncio
-import concurrent
-import signal
-import functools
-import os
 import base64
+import concurrent
+import functools
 import hashlib
-import uuid
-import types
+import inspect
 import logging
 import logging.config
-import weakref
-import traceback
+import os
 import pickle
+import signal
 import struct
+import sys
 import time
+import traceback
+import types
+import uuid
+import weakref
 import zlib
 from collections import defaultdict, namedtuple
-import pkg_resources
 
+import pkg_resources
 
 pkg_environment = pkg_resources.Environment()
 
@@ -46,6 +44,9 @@ class aenumerate:
 
 
 class reify:
+
+    """Create a property and cache the result."""
+
     def __init__(self, wrapped):
         self.wrapped = wrapped
         functools.update_wrapper(self, wrapped)
@@ -59,6 +60,7 @@ class reify:
 
 
 def create_module(module_name, is_package=False):
+    """Create an empty module and all its parent packages."""
     if module_name not in sys.modules:
         package_name, _, module_attr = module_name.rpartition('.')
 
@@ -83,13 +85,15 @@ def create_module(module_name, is_package=False):
 
 
 def uuid1_time(uid):
+    """Calculate the time of an UUID."""
     return (uid.time - 0x01b21dd213814000) * 100 / 1e9
 
 
 class IoQueues:
+
     """Just to keep send and receive queues together."""
 
-    def __init__(self, send=None, error=None):
+    def __init__(self, send=None):
         if send is None:
             send = asyncio.Queue()
 
@@ -130,7 +134,12 @@ class Incomming(asyncio.StreamReader):
         self._transport.close()
 
     async def readexactly(self, n):
-        # see https://github.com/python/asyncio/issues/394
+        """Read exactly n bytes from the stream.
+
+        This is a short and faster implementation the original one
+        (see of https://github.com/python/asyncio/issues/394).
+
+        """
         buffer = bytearray()
 
         missing = n
@@ -154,8 +163,11 @@ class Incomming(asyncio.StreamReader):
 
 
 class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
+
+    """Send SIGHUP when connection is lost."""
+
     def connection_lost(self, exc):
-        """Shutdown process"""
+        """Shutdown process."""
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
         # XXX FIXME is not called
@@ -187,7 +199,6 @@ class Outgoing:
 
 async def send_outgoing_queue(queue, pipe=sys.stdout):
     """Write data from queue to stdout."""
-
     async with Outgoing(pipe=pipe, shutdown=True) as writer:
         while True:
             data = await queue.get()
@@ -198,7 +209,6 @@ async def send_outgoing_queue(queue, pipe=sys.stdout):
 
 def split_data(data, size=1024):
     """A generator to yield splitted data."""
-
     data_view = memoryview(data)
     data_len = len(data_view)
     start = 0
@@ -218,7 +228,7 @@ class ChunkFlags(dict):
         'stop_iter': (1, 1, int, bool),
         'send_ack': (1, 2, int, bool),
         'recv_ack': (1, 3, int, bool),
-        'compression': (0b1111, 4, int, bool),
+        'compression': (1, 4, int, bool),
     }
 
     def __init__(self, *, send_ack=False, recv_ack=False, eom=False, stop_iter=False, compression=False):
@@ -253,12 +263,20 @@ HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 class Channel:
 
+    """Channel provides means to send and receive messages."""
+
     chunk_size = 0x8000
 
     acknowledgements = weakref.WeakValueDictionary()
     """Global acknowledgment futures distinctive by uuid."""
 
     def __init__(self, name=None, *, io_queues=None):
+        """Initialize the channel.
+
+        :param name: the channel name
+        :param io_queues: the queues to send and receive with
+
+        """
         self.name = name
         self.io_queues = io_queues or IoQueues()
         self.io_outgoing = self.io_queues.send
@@ -273,17 +291,15 @@ class Channel:
 
     async def receive(self):
         """Receive the next message in this channel."""
-
         msg = await self.io_incomming.get()
         try:
             return msg
         finally:
             self.io_incomming.task_done()
 
-    def __await__(self):
+    async def __await__(self):
         """Receive the next message in this channel."""
-
-        msg = yield from self.io_incomming.get()
+        msg = await self.io_incomming.get()
 
         try:
             return msg
@@ -296,15 +312,29 @@ class Channel:
     async def __anext__(self):
         # TODO use iterator and stop_iter header to raise AsyncStopIteration
         data = await self
+        if isinstance(data, StopAsyncIteration):
+            raise data
 
         return data
 
+    def stop_iteration(self):
+        class context:
+            async def __aenter__(ctx):
+                return self
+
+            async def __aexit__(ctx, *args):
+                await self.send(StopAsyncIteration())
+
+        return context()
+
     @staticmethod
     def _encode_header(uid, channel_name=None, data=None, *, flags=None):
-        """
+        """Create chunk header.
+
         [header length = 30 bytes]
         [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
         {data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
+
         """
         assert isinstance(uid, uuid.UUID), "uid must be an UUID instance"
 
@@ -332,7 +362,14 @@ class Channel:
 
         return uuid.UUID(bytes=uid_bytes), ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
-    async def send(self, data, ack=False, compression=6):
+    async def send(self, data, ack=False, compress=6):
+        """Send data in a pickled form to the channel.
+
+        :param data: the python object to send
+        :param ack: request acknowledgement of the reception of that message
+        :param compress: compress the data with zlib
+
+        """
         uid = uuid.uuid1()
         name = self.name.encode()
 
@@ -341,15 +378,15 @@ class Channel:
         logger.debug("Channel %s sends: %s bytes", self.name, len(pickled_data))
 
         for part in split_data(pickled_data, self.chunk_size):
-            if compression:
+            if compress:
                 raw_len = len(part)
-                part = zlib.compress(part, compression)
+                part = zlib.compress(part, compress)
                 comp_len = len(part)
 
                 logger.debug("Compression ratio of %s -> %s: %.2f%%", raw_len, comp_len, comp_len * 100 / raw_len)
 
             header = self._encode_header(uid, self.name, part, flags={
-                'eom': False, 'send_ack': False, 'compression': bool(compression)
+                'eom': False, 'send_ack': False, 'compression': bool(compress)
             })
 
             await self.io_outgoing.put((header, name, part))
@@ -380,6 +417,13 @@ class Channel:
 
     @classmethod
     async def communicate(cls, io_queues, reader, writer):
+        """Schedule send and receive tasks.
+
+        :param io_queues: the queues to use
+        :param reader: the `StreamReader` instance
+        :param writer: the `StreamWriter` instance
+
+        """
         fut_send_recv = asyncio.gather(
             cls._send_writer(io_queues, writer),
             cls._receive_reader(io_queues, reader)
@@ -481,6 +525,8 @@ PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
 
 class MetaPlugin(type):
 
+    # FIXME plugin architecture seems ugly
+
     plugins = {}
 
     def __new__(mcs, name, bases, dct):
@@ -500,6 +546,26 @@ class MetaPlugin(type):
             # we index entry_points and module names
             cls.add(plugin)
             # mcs.plugins[plugin.module_name] = mcs.plugins[plugin.name] = plugin
+
+    def create_from_entry_point(cls, entry_point):
+        plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
+        cls.add(plugin)
+
+        return plugin
+
+    def create_from_code(cls, code, project_name, entry_point_name, module_name, version='0.0.0'):
+        dist = pkg_resources.Distribution(project_name=project_name, version=version)
+        dist.activate()
+        pkg_environment.add(dist)
+        entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
+
+        module = create_module(module_name)
+        plugin = cls.create_from_entry_point(entry_point)
+
+        c = compile(code, "<{}>".format(module_name), "exec", optimize=2)
+        exec(c, module.__dict__)        # noqa
+
+        return plugin
 
     def add(cls, plugin):
         cls.plugins[plugin.module_name] = cls.plugins[plugin.name] = plugin
@@ -544,39 +610,15 @@ class Plugin(metaclass=MetaPlugin):
     @reify
     def module(self):
         """On demand module loading."""
-
         return __import__(self.module_name, fromlist=[''])
         # return self.entry_point.load()
-
-    @classmethod
-    def create_from_entry_point(cls, entry_point):
-        plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
-        cls.add(plugin)
-
-        return plugin
-
-    @classmethod
-    def create_from_code(cls, code, project_name, entry_point_name, module_name, version='0.0.0'):
-        dist = pkg_resources.Distribution(project_name=project_name, version=version)
-        dist.activate()
-        pkg_environment.add(dist)
-        entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
-
-        module = create_module(module_name)
-        plugin = cls.create_from_entry_point(entry_point)
-
-        c = compile(code, "<{}>".format(module_name), "exec", optimize=2)
-        exec(c, module.__dict__)        # noqa
-
-        return plugin
 
     def __repr__(self):
         return "<Plugin {}>".format(self.module_name)
 
 
 def exclusive(fun):
-    """Makes an async function call exclusive."""
-
+    """Make an async function call exclusive."""
     lock = asyncio.Lock()
 
     async def locked_fun(*args, **kwargs):
@@ -594,12 +636,8 @@ class CommandMeta(type):
     command_instances = weakref.WeakValueDictionary()
     """Holds references to all active Instances of Commands, to forward to their queue"""
 
-    command_instance_names = weakref.WeakKeyDictionary()
-    """Holds all instances mapping to their FQIN."""
-
     def __new__(mcs, name, bases, dct):
         """Register command at plugin vice versa"""
-
         module = dct['__module__']
         dct['plugin'] = Plugin[module]
 
@@ -646,7 +684,6 @@ class CommandMeta(type):
 
     def create_reference(cls, uid, inst):
         fqin = (cls.fqn, uid)
-        cls.command_instance_names[inst] = fqin
         cls.command_instances[fqin] = inst
 
     def __init__(cls, name, bases, dct):
@@ -680,10 +717,15 @@ class Command(metaclass=CommandMeta):
                     "'{}' has neither an attribute nor a parameter '{}'".format(self, name)
                 )
 
+    def __contains__(self, name):
+        return self.params.__contains__(name)
+
+    def __getitem__(self, name):
+        return self.params.__getitem__(name)
+
     @classmethod
     def create_command(cls, io_queues, command_name, command_uid=None, **params):
         """Create a new Command instance and assign a uid to it."""
-
         command_class = cls.commands.get(command_name)
 
         if inspect.isclass(command_class) and issubclass(command_class, Command):
@@ -694,17 +736,13 @@ class Command(metaclass=CommandMeta):
 
         raise KeyError('The command `{}` does not exist!'.format(command_name))
 
-    async def __call__(self):
+    async def __await__(self):
+        """Executes the command by delegating to execution command."""
         execute = Execute(self.io_queues, self)
         logger.debug("execute local: %s", execute)
         result = await execute.local()
 
         return result
-
-    def __await__(self):
-        """Executes the command by delegating to execution command."""
-
-        return self().__await__()
 
     async def local(self, remote_future):
         raise NotImplementedError(
@@ -718,13 +756,11 @@ class Command(metaclass=CommandMeta):
     @reify
     def fqin(self):
         """The fully qualified instance name."""
-
         return (self.command_name, self.uid)
 
     @reify
     def channel_name(self):
         """Channel name is used in header."""
-
         return '/'.join(map(str, self.fqin))
 
     @reify
@@ -763,13 +799,11 @@ class Execute(Command):
     @reify
     def channel_name(self):
         """Execution is always run on the class channel."""
-
         return self.__class__.fqn
 
     @classmethod
     async def local_setup(cls, io_queues):
         """Waits for RemoteResult messages and resolves waiting futures."""
-
         async def resolve_pending_commands():
             # listen to the global execute channel
             channel = Channel(cls.fqn, io_queues=io_queues)
@@ -815,7 +849,6 @@ class Execute(Command):
 
     def remote_future(self):        # noqa
         """Create remote command and yield its future."""
-
         class _context:
             async def __aenter__(ctx):      # noqa
                 await self.channel.send((self.command.fqin, self.command.params), ack=True)
@@ -905,7 +938,6 @@ class Export(Command):
 
 async def run(*tasks):
     """Schedules all tasks and wait for running is done or canceled"""
-
     # create indicator for running messenger
     running = asyncio.ensure_future(asyncio.gather(*tasks))
 
@@ -978,8 +1010,11 @@ class ExecutorConsoleHandler(logging.StreamHandler):
     def emit(self, record):
         # FIXME is not really working on sys.stdout
         asyncio.get_event_loop().run_in_executor(
-            None, functools.partial(super(ExecutorConsoleHandler, self).emit, record)
+            self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record)
         )
+
+    def __del__(self):
+        self.executor.shutdown(wait=True)
 
 
 def main(debug=False, log_config=None, **kwargs):
@@ -1042,7 +1077,3 @@ def decode_options(b64):
 
 def encode_options(**options):
     return base64.b64encode(pickle.dumps(options)).decode()
-
-
-if __name__ == '__main__':
-    main()

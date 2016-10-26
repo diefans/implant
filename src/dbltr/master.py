@@ -1,19 +1,18 @@
 """Controlles a bunch of remotes."""
 
-import os
-import sys
 import asyncio
-import shlex
 import base64
-import types
-import traceback
 import inspect
+import logging
+import os
+import shlex
+import sys
+import traceback
+import types
 import zlib
 from collections import namedtuple
-import logging
 
 from dbltr import core
-
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +40,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
         return super(Target, cls).__new__(cls, host, user, sudo)
 
     def command_args(self, code, *, options=None, python_bin=sys.executable):
-        """generates the command argsuments to execute a python process"""
-
+        """Generate the command arguments to execute a python process."""
         if options is None:
             options = {}
 
