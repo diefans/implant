@@ -289,22 +289,17 @@ class Channel:
             out_size=self.io_outgoing.qsize(),
         )
 
-    async def receive(self):
+    def __await__(self):
         """Receive the next message in this channel."""
-        msg = await self.io_incomming.get()
-        try:
-            return msg
-        finally:
-            self.io_incomming.task_done()
+        async def coro():
+            msg = await self.io_incomming.get()
 
-    async def __await__(self):
-        """Receive the next message in this channel."""
-        msg = await self.io_incomming.get()
+            try:
+                return msg
+            finally:
+                self.io_incomming.task_done()
 
-        try:
-            return msg
-        finally:
-            self.io_incomming.task_done()
+        return coro().__await__()
 
     async def __aiter__(self):
         return self
@@ -317,12 +312,12 @@ class Channel:
 
         return data
 
-    def stop_iteration(self):
+    def stop_iteration(self):       # noqa
         class context:
-            async def __aenter__(ctx):
+            async def __aenter__(ctx):      # noqa
                 return self
 
-            async def __aexit__(ctx, *args):
+            async def __aexit__(ctx, *args):        # noqa
                 await self.send(StopAsyncIteration())
 
         return context()
@@ -637,7 +632,7 @@ class CommandMeta(type):
     """Holds references to all active Instances of Commands, to forward to their queue"""
 
     def __new__(mcs, name, bases, dct):
-        """Register command at plugin vice versa"""
+        """Register command at plugin vice versa."""
         module = dct['__module__']
         dct['plugin'] = Plugin[module]
 
@@ -736,13 +731,17 @@ class Command(metaclass=CommandMeta):
 
         raise KeyError('The command `{}` does not exist!'.format(command_name))
 
-    async def __await__(self):
-        """Executes the command by delegating to execution command."""
-        execute = Execute(self.io_queues, self)
-        logger.debug("execute local: %s", execute)
-        result = await execute.local()
+    # TODO with loop.set_debug(True) it is possible to define `async def __await__(self)`
+    def __await__(self):
+        """Execute the command by delegating to execution command."""
+        async def coro():
+            execute = Execute(self.io_queues, self)
+            logger.debug("execute local: %s", execute)
+            result = await execute.local()
 
-        return result
+            return result
+
+        return coro().__await__()
 
     async def local(self, remote_future):
         raise NotImplementedError(
@@ -771,11 +770,31 @@ class Command(metaclass=CommandMeta):
         return self.channel_name
 
 
-class RemoteResult(namedtuple('RemoteResult', ('fqin', 'result', 'exception', 'traceback'))):
+class ExecuteResult(namedtuple('ExecuteResult', ('fqin', 'result', 'exception', 'traceback'))):
     def __new__(cls, fqin, result=None, exception=None, traceback=None):        # noqa
         tb = traceback.format_exc() if exception else traceback
 
-        return super(RemoteResult, cls).__new__(cls, fqin, result, exception, tb)
+        return super(ExecuteResult, cls).__new__(cls, fqin, result, exception, tb)
+
+    async def __call__(self, io_queues):
+        future = Execute.pending_commands[self.fqin]
+
+        if not self.exception:
+            future.set_result(self.result)
+
+        else:
+            logger.error("Remote exception for %s:\n%s", self.fqin, self.tb)
+            future.set_exception(self.exception)
+
+
+class ExecuteArgs(namedtuple('ExecuteArgs', ('fqin', 'params'))):
+    def __new__(cls, fqin, params=None):
+        return super(ExecuteArgs, cls).__new__(cls, fqin, params or {})
+
+    async def __call__(self, io_queues):
+        command = Execute.create_command(io_queues, *self.fqin, **self.params)
+        execute = Execute(io_queues, command)
+        asyncio.ensure_future(execute.remote())
 
 
 class Execute(Command):
@@ -792,7 +811,7 @@ class Execute(Command):
 
         self.command = command
 
-    async def __await__(self):
+    def __await__(self):
         # forbid using Execute directly
         raise RuntimeError("Do not invoke `await Execute()` directly, instead use `await Command(**params)`)")
 
@@ -802,56 +821,37 @@ class Execute(Command):
         return self.__class__.fqn
 
     @classmethod
+    async def execute_io_queues(cls, io_queues):
+        # listen to the global execute channel
+        channel = Channel(cls.fqn, io_queues=io_queues)
+
+        try:
+            async for message in channel:
+                await message(io_queues)
+
+        except asyncio.CancelledError:
+            pass
+
+        # teardown here
+        for fqin, fut in cls.pending_commands.items():
+            logger.warning("Teardown pending command: %s, %s", fqin, fut)
+            fut.cancel()
+            del cls.pending_commands[fqin]
+
+    @classmethod
     async def local_setup(cls, io_queues):
-        """Waits for RemoteResult messages and resolves waiting futures."""
-        async def resolve_pending_commands():
-            # listen to the global execute channel
-            channel = Channel(cls.fqn, io_queues=io_queues)
-
-            try:
-                async for fqin, result, exception, tb in channel:
-                    future = cls.pending_commands[fqin]
-
-                    if not exception:
-                        future.set_result(result)
-
-                    else:
-                        logger.error("Remote exception for %s:\n%s", fqin, tb)
-                        future.set_exception(exception)
-
-            except asyncio.CancelledError:
-                pass
-
-            # teardown here
-            for fqin, fut in cls.pending_commands.items():
-                logger.warning("Teardown pending command: %s, %s", fqin, fut)
-                fut.cancel()
-                del cls.pending_commands[fqin]
-
-        asyncio.ensure_future(resolve_pending_commands())
+        """Wait for ExecuteResult messages and resolves waiting futures."""
+        asyncio.ensure_future(cls.execute_io_queues(io_queues))
 
     @classmethod
     async def remote_setup(cls, io_queues):
-        async def execute_commands():
-            # our incomming command queue is global
-            channel = Channel(cls.fqn, io_queues=io_queues)
-
-            try:
-                async for args, kwargs in channel:
-                    command = cls.create_command(io_queues, *args, **kwargs)
-                    execute = cls(io_queues, command)
-                    asyncio.ensure_future(execute.remote())
-
-            except asyncio.CancelledError:
-                pass
-
-        asyncio.ensure_future(execute_commands())
+        asyncio.ensure_future(cls.execute_io_queues(io_queues))
 
     def remote_future(self):        # noqa
         """Create remote command and yield its future."""
         class _context:
             async def __aenter__(ctx):      # noqa
-                await self.channel.send((self.command.fqin, self.command.params), ack=True)
+                await self.channel.send(ExecuteArgs(self.command.fqin, self.command.params), ack=True)
                 future = self.pending_commands[self.command.channel_name]
 
                 return future
@@ -882,13 +882,13 @@ class Execute(Command):
         try:
             # execute remote side of command
             result = await self.command.remote()
-            await self.channel.send(RemoteResult(fqin, result=result))
+            await self.channel.send(ExecuteResult(fqin, result=result))
 
             return result
 
         except Exception as ex:
             logger.error("traceback:\n%s", traceback.format_exc())
-            await self.channel.send(RemoteResult(fqin, exception=ex))
+            await self.channel.send(ExecuteResult(fqin, exception=ex))
 
             raise
 
