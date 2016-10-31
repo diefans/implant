@@ -12,7 +12,7 @@ import types
 import zlib
 from collections import namedtuple
 
-from dbltr import core
+from dbltr import core, task
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
     bootstrap = (
         'import sys, imp, base64, zlib;'
-        'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr");'
+        'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);'
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'
         'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "<dbltr.core>", "exec");'
@@ -272,16 +272,19 @@ async def feed_stdin_to_remotes(**options):
                 if not line[:-1]:
                     line = b'debellator#core:Echo foo=bar bar=123\n'
 
-                if line == b'i\n':
+                if line == b'e\n':
                     line = b'dbltr.core:Export plugin_name=debellator#core\n'
 
+                if line == b'i\n':
+                    line = b'debellator#core:InvokeImport\n'
+
                 if remote.returncode is None:
-                    # result = await _execute_command(remote.io_queues, line)
+                    result = await _execute_command(remote.io_queues, line)
                     # result = await asyncio.ensure_future(_execute_command(remote, line))
-                    result = await asyncio.gather(
-                        _execute_command(remote.io_queues, line),
-                        _execute_command(remote.io_queues, line),
-                    )
+                    # result = await asyncio.gather(
+                    #     _execute_command(remote.io_queues, line),
+                    #     _execute_command(remote.io_queues, line),
+                    # )
 
                     print("< {}\n > ".format(result), end='')
 

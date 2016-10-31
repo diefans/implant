@@ -1,9 +1,12 @@
 """The core module is transfered to the remote process and will bootstrap pipe communication."""
+import threading
 import asyncio
 import base64
 import concurrent
 import functools
 import hashlib
+import importlib.abc
+import importlib.machinery
 import inspect
 import logging
 import logging.config
@@ -436,10 +439,10 @@ class Channel:
                 data = await queue.get()
                 if isinstance(data, tuple):
                     for part in data:
-                        logger.debug("send to writer: %s bytes", len(part))
+                        # logger.debug("send to writer: %s bytes", len(part))
                         writer.write(part)
                 else:
-                    logger.debug("send to writer: %s bytes", len(data))
+                    # logger.debug("send to writer: %s bytes", len(data))
                     writer.write(data)
 
                 queue.task_done()
@@ -468,11 +471,11 @@ class Channel:
 
             buffer[uid].extend(part)
 
-        if channel_name_length:
-            logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
+        # if channel_name_length:
+        #     logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
 
-        else:
-            logger.debug("Message %s, received: %s", uid, flags)
+        # else:
+        #     logger.debug("Message %s, received: %s", uid, flags)
 
         if flags.send_ack:
             # we have to acknowledge the reception
@@ -829,6 +832,7 @@ class Execute(Command):
 
         try:
             async for message in channel:
+                logger.debug("*** Received execution message: %s", message)
                 await message(io_queues)
 
         except asyncio.CancelledError:
@@ -938,23 +942,122 @@ class Export(Command):
         }
 
 
-# class FindModule(Command):
-#     def __init__(self):
-#         pass
+class FindModule(Command):
+
+    """Find a module on the remote side."""
+
+    async def local(self, remote_future):
+        module_loaded = await remote_future
+
+        return module_loaded
+
+    def get_module(self, import_missing=False):
+
+        module = sys.modules.get(self.module_name)
+
+        if not module and import_missing:
+            # import missing module
+            pass
+
+        if module:
+            is_package = bool(getattr(module, '__path__', None))
+            source = inspect.getsource(module)
+
+            return (is_package, source)
+
+    async def remote(self):
+        return self.get_module()
 
 
-class RemoteImporter:
+class LoopExecutor(concurrent.futures.Executor):
+    """An Executor subclass that uses an event loop
+    to execute calls asynchronously."""
 
-    def __init__(self, loop):
+    def __init__(self, loop=None):
+        """Initialize the executor with a given loop."""
+        self.loop = loop or asyncio.get_event_loop()
+
+    def submit(self, fn, *args, **kwargs):
+        """Schedule the callable, fn, to be executed as fn(*args **kwargs).
+        Return a Future object representing the execution of the callable."""
+        coro = asyncio.coroutine(fn)(*args, **kwargs)
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+
+
+def find_module_thread(cmd, loop):
+    module = asyncio.run_coroutine_threadsafe(cmd, loop=loop)
+    foo = module.result()
+
+    logger.debug("result: %s", module)
+
+
+class RemoteModuleFinder(importlib.abc.MetaPathFinder):
+
+    def __init__(self, io_queues, loop):
+        self.io_queues = io_queues
         self.loop = loop
 
-    def find_module(self, module_name, path=None):
+    def find_spec(self, module_name, path, target=None):
         # ask master for this module
 
+        logger.debug("Module lookup: %s", module_name)
+
+        find_module = FindModule(self.io_queues, module_name=module_name)
+        async def coro():
+            result = await find_module()
+            return result
+
+        t = threading.Thread(target=find_module_thread, args=(coro(), self.loop))
+        t.start()
+        t.join()
+
+        module = None
+        # module = future.result(10)
+        logger.debug("Module found for %s: %s", module_name, module)
+
+        if module:
+            spec = importlib.machinery.ModuleSpec(
+                name=module_name,
+                loader=RemoteModuleLoader(module_name, path, target),
+                origin='remote://{}'.format(module.__file__),
+                loader_state=1234,
+                is_package=module.__package__ and module.__path__
+            )
+            return spec
+
+    def load_module(self, module_name):
+        logger.debug("Load module: %s", module_name)
+
+
+class RemoteModuleLoader(importlib.abc.SourceLoader):
+    def __init__(self, fullname, path, target):
         pass
 
-    def load_module(self, loop):
-        pass
+    def get_data(self, path):
+        logger.debug('get_data: %s', path)
+
+    def get_filename(self, fullname):
+        logger.debug('get_filename: %s', fullname)
+
+    # def path_stats(self, path):
+    #     logger.debug('path_stats: %s', path)
+
+    # def set_data(self, path, data):
+    #     logger.debug('set_data: %s, %s', path, data)
+
+    # def get_code(self, fullname):
+    #     logger.debug('get_code: %s', fullname)
+
+    # def exec_module(self, module):
+    #     logger.debug('exec_module: %s', module)
+    #     logger.debug(dir(module))
+
+    # def get_source(self, fullname):
+    #     logger.debug('get_source: %s', fullname)
+
+    # def is_package(self, fullname):
+    #     logger.debug('is_package: %s', fullname)
 
 
 
@@ -1080,6 +1183,13 @@ def main(debug=False, log_config=None, **kwargs):
 
     # setup all plugin commands
     loop.run_until_complete(Command.remote_setup(io_queues))
+
+    # install import hook
+    remote_module_finder = RemoteModuleFinder(io_queues, loop)
+    sys.meta_path.append(remote_module_finder)
+
+    logger.debug("meta path: %s", sys.meta_path)
+
     try:
         loop.run_until_complete(
             run(

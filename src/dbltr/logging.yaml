@@ -6,8 +6,8 @@ formatters:
 handlers:
   console:
     # FIXME Executor disturbes uvloop
-    class: dbltr.core.ExecutorConsoleHandler
-    #class: logging.StreamHandler
+    #class: dbltr.core.ExecutorConsoleHandler
+    class: logging.StreamHandler
     level: DEBUG
     formatter: simple
     stream: ext://sys.stderr

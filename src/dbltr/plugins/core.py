@@ -4,6 +4,8 @@ Core features
 
 import asyncio
 import concurrent
+import traceback
+
 from dbltr import core
 
 
@@ -38,6 +40,28 @@ class Echo(core.Command):
             'params': self.params,
             'data': data
         }
+
+
+class InvokeImport(core.Command):
+    async def local(self, remote_future):
+        result = await remote_future
+        return result
+
+    async def remote(self):
+        try:
+            import dbltr.task
+
+        except ImportError:
+            core.logger.debug("Error:\n%s", traceback.format_exc())
+
+        # # echo = Echo(self.io_queues, foo='bar')
+        # module = core.FindModule(self.io_queues, module_name='dbltr.plugins.core')
+
+        # result = await module
+
+        # core.logger.debug("Module found: %s", result)
+
+        # return result
 
 
 class Copy(core.Command):

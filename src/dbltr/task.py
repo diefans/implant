@@ -21,3 +21,4 @@ class Task:
 
 
 class copy(Task):
+    pass
