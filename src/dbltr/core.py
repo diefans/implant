@@ -617,7 +617,9 @@ def exclusive(fun):
     lock = asyncio.Lock()
 
     async def locked_fun(*args, **kwargs):
+        logger.debug("Calling locked function: %s -> %s", lock, fun)
         async with lock:
+            logger.debug("Executing locked function: %s -> %s", lock, fun)
             return await fun(*args, **kwargs)
 
     return locked_fun
@@ -732,16 +734,16 @@ class Command(metaclass=CommandMeta):
         raise KeyError('The command `{}` does not exist!'.format(command_name))
 
     # TODO with loop.set_debug(True) it is possible to define `async def __await__(self)`
+    async def __call__(self):
+        execute = Execute(self.io_queues, self)
+        logger.debug("execute local: %s", execute)
+        result = await execute.local()
+
+        return result
+
     def __await__(self):
         """Execute the command by delegating to execution command."""
-        async def coro():
-            execute = Execute(self.io_queues, self)
-            logger.debug("execute local: %s", execute)
-            result = await execute.local()
-
-            return result
-
-        return coro().__await__()
+        return self().__await__()
 
     async def local(self, remote_future):
         raise NotImplementedError(
@@ -811,7 +813,7 @@ class Execute(Command):
 
         self.command = command
 
-    def __await__(self):
+    async def __call__(self):
         # forbid using Execute directly
         raise RuntimeError("Do not invoke `await Execute()` directly, instead use `await Command(**params)`)")
 
@@ -902,8 +904,8 @@ class Export(Command):
     """Export a plugin to remote."""
 
     @exclusive
-    async def __acall__(self):
-        return super(Export, self).__acall__()
+    async def __call__(self):
+        return await super(Export, self).__call__()
 
     async def local(self, remote_future):
         plugin = Plugin[self.plugin_name]
@@ -934,6 +936,26 @@ class Export(Command):
             'commands': list(Command.commands.keys()),
             'plugins': list(Plugin.plugins.keys())
         }
+
+
+# class FindModule(Command):
+#     def __init__(self):
+#         pass
+
+
+class RemoteImporter:
+
+    def __init__(self, loop):
+        self.loop = loop
+
+    def find_module(self, module_name, path=None):
+        # ask master for this module
+
+        pass
+
+    def load_module(self, loop):
+        pass
+
 
 
 async def run(*tasks):

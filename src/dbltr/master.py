@@ -276,12 +276,12 @@ async def feed_stdin_to_remotes(**options):
                     line = b'dbltr.core:Export plugin_name=debellator#core\n'
 
                 if remote.returncode is None:
-                    result = await _execute_command(remote.io_queues, line)
+                    # result = await _execute_command(remote.io_queues, line)
                     # result = await asyncio.ensure_future(_execute_command(remote, line))
-                    # result = await asyncio.gather(
-                    #     _execute_command(remote.io_queues, line),
-                    #     _execute_command(remote.io_queues, line),
-                    # )
+                    result = await asyncio.gather(
+                        _execute_command(remote.io_queues, line),
+                        _execute_command(remote.io_queues, line),
+                    )
 
                     print("< {}\n > ".format(result), end='')
 
