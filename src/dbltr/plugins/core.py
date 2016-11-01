@@ -45,6 +45,7 @@ class Echo(core.Command):
 
 class InvokeImport(core.Command):
     async def local(self, remote_future):
+        import bar
         result = await remote_future
         return result
 
@@ -62,10 +63,11 @@ class InvokeImport(core.Command):
                 core.logger.debug("start import")
                 import bar
                 # import dbltr.task
-                core.logger.debug("finished import")
+                core.logger.debug("finished import: %s", bar.foo())
 
             except ImportError:
                 core.logger.debug("Error:\n%s", traceback.format_exc())
+                raise
 
             finally:
                 thread_loop.close()

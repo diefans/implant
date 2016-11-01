@@ -152,36 +152,35 @@ def create_uid():
 
 class Uid:
 
-    fmt = "!dQQQ"
+    """Represent a uinique id for the current thread."""
 
     def __init__(self, time=None, id=None, tid=None, seq=None, bytes=None):
+        fmt = "!dQQQ"
         all_args = [time, id, tid, seq].count(None) == 0
 
         if not all_args:
             if bytes:
-                time, id, tid, seq = struct.unpack(self.fmt, bytes)
+                time, id, tid, seq = struct.unpack(fmt, bytes)
             else:
                 time, id, tid, seq = create_uid()
 
+        self.bytes = bytes or struct.pack(fmt, time, id, tid, seq)
         self.time = time
         self.id = id
         self.tid = tid
         self.seq = seq
-
-    @reify
-    def bytes(self):
-        uid_bytes = struct.pack(self.fmt, self.time, self.id, self.tid, self.seq)
-        return uid_bytes
 
     def __hash__(self):
         return hash(self.bytes)
 
     def __eq__(self, other):
         if isinstance(other, Uid):
-            return self.bytes == other.bytes
+            return (self.time, self.id, self.tid, self.seq) == (other.time, other.id, other.tid, other.seq)
+
+        return False
 
     def __str__(self):
-        return "{0.time}/{0.id}/{0.tid}/{0.seq}".format(self)
+        return '-'.join(map(str, (self.time, self.id, self.tid, self.seq)))
 
     def __msgpack_encode__(self):
         return self.bytes
@@ -946,7 +945,7 @@ class ExecuteException:
         future.set_exception(self.exception)
 
     def __msgpack_encode__(self):
-        return (self.fqin, pickle.dumps(self.exception), tb)
+        return (self.fqin, pickle.dumps(self.exception), self.tb)
 
     @classmethod
     def __msgpack_decode__(cls, encoded):
@@ -1158,70 +1157,20 @@ class FindModule(Command):
 
         if module:
             is_package = bool(getattr(module, '__path__', None))
+            logger.debug("module found: %s", module)
             source = inspect.getsource(module)
+            source_file = inspect.getsourcefile(module)
 
-            return (is_package, source)
+            return (is_package, source, source_file)
 
     async def remote(self):
         return self.get_module()
-
-
-class LoopExecutor(concurrent.futures.Executor):
-    """An Executor subclass that uses an event loop
-    to execute calls asynchronously."""
-
-    def __init__(self, loop=None):
-        """Initialize the executor with a given loop."""
-        self.loop = loop or asyncio.get_event_loop()
-
-    def submit(self, fn, *args, **kwargs):
-        """Schedule the callable, fn, to be executed as fn(*args **kwargs).
-        Return a Future object representing the execution of the callable."""
-        coro = asyncio.coroutine(fn)(*args, **kwargs)
-        return asyncio.run_coroutine_threadsafe(coro, self.loop)
-
-
-
-async def test_coro():
-    task = asyncio.Task.current_task()
-    loop = task._loop
-
-    logger.debug("loop: %s", loop)
-
-    await asyncio.sleep(0.1)
-
-
-
-def find_module_thread(cmd, loop):
-    thread_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(thread_loop)
-
-    future = asyncio.Future(loop=thread_loop)
-
-    async def wait_for_module():
-        module = asyncio.run_coroutine_threadsafe(test_coro(), loop=thread_loop)
-        logger.debug("wait for module: %s", asyncio.Task.current_task())
-        result = await future
-
-    thread_loop.run_until_complete(wait_for_module())
-
-
-    # foo = module.result()
-
-    # logger.debug("result: %s", module)
-
-
-class Foo():
-    pass
 
 
 async def foo(io_queues, module_name):
     loop = asyncio.get_event_loop()
     logger.debug("foo start: %s", threading.current_thread())
     await asyncio.sleep(1.0, loop=loop)
-
-    bar = Foo()
-
 
     # u = uuid.uuid1()
     logger.debug("foo uid")
@@ -1231,9 +1180,8 @@ async def foo(io_queues, module_name):
     result = await find_module
 
     logger.debug("foo finish: %s", result)
-    logger.debug("foo finish")
 
-    return 'foo'
+    return result
 
 
 async def call_find_module(io_queues, module_name):
@@ -1262,65 +1210,32 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
 
     def find_spec(self, module_name, path, target=None):
         # ask master for this module
-        logger.debug("current thread: %s", threading.current_thread())
-
         logger.debug("Module lookup: %s", module_name)
 
-        loop = asyncio.get_event_loop()
-
-        future = asyncio.Future()
-
-        # loop.call_soon_threadsafe(
-        #     asyncio.ensure_future, call_find_module(self.io_queues, module_name, future)
-        # )
-
-        # find_module = FindModule(self.io_queues, module_name=module_name)
-        # loop = asyncio.new_event_loop()
-
-        # async def coro():
-        #     logger.debug("run coro")
-        #     future = asyncio.run_coroutine_threadsafe(foo(self.main_loop), loop=loop)
-        #     return future.result()
         future = asyncio.run_coroutine_threadsafe(foo(self.io_queues, module_name), loop=self.main_loop)
-        result = future.result()
+        is_package, module_source, module_file = future.result()
 
-        logger.debug("result: %s", result)
+        logger.debug("Module found for %s: %s", module_name, module_file)
 
-        # future = asyncio.run_coroutine_threadsafe(foo(self.main_loop), loop=loop)
+        spec = importlib.machinery.ModuleSpec(
+            name=module_name,
+            loader=RemoteModuleLoader(module_source),
+            origin='remote://{}'.format(module_file),
+            loader_state=1234,
+            is_package=is_package
+        )
+        return spec
 
-        # loop.run_until_complete(call_find_module(self.io_queues, module_name))
-
-        # result = loop.run_until_complete(get_result())
-        # future.result()
-
-
-        module = None
-        # module = future.result(10)
-        logger.debug("Module found for %s: %s", module_name, module)
-
-        if module:
-            spec = importlib.machinery.ModuleSpec(
-                name=module_name,
-                loader=RemoteModuleLoader(module_name, path, target),
-                origin='remote://{}'.format(module.__file__),
-                loader_state=1234,
-                is_package=module.__package__ and module.__path__
-            )
-            return spec
-
-    def load_module(self, module_name):
-        logger.debug("Load module: %s", module_name)
+    # def load_module(self, module_name):
+    #     logger.debug("Load module: %s", module_name)
 
 
-class RemoteModuleLoader(importlib.abc.SourceLoader):
-    def __init__(self, fullname, path, target):
-        pass
+class RemoteModuleLoader(importlib.abc.InspectLoader):
+    def __init__(self, source_code):
+        self.source_code = source_code
 
-    def get_data(self, path):
-        logger.debug('get_data: %s', path)
-
-    def get_filename(self, fullname):
-        logger.debug('get_filename: %s', fullname)
+    def get_source(self, fullname):
+        return self.source_code
 
     # def path_stats(self, path):
     #     logger.debug('path_stats: %s', path)
