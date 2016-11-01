@@ -111,7 +111,7 @@ class TestChannel:
                         assert msg == 'bar'
 
                         uid, duration = await c.send('baz', ack=True)
-                        assert isinstance(uid, uuid.UUID)
+                        assert isinstance(uid, core.Uid)
                         assert isinstance(duration, float)
 
                         msg = await c
@@ -145,6 +145,5 @@ class TestChannel:
 
                     finally:
                         # shutdown channel communications
-                        # com_future.cancel()
-                        # await com_future
-                        pass
+                        com_future.cancel()
+                        await com_future

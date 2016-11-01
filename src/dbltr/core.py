@@ -23,6 +23,7 @@ import weakref
 import zlib
 from collections import defaultdict, namedtuple
 
+import msgpack
 import pkg_resources
 
 pkg_environment = pkg_resources.Environment()
@@ -30,48 +31,71 @@ pkg_environment = pkg_resources.Environment()
 logger = logging.getLogger(__name__)
 
 
-_uid = threading.local()
-def create_uid():
-    logger.debug("create_uid")
-    if getattr(_uid, "uid", None) is None:
-        thread = threading.current_thread()
-        logger.debug("new uid: %s", thread)
-        _uid.tid = thread.ident
-        _uid.id = id(thread)
-        _uid.uid = 0
+def encode_msgpack_default(data):
+    # use __msgpack__ if available
+    if hasattr(data, '__msgpack_encode__'):
+        data_type = type(data)
+        data_module = data_type.__module__
+        return {
+            '__custom_object__': True,
+            '__module__': data_module,
+            '__type__': data_type.__name__,
+            '__data__': data.__msgpack_encode__()
+        }
 
-    _uid.uid += 1
+    return data
+
+
+def decode_msgpack_default(encoded):
+    if encoded.get('__custom_object__', False):
+        # we have to search the class
+        module = sys.modules.get(encoded['__module__'])
+
+        if not module:
+            raise TypeError("The module of the encoded data type is not loaded: {}".format(encoded))
+
+        data_type = getattr(module, encoded['__type__'])
+
+        decoder = getattr(data_type, '__msgpack_decode__')
+
+        decoded = decoder(encoded['__data__'])
+
+        return decoded
+
+    return encoded
+
+
+def encode_msgpack(data):
     try:
-        uid = (time.time(), _uid.id, _uid.tid, _uid.uid)
+        logger.debug("encode: %s", type(data))
+        return msgpack.packb(data, default=encode_msgpack_default, use_bin_type=True, encoding="utf-8")
 
-        return uid
+    except:
+        logger.error("Error:\n%s", traceback.format_exc())
+        raise
 
-    finally:
-        logger.debug("finish: %s", uid)
+
+def decode_msgpack(data):
+    try:
+        return msgpack.unpackb(data, object_hook=decode_msgpack_default, encoding="utf-8")
+
+    except:
+        logger.error("Error:\n%s", traceback.format_exc())
+        raise
 
 
-class Uid(namedtuple('Uid', ('time', 'id', 'tid', 'seq'))):
+def encode_pickle(data):
+    return pickle.dumps(data)
 
-    fmt = "!dQQQ"
 
-    def __new__(cls, time=None, id=None, tid=None, seq=None, uid_bytes=None):
-        all_args = [time, id, tid, seq].count(None) == 0
+def decode_pickle(encoded):
+    return pickle.loads(encoded)
 
-        if not all_args:
-            if uid_bytes:
-                time, id, tid, seq = struct.unpack(cls.fmt, uid_bytes)
-            else:
-                time, id, tid, seq = create_uid()
 
-        return super(Uid, cls).__new__(cls, time, id, tid, seq)
-
-    @property
-    def bytes(self):
-        uid_bytes = struct.pack(self.fmt, self.time, self.id, self.tid, self.seq)
-        return uid_bytes
-
-    def __str__(self):
-        return "{0.time}/{0.id}/{0.tid}/{0.seq}>".format(self)
+encode = encode_msgpack
+decode = decode_msgpack
+# encode = encode_pickle
+# decode = decode_pickle
 
 
 class aenumerate:
@@ -104,6 +128,67 @@ class reify:
         val = self.wrapped(inst)
         setattr(inst, self.wrapped.__name__, val)
         return val
+
+
+_uid = threading.local()
+def create_uid():
+    logger.debug("create_uid")
+    if getattr(_uid, "uid", None) is None:
+        thread = threading.current_thread()
+        logger.debug("new uid: %s", thread)
+        _uid.tid = thread.ident
+        _uid.id = id(thread)
+        _uid.uid = 0
+
+    _uid.uid += 1
+    try:
+        uid = (time.time(), _uid.id, _uid.tid, _uid.uid)
+
+        return uid
+
+    finally:
+        logger.debug("finish: %s", uid)
+
+
+class Uid:
+
+    fmt = "!dQQQ"
+
+    def __init__(self, time=None, id=None, tid=None, seq=None, bytes=None):
+        all_args = [time, id, tid, seq].count(None) == 0
+
+        if not all_args:
+            if bytes:
+                time, id, tid, seq = struct.unpack(self.fmt, bytes)
+            else:
+                time, id, tid, seq = create_uid()
+
+        self.time = time
+        self.id = id
+        self.tid = tid
+        self.seq = seq
+
+    @reify
+    def bytes(self):
+        uid_bytes = struct.pack(self.fmt, self.time, self.id, self.tid, self.seq)
+        return uid_bytes
+
+    def __hash__(self):
+        return hash(self.bytes)
+
+    def __eq__(self, other):
+        if isinstance(other, Uid):
+            return self.bytes == other.bytes
+
+    def __str__(self):
+        return "{0.time}/{0.id}/{0.tid}/{0.seq}".format(self)
+
+    def __msgpack_encode__(self):
+        return self.bytes
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded):
+        return cls(bytes=encoded)
 
 
 def create_module(module_name, is_package=False):
@@ -397,7 +482,7 @@ class Channel:
         assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
         uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
 
-        uid = Uid(uid_bytes=uid_bytes)
+        uid = Uid(bytes=uid_bytes)
 
         logger.debug("uid: %s", uid)
 
@@ -416,12 +501,11 @@ class Channel:
         loop = asyncio.get_event_loop()
 
         logger.debug("after uid: %s", uid)
-        logger.debug("foo: %s", json.dumps(data))
 
         try:
             logger.debug("thread: %s", threading.current_thread())
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                pickled_data = await loop.run_in_executor(executor, pickle.dumps, data)
+                pickled_data = await loop.run_in_executor(executor, encode, data)
                 # json_data = await loop.run_in_executor(executor, json.dumps, data)
             # logger.debug("json: %s", json_data)
             logger.debug("task: %s", asyncio.Task.current_task())
@@ -548,7 +632,7 @@ class Channel:
         if flags.eom:
             # put message into channel queue
             if uid in buffer and channel_name_length:
-                msg = pickle.loads(buffer[uid])
+                msg = decode(buffer[uid])
                 await io_queues[channel_name].put(msg)
                 del buffer[uid]
 
@@ -850,31 +934,67 @@ class Command(metaclass=CommandMeta):
         return self.channel_name
 
 
-class ExecuteResult(namedtuple('ExecuteResult', ('fqin', 'result', 'exception', 'traceback'))):
-    def __new__(cls, fqin, result=None, exception=None, traceback=None):        # noqa
-        tb = traceback.format_exc() if exception else traceback
-
-        return super(ExecuteResult, cls).__new__(cls, fqin, result, exception, tb)
+class ExecuteException:
+    def __init__(self, fqin, exception, tb=None):
+        self.fqin = fqin
+        self.exception = exception
+        self.tb = tb or traceback.format_exc()
 
     async def __call__(self, io_queues):
         future = Execute.pending_commands[self.fqin]
+        logger.error("Remote exception for %s:\n%s", self.fqin, self.tb)
+        future.set_exception(self.exception)
 
-        if not self.exception:
-            future.set_result(self.result)
+    def __msgpack_encode__(self):
+        return (self.fqin, pickle.dumps(self.exception), tb)
 
-        else:
-            logger.error("Remote exception for %s:\n%s", self.fqin, self.tb)
-            future.set_exception(self.exception)
+    @classmethod
+    def __msgpack_decode__(cls, encoded):
+        fqin, exc, tb = encoded
+
+        return cls(fqin, pickle.loads(exc), tb)
 
 
-class ExecuteArgs(namedtuple('ExecuteArgs', ('fqin', 'params'))):
-    def __new__(cls, fqin, params=None):
-        return super(ExecuteArgs, cls).__new__(cls, fqin, params or {})
+class ExecuteResult:
+    def __init__(self, fqin, result=None):        # noqa
+        logger.debug("create execute result: %s", fqin)
+        self.fqin = fqin
+        self.result = result
+
+    async def __call__(self, io_queues):
+        future = Execute.pending_commands[self.fqin]
+        future.set_result(self.result)
+
+    def __msgpack_encode__(self):
+        return (self.fqin, self.result)
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded):
+        logger.debug("execute result: %s", encoded)
+        fqin, result = encoded
+
+        return cls(fqin, result)
+
+
+
+class ExecuteArgs:
+    def __init__(self, fqin, params=None):
+        self.fqin = fqin
+        self.params = params
 
     async def __call__(self, io_queues):
         command = Execute.create_command(io_queues, *self.fqin, **self.params)
         execute = Execute(io_queues, command)
         asyncio.ensure_future(execute.remote())
+
+    def __msgpack_encode__(self):
+        return (self.fqin, self.params)
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded):
+        fqin, params = encoded
+
+        return cls(fqin, params)
 
 
 class Execute(Command):
@@ -971,7 +1091,7 @@ class Execute(Command):
 
         except Exception as ex:
             logger.error("traceback:\n%s", traceback.format_exc())
-            await self.channel.send(ExecuteResult(fqin, exception=ex))
+            await self.channel.send(ExecuteException(fqin, exception=ex))
 
             raise
 

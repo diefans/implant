@@ -12,7 +12,7 @@ import types
 import zlib
 from collections import namedtuple
 
-from dbltr import core, task
+from dbltr import core, task, mp
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +27,18 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
     bootstrap = (
         'import sys, imp, base64, zlib;'
-        'sys.modules["msgpack"] = msgpack = imp.new_module("msgpack"); setattr(msgpack, "__path__", []);'
+
+        'sys.modules["msgpack"] = msgpack = imp.new_module("msgpack");'
+        'c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "<msgpack>", "exec");'
+        'exec(c, msgpack.__dict__);'
+
         'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);'
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'
+
         'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "<dbltr.core>", "exec");'
         'exec(c, core.__dict__);'
+
         'core.main(**core.decode_options(b"{options}"));'
     )
     """Bootstrapping of core module on remote."""
@@ -82,8 +88,11 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
             else:
                 bootstrap = self.bootstrap
 
+            msgpack_code = get_python_source(mp).encode()
+
             yield bootstrap.format(
                 code=base64.b64encode(zlib.compress(code, 9)).decode(),
+                msgpack_code=base64.b64encode(zlib.compress(msgpack_code, 9)).decode(),
                 options=core.encode_options(**options),
             )
 
