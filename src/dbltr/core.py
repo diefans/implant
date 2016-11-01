@@ -418,7 +418,6 @@ class Channel:
         logger.debug("after uid: %s", uid)
         logger.debug("foo: %s", json.dumps(data))
 
-xxx
         try:
             logger.debug("thread: %s", threading.current_thread())
             with concurrent.futures.ThreadPoolExecutor() as executor:
