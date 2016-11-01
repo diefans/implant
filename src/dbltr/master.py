@@ -27,6 +27,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
     bootstrap = (
         'import sys, imp, base64, zlib;'
+        'sys.modules["msgpack"] = msgpack = imp.new_module("msgpack"); setattr(msgpack, "__path__", []);'
         'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);'
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'

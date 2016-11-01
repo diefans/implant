@@ -4,6 +4,7 @@ Core features
 
 import asyncio
 import concurrent
+import threading
 import traceback
 
 from dbltr import core
@@ -48,11 +49,29 @@ class InvokeImport(core.Command):
         return result
 
     async def remote(self):
-        try:
-            import dbltr.task
+        task = asyncio.Task.current_task()
+        loop = task._loop
+        core.logger.debug("default thread: %s", threading.current_thread())
 
-        except ImportError:
-            core.logger.debug("Error:\n%s", traceback.format_exc())
+        def import_stuff():
+            thread_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(thread_loop)
+
+            core.logger.debug("import thread: %s", threading.current_thread())
+            try:
+                core.logger.debug("start import")
+                import bar
+                # import dbltr.task
+                core.logger.debug("finished import")
+
+            except ImportError:
+                core.logger.debug("Error:\n%s", traceback.format_exc())
+
+            finally:
+                thread_loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(executor, import_stuff)
 
         # # echo = Echo(self.io_queues, foo='bar')
         # module = core.FindModule(self.io_queues, module_name='dbltr.plugins.core')

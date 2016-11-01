@@ -1,6 +1,7 @@
 """The core module is transfered to the remote process and will bootstrap pipe communication."""
 import threading
 import asyncio
+import json
 import base64
 import concurrent
 import functools
@@ -18,7 +19,6 @@ import sys
 import time
 import traceback
 import types
-import uuid
 import weakref
 import zlib
 from collections import defaultdict, namedtuple
@@ -28,6 +28,50 @@ import pkg_resources
 pkg_environment = pkg_resources.Environment()
 
 logger = logging.getLogger(__name__)
+
+
+_uid = threading.local()
+def create_uid():
+    logger.debug("create_uid")
+    if getattr(_uid, "uid", None) is None:
+        thread = threading.current_thread()
+        logger.debug("new uid: %s", thread)
+        _uid.tid = thread.ident
+        _uid.id = id(thread)
+        _uid.uid = 0
+
+    _uid.uid += 1
+    try:
+        uid = (time.time(), _uid.id, _uid.tid, _uid.uid)
+
+        return uid
+
+    finally:
+        logger.debug("finish: %s", uid)
+
+
+class Uid(namedtuple('Uid', ('time', 'id', 'tid', 'seq'))):
+
+    fmt = "!dQQQ"
+
+    def __new__(cls, time=None, id=None, tid=None, seq=None, uid_bytes=None):
+        all_args = [time, id, tid, seq].count(None) == 0
+
+        if not all_args:
+            if uid_bytes:
+                time, id, tid, seq = struct.unpack(cls.fmt, uid_bytes)
+            else:
+                time, id, tid, seq = create_uid()
+
+        return super(Uid, cls).__new__(cls, time, id, tid, seq)
+
+    @property
+    def bytes(self):
+        uid_bytes = struct.pack(self.fmt, self.time, self.id, self.tid, self.seq)
+        return uid_bytes
+
+    def __str__(self):
+        return "{0.time}/{0.id}/{0.tid}/{0.seq}>".format(self)
 
 
 class aenumerate:
@@ -85,11 +129,6 @@ def create_module(module_name, is_package=False):
         sys.modules[module_name] = module
 
     return sys.modules[module_name]
-
-
-def uuid1_time(uid):
-    """Calculate the time of an UUID."""
-    return (uid.time - 0x01b21dd213814000) * 100 / 1e9
 
 
 class IoQueues:
@@ -260,7 +299,7 @@ class ChunkFlags(dict):
         return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
 
 
-HEADER_FMT = '!16sQHI'
+HEADER_FMT = '!32sQHI'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 
@@ -334,7 +373,7 @@ class Channel:
         {data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
 
         """
-        assert isinstance(uid, uuid.UUID), "uid must be an UUID instance"
+        assert isinstance(uid, Uid), "uid must be an Uid instance"
 
         if flags is None:
             flags = {}
@@ -358,7 +397,11 @@ class Channel:
         assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
         uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
 
-        return uuid.UUID(bytes=uid_bytes), ChunkFlags.decode(flags_encoded), channel_name_length, data_length
+        uid = Uid(uid_bytes=uid_bytes)
+
+        logger.debug("uid: %s", uid)
+
+        return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
     async def send(self, data, ack=False, compress=6):
         """Send data in a pickled form to the channel.
@@ -368,10 +411,28 @@ class Channel:
         :param compress: compress the data with zlib
 
         """
-        uid = uuid.uuid1()
+        uid = Uid()
         name = self.name.encode()
+        loop = asyncio.get_event_loop()
 
-        pickled_data = pickle.dumps(data)
+        logger.debug("after uid: %s", uid)
+        logger.debug("foo: %s", json.dumps(data))
+
+xxx
+        try:
+            logger.debug("thread: %s", threading.current_thread())
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                pickled_data = await loop.run_in_executor(executor, pickle.dumps, data)
+                # json_data = await loop.run_in_executor(executor, json.dumps, data)
+            # logger.debug("json: %s", json_data)
+            logger.debug("task: %s", asyncio.Task.current_task())
+
+                # pickled_data = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+
+        except:
+            logger.error("Error: %s", traceback.format_exc())
+
+        logger.debug("after uid: %s", uid)
 
         logger.debug("Channel %s sends: %s bytes", self.name, len(pickled_data))
 
@@ -452,6 +513,10 @@ class Channel:
             if queue.qsize():
                 logger.warning("Send queue was not empty when canceled!")
 
+        except:
+            logger.error("Error while sending:\n%s", traceback.format_exc())
+            raise
+
     @classmethod
     async def _receive_single_message(cls, io_queues, reader, buffer):
         # read header
@@ -471,11 +536,11 @@ class Channel:
 
             buffer[uid].extend(part)
 
-        # if channel_name_length:
-        #     logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
+        if channel_name_length:
+            logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
 
-        # else:
-        #     logger.debug("Message %s, received: %s", uid, flags)
+        else:
+            logger.debug("Message %s, received: %s", uid, flags)
 
         if flags.send_ack:
             # we have to acknowledge the reception
@@ -491,7 +556,7 @@ class Channel:
             # acknowledge reception
             ack_future = cls.acknowledgements.get(uid)
             if ack_future and flags.recv_ack:
-                duration = time.time() - uuid1_time(uid)
+                duration = time.time() - uid.time
                 ack_future.set_result((uid, duration))
 
     @classmethod
@@ -683,8 +748,12 @@ class CommandMeta(type):
             await func(*args, **kwargs)
 
     def create_reference(cls, uid, inst):
+        logger.debug("create fqin")
         fqin = (cls.fqn, uid)
+        logger.debug("create reference")
         cls.command_instances[fqin] = inst
+        logger.debug("end reference")
+
 
     def __init__(cls, name, bases, dct):
         type.__init__(cls, name, bases, dct)
@@ -696,13 +765,20 @@ class Command(metaclass=CommandMeta):
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
     def __init__(self, io_queues, command_uid=None, **params):
-        super(Command, self).__init__()
+        logger.debug("init %s", self.__class__)
 
-        self.uid = command_uid or uuid.uuid1()
+        super(Command, self).__init__()
+        logger.debug("init 2 %s", self.__class__)
+
+        self.uid = command_uid or Uid()
+        logger.debug("init 3 %s", self.__class__)
         self.io_queues = io_queues
+        logger.debug("init 4 %s", self.__class__)
         self.params = params
 
+        logger.debug("init 5 %s", self.__class__)
         self.__class__.create_reference(self.uid, self)
+        logger.debug("end init: %s", self.__class__)
 
     def __getattr__(self, name):
         try:
@@ -857,6 +933,7 @@ class Execute(Command):
         """Create remote command and yield its future."""
         class _context:
             async def __aenter__(ctx):      # noqa
+                logger.debug("enter remote context: %s", self.command)
                 await self.channel.send(ExecuteArgs(self.command.fqin, self.command.params), ack=True)
                 future = self.pending_commands[self.command.channel_name]
 
@@ -870,6 +947,7 @@ class Execute(Command):
     async def local(self):
         async with self.remote_future() as future:
             try:
+                logger.debug("excute command: %s", self.command)
                 # execute local side of command
                 result = await self.command.local(remote_future=future)
                 future.result()
@@ -985,32 +1063,117 @@ class LoopExecutor(concurrent.futures.Executor):
 
 
 
-def find_module_thread(cmd, loop):
-    module = asyncio.run_coroutine_threadsafe(cmd, loop=loop)
-    foo = module.result()
+async def test_coro():
+    task = asyncio.Task.current_task()
+    loop = task._loop
 
-    logger.debug("result: %s", module)
+    logger.debug("loop: %s", loop)
+
+    await asyncio.sleep(0.1)
+
+
+
+def find_module_thread(cmd, loop):
+    thread_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(thread_loop)
+
+    future = asyncio.Future(loop=thread_loop)
+
+    async def wait_for_module():
+        module = asyncio.run_coroutine_threadsafe(test_coro(), loop=thread_loop)
+        logger.debug("wait for module: %s", asyncio.Task.current_task())
+        result = await future
+
+    thread_loop.run_until_complete(wait_for_module())
+
+
+    # foo = module.result()
+
+    # logger.debug("result: %s", module)
+
+
+class Foo():
+    pass
+
+
+async def foo(io_queues, module_name):
+    loop = asyncio.get_event_loop()
+    logger.debug("foo start: %s", threading.current_thread())
+    await asyncio.sleep(1.0, loop=loop)
+
+    bar = Foo()
+
+
+    # u = uuid.uuid1()
+    logger.debug("foo uid")
+    u = Uid()
+    logger.debug("foo uid: %s", u)
+    find_module = FindModule(io_queues, module_name=module_name)
+    result = await find_module
+
+    logger.debug("foo finish: %s", result)
+    logger.debug("foo finish")
+
+    return 'foo'
+
+
+async def call_find_module(io_queues, module_name):
+    logger.debug("find thread: %s", threading.current_thread())
+
+    loop = asyncio.get_event_loop()
+    async def coro():
+        find_module = FindModule(io_queues, module_name=module_name)
+
+        result = await find_module
+
+        return result
+
+
+    future = asyncio.run_coroutine_threadsafe(coro(), loop)
+    future.result()
+    # loop.call_soon_threadsafe(coro)
 
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
+    # http://stackoverflow.com/questions/32059732/send-asyncio-tasks-to-loop-running-in-other-thread
 
     def __init__(self, io_queues, loop):
         self.io_queues = io_queues
-        self.loop = loop
+        self.main_loop = loop
 
     def find_spec(self, module_name, path, target=None):
         # ask master for this module
+        logger.debug("current thread: %s", threading.current_thread())
 
         logger.debug("Module lookup: %s", module_name)
 
-        find_module = FindModule(self.io_queues, module_name=module_name)
-        async def coro():
-            result = await find_module()
-            return result
+        loop = asyncio.get_event_loop()
 
-        t = threading.Thread(target=find_module_thread, args=(coro(), self.loop))
-        t.start()
-        t.join()
+        future = asyncio.Future()
+
+        # loop.call_soon_threadsafe(
+        #     asyncio.ensure_future, call_find_module(self.io_queues, module_name, future)
+        # )
+
+        # find_module = FindModule(self.io_queues, module_name=module_name)
+        # loop = asyncio.new_event_loop()
+
+        # async def coro():
+        #     logger.debug("run coro")
+        #     future = asyncio.run_coroutine_threadsafe(foo(self.main_loop), loop=loop)
+        #     return future.result()
+        future = asyncio.run_coroutine_threadsafe(foo(self.io_queues, module_name), loop=self.main_loop)
+        result = future.result()
+
+        logger.debug("result: %s", result)
+
+        # future = asyncio.run_coroutine_threadsafe(foo(self.main_loop), loop=loop)
+
+        # loop.run_until_complete(call_find_module(self.io_queues, module_name))
+
+        # result = loop.run_until_complete(get_result())
+        # future.result()
+
 
         module = None
         # module = future.result(10)

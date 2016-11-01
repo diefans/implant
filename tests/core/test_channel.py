@@ -39,7 +39,7 @@ def test_flags(kwargs, result):
 @pytest.yield_fixture
 def event_loop():
     try:
-        import uvloop
+        import uvloop_
         loop = uvloop.new_event_loop()
 
     except ImportError:
@@ -57,19 +57,18 @@ class TestChannel:
 
     @pytest.mark.asyncio
     async def test_send(self):
-        import uuid
         import pickle
 
         from dbltr import core
 
-        uid = uuid.uuid1()
+        uid = core.Uid()
 
         # set chunksize
         data = b'1234567890' * 10
         chunk_size, rest = divmod(len(pickle.dumps(data)), 10)
 
         with mock.patch.object(core.Channel, 'chunk_size', chunk_size):
-            with mock.patch('uuid.uuid1.__call__') as mock_uuid:
+            with mock.patch.object(core.Uid, '__call__') as mock_uuid:
                 mock_uuid.return_value = uid
                 c = core.Channel('foo')
                 queue = c.io_queues.send
@@ -146,5 +145,6 @@ class TestChannel:
 
                     finally:
                         # shutdown channel communications
-                        com_future.cancel()
-                        await com_future
+                        # com_future.cancel()
+                        # await com_future
+                        pass
