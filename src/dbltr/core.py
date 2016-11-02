@@ -67,7 +67,6 @@ def decode_msgpack_default(encoded):
 
 def encode_msgpack(data):
     try:
-        logger.debug("encode: %s", type(data))
         return msgpack.packb(data, default=encode_msgpack_default, use_bin_type=True, encoding="utf-8")
 
     except:
@@ -132,22 +131,16 @@ class reify:
 
 _uid = threading.local()
 def create_uid():
-    logger.debug("create_uid")
     if getattr(_uid, "uid", None) is None:
         thread = threading.current_thread()
-        logger.debug("new uid: %s", thread)
         _uid.tid = thread.ident
         _uid.id = id(thread)
         _uid.uid = 0
 
     _uid.uid += 1
-    try:
-        uid = (time.time(), _uid.id, _uid.tid, _uid.uid)
+    uid = (time.time(), _uid.id, _uid.tid, _uid.uid)
 
-        return uid
-
-    finally:
-        logger.debug("finish: %s", uid)
+    return uid
 
 
 class Uid:
@@ -482,9 +475,6 @@ class Channel:
         uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
 
         uid = Uid(bytes=uid_bytes)
-
-        logger.debug("uid: %s", uid)
-
         return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
     async def send(self, data, ack=False, compress=6):
@@ -499,22 +489,8 @@ class Channel:
         name = self.name.encode()
         loop = asyncio.get_event_loop()
 
-        logger.debug("after uid: %s", uid)
-
-        try:
-            logger.debug("thread: %s", threading.current_thread())
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                pickled_data = await loop.run_in_executor(executor, encode, data)
-                # json_data = await loop.run_in_executor(executor, json.dumps, data)
-            # logger.debug("json: %s", json_data)
-            logger.debug("task: %s", asyncio.Task.current_task())
-
-                # pickled_data = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
-
-        except:
-            logger.error("Error: %s", traceback.format_exc())
-
-        logger.debug("after uid: %s", uid)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            pickled_data = await loop.run_in_executor(executor, encode, data)
 
         logger.debug("Channel %s sends: %s bytes", self.name, len(pickled_data))
 
@@ -830,12 +806,8 @@ class CommandMeta(type):
             await func(*args, **kwargs)
 
     def create_reference(cls, uid, inst):
-        logger.debug("create fqin")
         fqin = (cls.fqn, uid)
-        logger.debug("create reference")
         cls.command_instances[fqin] = inst
-        logger.debug("end reference")
-
 
     def __init__(cls, name, bases, dct):
         type.__init__(cls, name, bases, dct)
@@ -847,20 +819,11 @@ class Command(metaclass=CommandMeta):
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
     def __init__(self, io_queues, command_uid=None, **params):
-        logger.debug("init %s", self.__class__)
-
         super(Command, self).__init__()
-        logger.debug("init 2 %s", self.__class__)
-
         self.uid = command_uid or Uid()
-        logger.debug("init 3 %s", self.__class__)
         self.io_queues = io_queues
-        logger.debug("init 4 %s", self.__class__)
         self.params = params
-
-        logger.debug("init 5 %s", self.__class__)
         self.__class__.create_reference(self.uid, self)
-        logger.debug("end init: %s", self.__class__)
 
     def __getattr__(self, name):
         try:
@@ -897,7 +860,6 @@ class Command(metaclass=CommandMeta):
     # TODO with loop.set_debug(True) it is possible to define `async def __await__(self)`
     async def __call__(self):
         execute = Execute(self.io_queues, self)
-        logger.debug("execute local: %s", execute)
         result = await execute.local()
 
         return result
@@ -956,7 +918,6 @@ class ExecuteException:
 
 class ExecuteResult:
     def __init__(self, fqin, result=None):        # noqa
-        logger.debug("create execute result: %s", fqin)
         self.fqin = fqin
         self.result = result
 
@@ -969,11 +930,9 @@ class ExecuteResult:
 
     @classmethod
     def __msgpack_decode__(cls, encoded):
-        logger.debug("execute result: %s", encoded)
         fqin, result = encoded
 
         return cls(fqin, result)
-
 
 
 class ExecuteArgs:
@@ -1051,7 +1010,6 @@ class Execute(Command):
         """Create remote command and yield its future."""
         class _context:
             async def __aenter__(ctx):      # noqa
-                logger.debug("enter remote context: %s", self.command)
                 await self.channel.send(ExecuteArgs(self.command.fqin, self.command.params), ack=True)
                 future = self.pending_commands[self.command.channel_name]
 
@@ -1065,7 +1023,7 @@ class Execute(Command):
     async def local(self):
         async with self.remote_future() as future:
             try:
-                logger.debug("excute command: %s", self.command)
+                logger.debug("Excute command: %s", self.command)
                 # execute local side of command
                 result = await self.command.local(remote_future=future)
                 future.result()
@@ -1073,6 +1031,7 @@ class Execute(Command):
 
             except:     # noqa
                 logger.error("Error while executing command: %s\n%s", self.command, traceback.format_exc())
+                raise
 
             finally:
                 # cleanup channel
@@ -1138,6 +1097,38 @@ class Export(Command):
         }
 
 
+class InvokeImport(Command):
+    async def local(self, remote_future):
+        # __import__('dbltr.plugins.core', fromlist=[])
+        importlib.import_module(self.fullname)
+        result = await remote_future
+        return result
+
+    async def remote(self):
+        task = asyncio.Task.current_task()
+        loop = task._loop
+
+        def import_stuff():
+            thread_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(thread_loop)
+
+            try:
+                # __import__('dbltr.plugins.core', fromlist=[])
+                # import dbltr.plugins.core
+                importlib.import_module(self.fullname)
+                # import dbltr.task
+
+            except ImportError:
+                logger.debug("Error when importing %s:\n%s", self.fullname, traceback.format_exc())
+                raise
+
+            finally:
+                thread_loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(executor, import_stuff)
+
+
 class FindModule(Command):
 
     """Find a module on the remote side."""
@@ -1156,49 +1147,26 @@ class FindModule(Command):
             pass
 
         if module:
-            is_package = bool(getattr(module, '__path__', None))
+            is_package = bool(getattr(module, '__path__', None) is not None)
             logger.debug("module found: %s", module)
-            source = inspect.getsource(module)
-            source_file = inspect.getsourcefile(module)
+            try:
+                source_file = inspect.getsourcefile(module)
 
-            return (is_package, source, source_file)
+                try:
+                    source = inspect.getsource(module)
+                except OSError:
+                    # when source is empty
+                    source = ''
+
+                return (is_package, source, source_file)
+
+            except TypeError:
+                # this fails with a type error when a module is created without source file
+                logger.debug("***\n" * 10)
+                pass
 
     async def remote(self):
         return self.get_module()
-
-
-async def foo(io_queues, module_name):
-    loop = asyncio.get_event_loop()
-    logger.debug("foo start: %s", threading.current_thread())
-    await asyncio.sleep(1.0, loop=loop)
-
-    # u = uuid.uuid1()
-    logger.debug("foo uid")
-    u = Uid()
-    logger.debug("foo uid: %s", u)
-    find_module = FindModule(io_queues, module_name=module_name)
-    result = await find_module
-
-    logger.debug("foo finish: %s", result)
-
-    return result
-
-
-async def call_find_module(io_queues, module_name):
-    logger.debug("find thread: %s", threading.current_thread())
-
-    loop = asyncio.get_event_loop()
-    async def coro():
-        find_module = FindModule(io_queues, module_name=module_name)
-
-        result = await find_module
-
-        return result
-
-
-    future = asyncio.run_coroutine_threadsafe(coro(), loop)
-    future.result()
-    # loop.call_soon_threadsafe(coro)
 
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
@@ -1212,50 +1180,46 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         # ask master for this module
         logger.debug("Module lookup: %s", module_name)
 
-        future = asyncio.run_coroutine_threadsafe(foo(self.io_queues, module_name), loop=self.main_loop)
-        is_package, module_source, module_file = future.result()
+        future = asyncio.run_coroutine_threadsafe(FindModule(self.io_queues, module_name=module_name)(), loop=self.main_loop)
+        module_data = future.result()
 
-        logger.debug("Module found for %s: %s", module_name, module_file)
+        if module_data:
 
-        spec = importlib.machinery.ModuleSpec(
-            name=module_name,
-            loader=RemoteModuleLoader(module_source),
-            origin='remote://{}'.format(module_file),
-            loader_state=1234,
-            is_package=is_package
-        )
-        return spec
+            is_package, module_source, module_file = module_data
 
-    # def load_module(self, module_name):
-    #     logger.debug("Load module: %s", module_name)
+            logger.debug("Module found for %s: %s", module_name, module_file)
+            origin = 'remote://{}'.format(module_file)
+
+            spec = importlib.machinery.ModuleSpec(
+                name=module_name,
+                loader=RemoteModuleLoader(module_source, filename=origin, is_package=is_package),
+                origin=origin,
+                loader_state=1234,
+                is_package=is_package
+            )
+            return spec
+
+        else:
+            logger.debug("No module found for %s", module_name)
 
 
-class RemoteModuleLoader(importlib.abc.InspectLoader):
-    def __init__(self, source_code):
-        self.source_code = source_code
+class RemoteModuleLoader(importlib.abc.ExecutionLoader):
+    def __init__(self, source, filename=None, is_package=False):
+        self.source = source
+        self.filename = filename
+        self._is_package = is_package
+
+    def is_package(self):
+        return self._is_package
+
+    def get_filename(self, fullname):
+        if not self.filename:
+            raise ImportError
+
+        return self.filename
 
     def get_source(self, fullname):
-        return self.source_code
-
-    # def path_stats(self, path):
-    #     logger.debug('path_stats: %s', path)
-
-    # def set_data(self, path, data):
-    #     logger.debug('set_data: %s, %s', path, data)
-
-    # def get_code(self, fullname):
-    #     logger.debug('get_code: %s', fullname)
-
-    # def exec_module(self, module):
-    #     logger.debug('exec_module: %s', module)
-    #     logger.debug(dir(module))
-
-    # def get_source(self, fullname):
-    #     logger.debug('get_source: %s', fullname)
-
-    # def is_package(self, fullname):
-    #     logger.debug('is_package: %s', fullname)
-
+        return self.source
 
 
 async def run(*tasks):

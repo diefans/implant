@@ -43,48 +43,6 @@ class Echo(core.Command):
         }
 
 
-class InvokeImport(core.Command):
-    async def local(self, remote_future):
-        import bar
-        result = await remote_future
-        return result
-
-    async def remote(self):
-        task = asyncio.Task.current_task()
-        loop = task._loop
-        core.logger.debug("default thread: %s", threading.current_thread())
-
-        def import_stuff():
-            thread_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(thread_loop)
-
-            core.logger.debug("import thread: %s", threading.current_thread())
-            try:
-                core.logger.debug("start import")
-                import bar
-                # import dbltr.task
-                core.logger.debug("finished import: %s", bar.foo())
-
-            except ImportError:
-                core.logger.debug("Error:\n%s", traceback.format_exc())
-                raise
-
-            finally:
-                thread_loop.close()
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            result = await loop.run_in_executor(executor, import_stuff)
-
-        # # echo = Echo(self.io_queues, foo='bar')
-        # module = core.FindModule(self.io_queues, module_name='dbltr.plugins.core')
-
-        # result = await module
-
-        # core.logger.debug("Module found: %s", result)
-
-        # return result
-
-
 class Copy(core.Command):
     def __init__(self, *args, **kwargs):
         super(Copy, self).__init__(*args, **kwargs)

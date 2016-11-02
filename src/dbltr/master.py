@@ -17,10 +17,6 @@ from dbltr import core, task, mp
 logger = logging.getLogger(__name__)
 
 
-def get_python_source(obj):
-    return inspect.getsource(obj)
-
-
 class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
     """A unique representation of a Remote."""
@@ -29,14 +25,14 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
         'import sys, imp, base64, zlib;'
 
         'sys.modules["msgpack"] = msgpack = imp.new_module("msgpack");'
-        'c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "<msgpack>", "exec");'
+        'c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec");'
         'exec(c, msgpack.__dict__);'
 
         'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);'
         'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
         'dbltr.__dict__["core"] = core;'
 
-        'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "<dbltr.core>", "exec");'
+        'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True);'
         'exec(c, core.__dict__);'
 
         'core.main(**core.decode_options(b"{options}"));'
@@ -52,6 +48,17 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
             options = {}
 
         assert isinstance(options, dict), 'options must be a dict'
+
+        if code is None:
+            code = sys.modules[__name__]
+
+        if isinstance(code, types.ModuleType):
+            code_source = inspect.getsource(code).encode()
+            code_path = 'remote://{}'.format(inspect.getsourcefile(code))
+
+        else:
+            code_source = code
+            code_path = 'remote-string://'
 
         def _gen():
             # ssh
@@ -88,11 +95,14 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
             else:
                 bootstrap = self.bootstrap
 
-            msgpack_code = get_python_source(mp).encode()
+            msgpack_code = inspect.getsource(mp).encode()
+            msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(mp))
 
             yield bootstrap.format(
-                code=base64.b64encode(zlib.compress(code, 9)).decode(),
+                code=base64.b64encode(zlib.compress(code_source, 9)).decode(),
+                code_path=code_path,
                 msgpack_code=base64.b64encode(zlib.compress(msgpack_code, 9)).decode(),
+                msgpack_code_path=msgpack_code_path,
                 options=core.encode_options(**options),
             )
 
@@ -164,12 +174,6 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
         if target is None:
             target = Target()
-
-        if code is None:
-            code = sys.modules[__name__]
-
-        if isinstance(code, types.ModuleType):
-            code = get_python_source(code).encode()
 
         command_args = target.command_args(code, options=options, python_bin=python_bin)
 
@@ -286,7 +290,7 @@ async def feed_stdin_to_remotes(**options):
                     line = b'dbltr.core:Export plugin_name=debellator#core\n'
 
                 if line == b'i\n':
-                    line = b'debellator#core:InvokeImport\n'
+                    line = b'dbltr.core:InvokeImport fullname=dbltr.plugins.core\n'
 
                 if remote.returncode is None:
                     result = await _execute_command(remote.io_queues, line)
