@@ -755,22 +755,30 @@ class CommandMeta(type):
 
     base = None
     commands = {}
+    # commands = defaultdict(dict)
 
     command_instances = weakref.WeakValueDictionary()
     """Holds references to all active Instances of Commands, to forward to their queue"""
 
     def __new__(mcs, name, bases, dct):
         """Register command at plugin vice versa."""
-        module = dct['__module__']
-        dct['plugin'] = Plugin[module]
+        # module = dct['__module__']
+        # dct['plugin'] = Plugin[module]
+
+        module_name = dct['__module__']
+        command_name = ':'.join((module_name, name))
+        dct['command_name'] = command_name
 
         cls = type.__new__(mcs, name, bases, dct)
+
         if mcs.base is None:
             mcs.base = cls
 
         else:
             # only register classes except base class
-            mcs._register_command(cls)
+            mcs.commands[command_name] = cls
+            # mcs.commands[module_name][name] = cls
+            # mcs._register_command(cls)
 
         return cls
 
@@ -806,12 +814,12 @@ class CommandMeta(type):
             await func(*args, **kwargs)
 
     def create_reference(cls, uid, inst):
-        fqin = (cls.fqn, uid)
+        fqin = (cls.command_name, uid)
         cls.command_instances[fqin] = inst
 
-    def __init__(cls, name, bases, dct):
-        type.__init__(cls, name, bases, dct)
-        cls.command_name = cls.fqn = ':'.join((cls.plugin.module_name, cls.__name__))
+    # def __init__(cls, name, bases, dct):
+    #     type.__init__(cls, name, bases, dct)
+    #     cls.command_name = cls.fqn = ':'.join((cls.__module__, cls.__name__))
 
 
 class Command(metaclass=CommandMeta):
@@ -976,12 +984,12 @@ class Execute(Command):
     @reify
     def channel_name(self):
         """Execution is always run on the class channel."""
-        return self.__class__.fqn
+        return self.__class__.command_name
 
     @classmethod
     async def execute_io_queues(cls, io_queues):
         # listen to the global execute channel
-        channel = Channel(cls.fqn, io_queues=io_queues)
+        channel = Channel(cls.command_name, io_queues=io_queues)
 
         try:
             async for message in channel:
@@ -1117,6 +1125,8 @@ class InvokeImport(Command):
                 # import dbltr.plugins.core
                 importlib.import_module(self.fullname)
                 # import dbltr.task
+
+                logger.debug("Available modules: %s", list(sorted(sys.modules.keys())))
 
             except ImportError:
                 logger.debug("Error when importing %s:\n%s", self.fullname, traceback.format_exc())

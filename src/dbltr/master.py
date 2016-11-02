@@ -260,11 +260,6 @@ async def _execute_command(io_queues, line):
 
 async def feed_stdin_to_remotes(**options):
 
-    lines = [
-        b'dbltr.core:Export plugin_name=debellator#core\n',
-        b'debellator#core:Echo foo=bar bar=123\n',
-    ]
-
     remote = await Remote.launch(
         code=core,
         target=Target(host='localhost'),
