@@ -14,6 +14,8 @@ from collections import namedtuple
 
 from dbltr import core, task, mp
 
+PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
+
 logger = logging.getLogger(__name__)
 
 
@@ -260,6 +262,11 @@ async def _execute_command(io_queues, line):
 
 async def feed_stdin_to_remotes(**options):
 
+    default_lines = {
+        b'\n': b'dbltr.plugins.core:Echo foo=bar bar=123\n',
+        b'i\n': b'dbltr.core:InvokeImport fullname=dbltr.plugins.core\n',
+    }
+
     remote = await Remote.launch(
         code=core,
         target=Target(host='localhost'),
@@ -278,14 +285,8 @@ async def feed_stdin_to_remotes(**options):
                 if line is b'':
                     break
 
-                if not line[:-1]:
-                    line = b'debellator#core:Echo foo=bar bar=123\n'
-
-                if line == b'e\n':
-                    line = b'dbltr.core:Export plugin_name=debellator#core\n'
-
-                if line == b'i\n':
-                    line = b'dbltr.core:InvokeImport fullname=dbltr.plugins.core\n'
+                if line in default_lines:
+                    line = default_lines[line]
 
                 if remote.returncode is None:
                     result = await _execute_command(remote.io_queues, line)
@@ -296,43 +297,6 @@ async def feed_stdin_to_remotes(**options):
                     # )
 
                     print("< {}\n > ".format(result), end='')
-
-    except asyncio.CancelledError:
-        pass
-
-    if remote.returncode is None:
-        remote.terminate()
-        await remote.wait()
-
-
-async def feed_lines_to_remotes(**options):
-
-    lines = [
-        b'dbltr.core:Export plugin_name=debellator#core\n',
-        b'debellator#core:Echo foo=bar bar=123\n',
-    ]
-
-    remote = await Remote.launch(
-        code=core,
-        target=Target(host='localhost'),
-        python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
-        options=options
-    )
-
-    # start remote communication
-    asyncio.ensure_future(remote.communicate())
-
-    try:
-        for line in lines:
-            if remote.returncode is None:
-                result = await _execute_command(remote.io_queues, line)
-                # result = await asyncio.ensure_future(_execute_command(remote, line))
-                # result = await asyncio.gather(
-                #     _execute_command(remote.io_queues, line),
-                #     _execute_command(remote.io_queues, line),
-                # )
-
-                print("< {}\n > ".format(result), end='')
 
     except asyncio.CancelledError:
         pass
@@ -371,14 +335,6 @@ def main(debug=False, log_config=None):
         logger.setLevel(logging.DEBUG)
 
     try:
-        # with concurrent.futures.ThreadPoolExecutor(max_workers=15) as logging_executor:
-        #     log_formatter = logging.Formatter(style='{')
-        #     log_handler = ExecutorConsoleHandler(logging_executor)
-        #     log_handler.setFormatter(log_formatter)
-        #     logger.propagate = False
-        #     logger.addHandler(log_handler)
-            # core.logger.setLevel('INFO')
-
         loop.run_until_complete(
             core.run(
                 # print_debug(loop),

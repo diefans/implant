@@ -1,7 +1,5 @@
 """The core module is transfered to the remote process and will bootstrap pipe communication."""
-import threading
 import asyncio
-import json
 import base64
 import concurrent
 import functools
@@ -16,12 +14,13 @@ import pickle
 import signal
 import struct
 import sys
+import threading
 import time
 import traceback
 import types
 import weakref
 import zlib
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 
 import msgpack
 import pkg_resources
@@ -31,11 +30,20 @@ pkg_environment = pkg_resources.Environment()
 logger = logging.getLogger(__name__)
 
 
+def decode_options(b64):
+    return pickle.loads(base64.b64decode(b64))
+
+
+def encode_options(**options):
+    return base64.b64encode(pickle.dumps(options)).decode()
+
+
 def encode_msgpack_default(data):
     # use __msgpack__ if available
     if hasattr(data, '__msgpack_encode__'):
         data_type = type(data)
         data_module = data_type.__module__
+
         return {
             '__custom_object__': True,
             '__module__': data_module,
@@ -55,9 +63,7 @@ def decode_msgpack_default(encoded):
             raise TypeError("The module of the encoded data type is not loaded: {}".format(encoded))
 
         data_type = getattr(module, encoded['__type__'])
-
         decoder = getattr(data_type, '__msgpack_decode__')
-
         decoded = decoder(encoded['__data__'])
 
         return decoded
@@ -83,18 +89,8 @@ def decode_msgpack(data):
         raise
 
 
-def encode_pickle(data):
-    return pickle.dumps(data)
-
-
-def decode_pickle(encoded):
-    return pickle.loads(encoded)
-
-
 encode = encode_msgpack
 decode = decode_msgpack
-# encode = encode_pickle
-# decode = decode_pickle
 
 
 class aenumerate:
@@ -124,30 +120,20 @@ class reify:
     def __get__(self, inst, objtype=None):
         if inst is None:
             return self
+
         val = self.wrapped(inst)
         setattr(inst, self.wrapped.__name__, val)
+
         return val
-
-
-_uid = threading.local()
-def create_uid():
-    if getattr(_uid, "uid", None) is None:
-        thread = threading.current_thread()
-        _uid.tid = thread.ident
-        _uid.id = id(thread)
-        _uid.uid = 0
-
-    _uid.uid += 1
-    uid = (time.time(), _uid.id, _uid.tid, _uid.uid)
-
-    return uid
 
 
 class Uid:
 
     """Represent a uinique id for the current thread."""
 
-    def __init__(self, time=None, id=None, tid=None, seq=None, bytes=None):
+    _uid = threading.local()
+
+    def __init__(self, time=None, id=None, tid=None, seq=None, bytes=None):     # noqa
         fmt = "!dQQQ"
         all_args = [time, id, tid, seq].count(None) == 0
 
@@ -155,13 +141,26 @@ class Uid:
             if bytes:
                 time, id, tid, seq = struct.unpack(fmt, bytes)
             else:
-                time, id, tid, seq = create_uid()
+                time, id, tid, seq = self._create_uid()
 
         self.bytes = bytes or struct.pack(fmt, time, id, tid, seq)
         self.time = time
         self.id = id
         self.tid = tid
         self.seq = seq
+
+    @classmethod
+    def _create_uid(cls):
+        if getattr(cls._uid, "uid", None) is None:
+            thread = threading.current_thread()
+            cls._uid.tid = thread.ident
+            cls._uid.id = id(thread)
+            cls._uid.uid = 0
+
+        cls._uid.uid += 1
+        uid = (time.time(), cls._uid.id, cls._uid.tid, cls._uid.uid)
+
+        return uid
 
     def __hash__(self):
         return hash(self.bytes)
@@ -187,7 +186,6 @@ def create_module(module_name, is_package=False):
     """Create an empty module and all its parent packages."""
     if module_name not in sys.modules:
         package_name, _, module_attr = module_name.rpartition('.')
-
         module = types.ModuleType(module_name)
         module.__file__ = '<memory>'
 
@@ -247,6 +245,7 @@ class Incomming(asyncio.StreamReader):
             lambda: protocol,
             self.pipe,
         )
+
         return self
 
     async def __aexit__(self, exc_type, value, tb):
@@ -259,9 +258,7 @@ class Incomming(asyncio.StreamReader):
         (see of https://github.com/python/asyncio/issues/394).
 
         """
-        buffer = bytearray()
-
-        missing = n
+        buffer, missing = bytearray(), n
 
         while missing:
             if not self._buffer:
@@ -272,8 +269,8 @@ class Incomming(asyncio.StreamReader):
 
             length = min(len(self._buffer), missing)
             buffer.extend(self._buffer[:length])
-            del self._buffer[:length]
 
+            del self._buffer[:length]
             missing -= length
 
             self._maybe_resume_transport()
@@ -289,7 +286,6 @@ class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
         """Shutdown process."""
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
-        # XXX FIXME is not called
         logger.warning("Connection lost! Shutting down...")
         os.kill(os.getpid(), signal.SIGHUP)
 
@@ -308,8 +304,8 @@ class Outgoing:
             ShutdownOnConnectionLost if self.shutdown else asyncio.streams.FlowControlMixin,
             self.pipe
         )
-        writer = asyncio.streams.StreamWriter(self.transport, protocol, None, asyncio.get_event_loop())
 
+        writer = asyncio.streams.StreamWriter(self.transport, protocol, None, asyncio.get_event_loop())
         return writer
 
     async def __aexit__(self, exc_type, value, tb):
@@ -328,15 +324,10 @@ async def send_outgoing_queue(queue, pipe=sys.stdout):
 
 def split_data(data, size=1024):
     """A generator to yield splitted data."""
-    data_view = memoryview(data)
-    data_len = len(data_view)
-    start = 0
-
+    data_view, data_len, start = memoryview(data), len(data), 0
     while start < data_len:
         end = min(start + size, data_len)
-
         yield data_view[start:end]
-
         start = end
 
 
@@ -344,18 +335,16 @@ class ChunkFlags(dict):
 
     _masks = {
         'eom': (1, 0, int, bool),
-        'stop_iter': (1, 1, int, bool),
-        'send_ack': (1, 2, int, bool),
-        'recv_ack': (1, 3, int, bool),
-        'compression': (1, 4, int, bool),
+        'send_ack': (1, 1, int, bool),
+        'recv_ack': (1, 2, int, bool),
+        'compression': (1, 3, int, bool),
     }
 
-    def __init__(self, *, send_ack=False, recv_ack=False, eom=False, stop_iter=False, compression=False):
+    def __init__(self, *, send_ack=False, recv_ack=False, eom=False, compression=False):
         self.__dict__ = self
         super(ChunkFlags, self).__init__()
 
         self.eom = eom
-        self.stop_iter = stop_iter
         self.send_ack = send_ack
         self.recv_ack = recv_ack
         self.compression = compression
@@ -387,7 +376,7 @@ class Channel:
     chunk_size = 0x8000
 
     acknowledgements = weakref.WeakValueDictionary()
-    """Global acknowledgment futures distinctive by uuid."""
+    """Global acknowledgment futures distinctive by uid."""
 
     def __init__(self, name=None, *, io_queues=None):
         """Initialize the channel.
@@ -424,7 +413,6 @@ class Channel:
         return self
 
     async def __anext__(self):
-        # TODO use iterator and stop_iter header to raise AsyncStopIteration
         data = await self
         if isinstance(data, StopAsyncIteration):
             raise data
@@ -513,7 +501,6 @@ class Channel:
         })
 
         await self.io_outgoing.put((header, name))
-        logger.debug("Channel send queue: %s", self.io_outgoing.qsize())
 
         # if acknowledgement is asked for we await this future and return its result
         # see _receive_reader for resolution of future
@@ -558,10 +545,8 @@ class Channel:
                 data = await queue.get()
                 if isinstance(data, tuple):
                     for part in data:
-                        # logger.debug("send to writer: %s bytes", len(part))
                         writer.write(part)
                 else:
-                    # logger.debug("send to writer: %s bytes", len(data))
                     writer.write(data)
 
                 queue.task_done()
@@ -596,7 +581,6 @@ class Channel:
 
         if channel_name_length:
             logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
-
         else:
             logger.debug("Message %s, received: %s", uid, flags)
 
@@ -620,9 +604,7 @@ class Channel:
     @classmethod
     async def _receive_reader(cls, io_queues, reader):
         # receive incomming data into queues
-
         buffer = {}
-
         try:
             while True:
                 await cls._receive_single_message(io_queues, reader, buffer)
@@ -638,104 +620,6 @@ class Channel:
         except:
             logger.error("Error while receiving:\n%s", traceback.format_exc())
             raise
-
-
-######################################################################################
-PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
-
-
-class MetaPlugin(type):
-
-    # FIXME plugin architecture seems ugly
-
-    plugins = {}
-
-    def __new__(mcs, name, bases, dct):
-        cls = type.__new__(mcs, name, bases, dct)
-
-        cls.scan_entry_points()
-
-        # add this module as default
-        cls.add(cls(__name__))
-
-        return cls
-
-    def scan_entry_points(cls):
-        # scan for available plugins
-        for entry_point in pkg_resources.iter_entry_points(group=PLUGINS_ENTRY_POINT_GROUP):
-            plugin = cls.create_from_entry_point(entry_point)
-            # we index entry_points and module names
-            cls.add(plugin)
-            # mcs.plugins[plugin.module_name] = mcs.plugins[plugin.name] = plugin
-
-    def create_from_entry_point(cls, entry_point):
-        plugin = cls(entry_point.module_name, '#'.join((entry_point.dist.key, entry_point.name)))
-        cls.add(plugin)
-
-        return plugin
-
-    def create_from_code(cls, code, project_name, entry_point_name, module_name, version='0.0.0'):
-        dist = pkg_resources.Distribution(project_name=project_name, version=version)
-        dist.activate()
-        pkg_environment.add(dist)
-        entry_point = pkg_resources.EntryPoint(entry_point_name, module_name, dist=dist)
-
-        module = create_module(module_name)
-        plugin = cls.create_from_entry_point(entry_point)
-
-        c = compile(code, "<{}>".format(module_name), "exec", optimize=2)
-        exec(c, module.__dict__)        # noqa
-
-        return plugin
-
-    def add(cls, plugin):
-        cls.plugins[plugin.module_name] = cls.plugins[plugin.name] = plugin
-
-    def __getitem__(cls, name):
-        plugin_name, _, command_name = name.partition(':')
-        plugin = cls.plugins[plugin_name]
-
-        if not command_name:
-            return plugin
-
-        command = plugin.commands[command_name]
-        return command
-
-    def __contains__(cls, name):
-        try:
-            cls[name]       # noqa
-            return True
-
-        except KeyError:
-            return False
-
-    def get(cls, name, default=None):
-        try:
-            return cls[name]
-
-        except KeyError:
-            return default
-
-
-class Plugin(metaclass=MetaPlugin):
-
-    """A plugin module introduced via entry point."""
-
-    def __init__(self, module_name, name=None):
-        self.module_name = module_name
-        self.name = name or module_name
-
-        self.commands = {}
-        """A map of commands the plugin provides."""
-
-    @reify
-    def module(self):
-        """On demand module loading."""
-        return __import__(self.module_name, fromlist=[''])
-        # return self.entry_point.load()
-
-    def __repr__(self):
-        return "<Plugin {}>".format(self.module_name)
 
 
 def exclusive(fun):
@@ -762,9 +646,6 @@ class CommandMeta(type):
 
     def __new__(mcs, name, bases, dct):
         """Register command at plugin vice versa."""
-        # module = dct['__module__']
-        # dct['plugin'] = Plugin[module]
-
         module_name = dct['__module__']
         command_name = ':'.join((module_name, name))
         dct['command_name'] = command_name
@@ -773,12 +654,9 @@ class CommandMeta(type):
 
         if mcs.base is None:
             mcs.base = cls
-
         else:
             # only register classes except base class
             mcs.commands[command_name] = cls
-            # mcs.commands[module_name][name] = cls
-            # mcs._register_command(cls)
 
         return cls
 
@@ -816,10 +694,6 @@ class CommandMeta(type):
     def create_reference(cls, uid, inst):
         fqin = (cls.command_name, uid)
         cls.command_instances[fqin] = inst
-
-    # def __init__(cls, name, bases, dct):
-    #     type.__init__(cls, name, bases, dct)
-    #     cls.command_name = cls.fqn = ':'.join((cls.__module__, cls.__name__))
 
 
 class Command(metaclass=CommandMeta):
@@ -920,7 +794,7 @@ class ExecuteException:
     @classmethod
     def __msgpack_decode__(cls, encoded):
         fqin, exc, tb = encoded
-
+        # XXX do we need pickle?
         return cls(fqin, pickle.loads(exc), tb)
 
 
@@ -938,9 +812,7 @@ class ExecuteResult:
 
     @classmethod
     def __msgpack_decode__(cls, encoded):
-        fqin, result = encoded
-
-        return cls(fqin, result)
+        return cls(*encoded)
 
 
 class ExecuteArgs:
@@ -958,9 +830,7 @@ class ExecuteArgs:
 
     @classmethod
     def __msgpack_decode__(cls, encoded):
-        fqin, params = encoded
-
-        return cls(fqin, params)
+        return cls(*encoded)
 
 
 class Execute(Command):
@@ -1066,45 +936,6 @@ class Execute(Command):
             del self.io_queues[self.command.channel_name]
 
 
-class Export(Command):
-
-    """Export a plugin to remote."""
-
-    @exclusive
-    async def __call__(self):
-        return await super(Export, self).__call__()
-
-    async def local(self, remote_future):
-        plugin = Plugin[self.plugin_name]
-
-        code = inspect.getsource(plugin.module)
-        module_name = plugin.module.__name__
-
-        project_name, entry_point_name = plugin.name.split('#')
-
-        plugin_data = {
-            'code': code,
-            'project_name': project_name,
-            'entry_point_name': entry_point_name,
-            'module_name': module_name,
-        }
-
-        await self.channel.send(plugin_data)
-
-        result = await remote_future
-
-        return result
-
-    async def remote(self):
-        plugin_data = await self.channel
-        Plugin.create_from_code(**plugin_data)
-
-        return {
-            'commands': list(Command.commands.keys()),
-            'plugins': list(Plugin.plugins.keys())
-        }
-
-
 class InvokeImport(Command):
     async def local(self, remote_future):
         # __import__('dbltr.plugins.core', fromlist=[])
@@ -1113,8 +944,7 @@ class InvokeImport(Command):
         return result
 
     async def remote(self):
-        task = asyncio.Task.current_task()
-        loop = task._loop
+        loop = asyncio.get_event_loop()
 
         def import_stuff():
             thread_loop = asyncio.new_event_loop()
@@ -1124,7 +954,6 @@ class InvokeImport(Command):
                 # __import__('dbltr.plugins.core', fromlist=[])
                 # import dbltr.plugins.core
                 importlib.import_module(self.fullname)
-                # import dbltr.task
 
                 logger.debug("Available modules: %s", list(sorted(sys.modules.keys())))
 
@@ -1136,7 +965,7 @@ class InvokeImport(Command):
                 thread_loop.close()
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            result = await loop.run_in_executor(executor, import_stuff)
+            await loop.run_in_executor(executor, import_stuff)
 
 
 class FindModule(Command):
@@ -1153,7 +982,7 @@ class FindModule(Command):
         module = sys.modules.get(self.module_name)
 
         if not module and import_missing:
-            # import missing module
+            # XXX TODO import missing module???
             pass
 
         if module:
@@ -1172,7 +1001,6 @@ class FindModule(Command):
 
             except TypeError:
                 # this fails with a type error when a module is created without source file
-                logger.debug("***\n" * 10)
                 pass
 
     async def remote(self):
@@ -1190,11 +1018,13 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         # ask master for this module
         logger.debug("Module lookup: %s", module_name)
 
-        future = asyncio.run_coroutine_threadsafe(FindModule(self.io_queues, module_name=module_name)(), loop=self.main_loop)
+        future = asyncio.run_coroutine_threadsafe(
+            FindModule(self.io_queues, module_name=module_name)(),
+            loop=self.main_loop
+        )
         module_data = future.result()
 
         if module_data:
-
             is_package, module_source, module_file = module_data
 
             logger.debug("Module found for %s: %s", module_name, module_file)
@@ -1344,11 +1174,11 @@ def main(debug=False, log_config=None, **kwargs):
         }
 
     logging.config.dictConfig(log_config)
+    loop = asyncio.get_event_loop()
+
     if debug:
         logger.setLevel(logging.DEBUG)
-
-    loop = asyncio.get_event_loop()
-    loop.set_debug(debug)
+        loop.set_debug(debug)
 
     io_queues = IoQueues()
 
@@ -1372,11 +1202,3 @@ def main(debug=False, log_config=None, **kwargs):
 
     finally:
         loop.close()
-
-
-def decode_options(b64):
-    return pickle.loads(base64.b64decode(b64))
-
-
-def encode_options(**options):
-    return base64.b64encode(pickle.dumps(options)).decode()
