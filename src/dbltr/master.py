@@ -23,22 +23,24 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
     """A unique representation of a Remote."""
 
-    bootstrap = (
-        'import sys, imp, base64, zlib;'
+    bootstrap = '\n'.join((
+        'import sys, imp, base64, zlib;',
+        'try:',
+        '   import msgpack;',
+        'except ImportError:',
+        '   sys.modules["msgpack"] = msgpack = imp.new_module("msgpack");',
+        '   c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec");',
+        '   exec(c, msgpack.__dict__);',
 
-        'sys.modules["msgpack"] = msgpack = imp.new_module("msgpack");'
-        'c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec");'
-        'exec(c, msgpack.__dict__);'
+        'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);',
+        'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");',
+        'dbltr.__dict__["core"] = core;',
 
-        'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);'
-        'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");'
-        'dbltr.__dict__["core"] = core;'
+        'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True);',
+        'exec(c, core.__dict__);',
 
-        'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True);'
-        'exec(c, core.__dict__);'
-
-        'core.main(**core.decode_options(b"{options}"));'
-    )
+        'core.main(**core.decode(base64.b64decode(b"{options}")));',
+    ))
     """Bootstrapping of core module on remote."""
 
     def __new__(cls, host=None, user=None, sudo=None):
@@ -105,7 +107,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
                 code_path=code_path,
                 msgpack_code=base64.b64encode(zlib.compress(msgpack_code, 9)).decode(),
                 msgpack_code_path=msgpack_code_path,
-                options=core.encode_options(**options),
+                options=base64.b64encode(core.encode(options)).decode(),
             )
 
             # yield ' 2> /tmp/core.log'

@@ -1,6 +1,9 @@
-"""The core module is transfered to the remote process and will bootstrap pipe communication."""
+"""The core module is transfered to the remote process and will bootstrap pipe communication.
+
+It creates default io queues and distributes commands accordingly.
+
+"""  # pylint: disable=C0302
 import asyncio
-import base64
 import concurrent
 import functools
 import hashlib
@@ -10,7 +13,6 @@ import inspect
 import logging
 import logging.config
 import os
-import pickle
 import signal
 import struct
 import sys
@@ -23,57 +25,83 @@ import zlib
 from collections import defaultdict
 
 import msgpack
-import pkg_resources
-
-pkg_environment = pkg_resources.Environment()
 
 logger = logging.getLogger(__name__)
 
 
-def decode_options(b64):
-    return pickle.loads(base64.b64decode(b64))
+class MsgpackMixin:
+
+    """Add msgpack en/decoding to a type."""
+
+    def __msgpack_encode__(self):   # noqa
+        return None
+
+    @classmethod
+    def __msgpack_decode__(cls, data):
+        return None
 
 
-def encode_options(**options):
-    return base64.b64encode(pickle.dumps(options)).decode()
+class MsgpackDefaultEncoder(dict):
 
+    """Encode or decode custom objects."""
 
-def encode_msgpack_default(data):
-    # use __msgpack__ if available
-    if hasattr(data, '__msgpack_encode__'):
+    def encode(self, data):
         data_type = type(data)
         data_module = data_type.__module__
 
-        return {
-            '__custom_object__': True,
-            '__module__': data_module,
-            '__type__': data_type.__name__,
-            '__data__': data.__msgpack_encode__()
-        }
+        encoder = data if hasattr(data, '__msgpack_encode__') else self.encoders.get(data_type)(data)
+        if encoder:
+            return {
+                '__custom_object__': True,
+                '__module__': data_module,
+                '__type__': data_type.__name__,
+                '__data__': data.__msgpack_encode__()
+            }
 
-    return data
+        return data
+
+    def decode(self, encoded):
+        if encoded.get('__custom_object__', False):
+            # we have to search the class
+            module = sys.modules.get(encoded['__module__'])
+
+            if not module:
+                raise TypeError("The module of the encoded data type is not loaded: {}".format(encoded))
+
+            data_type = getattr(module, encoded['__type__'])
+            decoder = data_type if hasattr(data_type, '__msgpack_decode__') else self.encoders.get(data_type)
+            decoded = decoder.__msgpack_decode__(encoded['__data__'])
+
+            return decoded
+
+        return encoded
 
 
-def decode_msgpack_default(encoded):
-    if encoded.get('__custom_object__', False):
-        # we have to search the class
-        module = sys.modules.get(encoded['__module__'])
+class MsgpackExceptionEncoder(MsgpackMixin):
 
-        if not module:
-            raise TypeError("The module of the encoded data type is not loaded: {}".format(encoded))
+    """Encode and decode Exception arguments.
 
-        data_type = getattr(module, encoded['__type__'])
-        decoder = getattr(data_type, '__msgpack_decode__')
-        decoded = decoder(encoded['__data__'])
+    Traceback and other internals will be lost.
+    """
 
-        return decoded
+    def __init__(self, data):
+        self.data = data
 
-    return encoded
+    def __msgpack_encode__(self):
+        return self.data.args
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded):
+        return cls(*encoded)
+
+
+msgpack_default_encoder = MsgpackDefaultEncoder()
+msgpack_default_encoder[Exception] = MsgpackExceptionEncoder
 
 
 def encode_msgpack(data):
     try:
-        return msgpack.packb(data, default=encode_msgpack_default, use_bin_type=True, encoding="utf-8")
+        return msgpack.packb(data, default=msgpack_default_encoder.encode, use_bin_type=True, encoding="utf-8")
 
     except:
         logger.error("Error:\n%s", traceback.format_exc())
@@ -82,10 +110,10 @@ def encode_msgpack(data):
 
 def decode_msgpack(data):
     try:
-        return msgpack.unpackb(data, object_hook=decode_msgpack_default, encoding="utf-8")
+        return msgpack.unpackb(data, object_hook=msgpack_default_encoder.decode, encoding="utf-8")
 
     except:
-        logger.error("Error:\n%s", traceback.format_exc())
+        logger.error("Error unpacking:\n%s", traceback.format_exc())
         raise
 
 
@@ -94,6 +122,9 @@ decode = decode_msgpack
 
 
 class aenumerate:
+
+    """Enumerate an async iterator."""
+
     def __init__(self, aiterable, start=0):
         self._ait = aiterable
         self._i = start
@@ -333,6 +364,8 @@ def split_data(data, size=1024):
 
 class ChunkFlags(dict):
 
+    """Store flags for a chunk."""
+
     _masks = {
         'eom': (1, 0, int, bool),
         'send_ack': (1, 1, int, bool),
@@ -466,7 +499,7 @@ class Channel:
         return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
     async def send(self, data, ack=False, compress=6):
-        """Send data in a pickled form to the channel.
+        """Send data in a encoded form to the channel.
 
         :param data: the python object to send
         :param ack: request acknowledgement of the reception of that message
@@ -478,11 +511,11 @@ class Channel:
         loop = asyncio.get_event_loop()
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            pickled_data = await loop.run_in_executor(executor, encode, data)
+            encoded_data = await loop.run_in_executor(executor, encode, data)
 
-        logger.debug("Channel %s sends: %s bytes", self.name, len(pickled_data))
+        logger.debug("Channel %s sends: %s bytes", self.name, len(encoded_data))
 
-        for part in split_data(pickled_data, self.chunk_size):
+        for part in split_data(encoded_data, self.chunk_size):
             if compress:
                 raw_len = len(part)
                 part = zlib.compress(part, compress)
@@ -635,7 +668,7 @@ def exclusive(fun):
     return locked_fun
 
 
-class CommandMeta(type):
+class _CommandMeta(type):
 
     base = None
     commands = {}
@@ -696,7 +729,7 @@ class CommandMeta(type):
         cls.command_instances[fqin] = inst
 
 
-class Command(metaclass=CommandMeta):
+class Command(metaclass=_CommandMeta):
 
     """Base command class, which has no other use than provide the common ancestor to all Commands."""
 
@@ -778,6 +811,9 @@ class Command(metaclass=CommandMeta):
 
 
 class ExecuteException:
+
+    """Remote execution ended in an exception."""
+
     def __init__(self, fqin, exception, tb=None):
         self.fqin = fqin
         self.exception = exception
@@ -789,16 +825,18 @@ class ExecuteException:
         future.set_exception(self.exception)
 
     def __msgpack_encode__(self):
-        return (self.fqin, pickle.dumps(self.exception), self.tb)
+        return (self.fqin, self.exception, self.tb)
 
     @classmethod
     def __msgpack_decode__(cls, encoded):
         fqin, exc, tb = encoded
-        # XXX do we need pickle?
-        return cls(fqin, pickle.loads(exc), tb)
+        return cls(fqin, exc, tb)
 
 
 class ExecuteResult:
+
+    """The result of a remote execution."""
+
     def __init__(self, fqin, result=None):        # noqa
         self.fqin = fqin
         self.result = result
@@ -816,6 +854,9 @@ class ExecuteResult:
 
 
 class ExecuteArgs:
+
+    """Arguments for an execution."""
+
     def __init__(self, fqin, params=None):
         self.fqin = fqin
         self.params = params
@@ -937,6 +978,17 @@ class Execute(Command):
 
 
 class InvokeImport(Command):
+
+    """Invoke an import of a module on the remote side.
+
+    The local side will import the module first.
+    The remote side will trigger the remote import hook, which in turn
+    will receive all missing modules from the local side.
+
+    The import is executed in a separate executor thread, to have a separate event loop available.
+
+    """
+
     async def local(self, remote_future):
         # __import__('dbltr.plugins.core', fromlist=[])
         importlib.import_module(self.fullname)
@@ -1008,7 +1060,14 @@ class FindModule(Command):
 
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
-    # http://stackoverflow.com/questions/32059732/send-asyncio-tasks-to-loop-running-in-other-thread
+
+    """Import hook that schedules a `FindModule` coroutine in the main loop.
+
+    The import itself is run in a separate executor thread to keep things async.
+
+    http://stackoverflow.com/questions/32059732/send-asyncio-tasks-to-loop-running-in-other-thread
+
+    """
 
     def __init__(self, io_queues, loop):
         self.io_queues = io_queues
@@ -1043,7 +1102,10 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
             logger.debug("No module found for %s", module_name)
 
 
-class RemoteModuleLoader(importlib.abc.ExecutionLoader):
+class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0223
+
+    """Load the found module spec."""
+
     def __init__(self, source, filename=None, is_package=False):
         self.source = source
         self.filename = filename
@@ -1063,7 +1125,7 @@ class RemoteModuleLoader(importlib.abc.ExecutionLoader):
 
 
 async def run(*tasks):
-    """Schedules all tasks and wait for running is done or canceled"""
+    """Schedule all tasks and wait for running is done or canceled."""
     # create indicator for running messenger
     running = asyncio.ensure_future(asyncio.gather(*tasks))
 
