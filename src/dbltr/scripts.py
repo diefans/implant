@@ -6,7 +6,6 @@ import pkg_resources
 
 import yaml
 
-from dbltr import master
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +35,18 @@ def cli(ctx, use_uvloop, debug, log_config):
     log_config = yaml.load(log_config)
     logging.config.dictConfig(log_config)
 
-    if debug:
-        logger.info("Enable asyncio debug")
-        master.core.logger.setLevel(logging.DEBUG)
-        asyncio.get_event_loop().set_debug(debug)
 
     if ctx.invoked_subcommand is None:
+        # we need to import master lazy because master imports core,
+        # which may use exclusive decorator, which tries to get the actual loop,
+        # which is only set after running set_event_loop_policy
+        from dbltr import master
+
+        if debug:
+            logger.info("Enable asyncio debug")
+            master.core.logger.setLevel(logging.DEBUG)
+            asyncio.get_event_loop().set_debug(debug)
+
         master.main(log_config=log_config, debug=debug)
 
 

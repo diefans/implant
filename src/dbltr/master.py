@@ -195,7 +195,8 @@ async def _execute_command(io_queues, line):
 
     try:
         cmd = core.Command.create_command(io_queues, command_name, **params)
-        result = await cmd
+        logger.debug("execute loop: %s", id(asyncio.Task.current_task()._loop))
+        result = await cmd.execute()
 
     except Exception as ex:     # noqa
         logger.error("Error:\n%s", traceback.format_exc())
@@ -217,12 +218,13 @@ async def feed_stdin_to_remotes(**options):
         b'i\n': b'dbltr.core:InvokeImport fullname=dbltr.plugins.core\n',
     }
 
+    process = await Remote(host='localhost').launch(
+        code=core,
+        python_bin='~/.pyenv/versions/3.5.2/bin/python',
+        options=options
+    )
+
     try:
-        process = await Remote(host='localhost').launch(
-            code=core,
-            python_bin='~/.pyenv/versions/3.5.2/bin/python',
-            options=options
-        )
         # setup launch specific tasks
         io_queues = core.IoQueues()
         await core.Command.local_setup(io_queues)
@@ -242,10 +244,9 @@ async def feed_stdin_to_remotes(**options):
 
                 if process.returncode is None:
                     result = await _execute_command(io_queues, line)
-                    # result = await asyncio.ensure_future(_execute_command(process, line))
                     # result = await asyncio.gather(
-                    #     _execute_command(process.io_queues, line),
-                    #     _execute_command(process.io_queues, line),
+                    #     _execute_command(io_queues, line),
+                    #     _execute_command(io_queues, line),
                     # )
 
                     print("< {}\n > ".format(result), end='')

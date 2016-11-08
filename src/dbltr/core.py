@@ -655,12 +655,20 @@ class Channel:
             raise
 
 
+# FIXME at the moment the exclusive lock is global for all calls
+# we should bind it somehow to the used io_queues/remote instance
 def exclusive(fun):
     """Make an async function call exclusive."""
+    logger.debug("\n\nexclusive loop", asyncio.get_event_loop())
     lock = asyncio.Lock()
 
     async def locked_fun(*args, **kwargs):
+        task = asyncio.Task.current_task()
+        logger.debug("task loop: %s", id(task._loop))
+
         logger.debug("Calling locked function: %s -> %s", lock, fun)
+
+        logger.debug("lock loop: %s", id(lock._loop))
         async with lock:
             logger.debug("Executing locked function: %s -> %s", lock, fun)
             return await fun(*args, **kwargs)
@@ -772,16 +780,12 @@ class Command(metaclass=_CommandMeta):
 
         raise KeyError('The command `{}` does not exist!'.format(command_name))
 
-    # TODO with loop.set_debug(True) it is possible to define `async def __await__(self)`
-    async def __call__(self):
+    async def execute(self):
+        """Execute the command by delegating to Execute command."""
         execute = Execute(self.io_queues, self)
         result = await execute.local()
 
         return result
-
-    def __await__(self):
-        """Execute the command by delegating to execution command."""
-        return self().__await__()
 
     async def local(self, remote_future):
         raise NotImplementedError(
@@ -810,7 +814,7 @@ class Command(metaclass=_CommandMeta):
         return self.channel_name
 
 
-class ExecuteException:
+class ExecuteException(MsgpackMixin):
 
     """Remote execution ended in an exception."""
 
@@ -833,7 +837,7 @@ class ExecuteException:
         return cls(fqin, exc, tb)
 
 
-class ExecuteResult:
+class ExecuteResult(MsgpackMixin):
 
     """The result of a remote execution."""
 
@@ -853,7 +857,7 @@ class ExecuteResult:
         return cls(*encoded)
 
 
-class ExecuteArgs:
+class ExecuteArgs(MsgpackMixin):
 
     """Arguments for an execution."""
 
@@ -888,7 +892,7 @@ class Execute(Command):
 
         self.command = command
 
-    async def __call__(self):
+    async def execute(self):
         # forbid using Execute directly
         raise RuntimeError("Do not invoke `await Execute()` directly, instead use `await Command(**params)`)")
 
@@ -989,6 +993,10 @@ class InvokeImport(Command):
 
     """
 
+    @exclusive
+    async def execute(self):
+        return await super(InvokeImport, self).execute()
+
     async def local(self, remote_future):
         # __import__('dbltr.plugins.core', fromlist=[])
         importlib.import_module(self.fullname)
@@ -1027,14 +1035,8 @@ class FindModule(Command):
 
         return module_loaded
 
-    def get_module(self, import_missing=False):
-
+    async def remote(self):
         module = sys.modules.get(self.module_name)
-
-        if not module and import_missing:
-            # XXX TODO import missing module???
-            pass
-
         if module:
             is_package = bool(getattr(module, '__path__', None) is not None)
             logger.debug("module found: %s", module)
@@ -1052,9 +1054,6 @@ class FindModule(Command):
             except TypeError:
                 # this fails with a type error when a module is created without source file
                 pass
-
-    async def remote(self):
-        return self.get_module()
 
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
@@ -1076,7 +1075,7 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         logger.debug("Module lookup: %s", module_name)
 
         future = asyncio.run_coroutine_threadsafe(
-            FindModule(self.io_queues, module_name=module_name)(),
+            FindModule(self.io_queues, module_name=module_name).execute(),
             loop=self.main_loop
         )
         module_data = future.result()
