@@ -7,7 +7,7 @@ import concurrent
 import threading
 import traceback
 
-from dbltr import core
+from debellator import core
 
 
 class Echo(core.Command):

@@ -17,7 +17,7 @@ class Foo:
 
 
 def test_encode():
-    from dbltr import core
+    from debellator import core
 
     obj = Foo(123)
 
@@ -30,7 +30,7 @@ def test_encode():
 
 
 def test_encode_uid():
-    from dbltr import core
+    from debellator import core
 
     uid = core.Uid()
 

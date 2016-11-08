@@ -11,10 +11,10 @@ import types
 import zlib
 from collections import namedtuple
 
-from dbltr import core, mp
+from debellator import core, mp
 
 logger = logging.getLogger(__name__)
-PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
+PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
 VENV_DEFAULT = '~/.debellator'
 
 
@@ -68,9 +68,9 @@ class Remote(namedtuple('Remote', ('host', 'user', 'sudo'))):
             '   c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec");',
             '   exec(c, msgpack.__dict__);',
 
-            'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);',
-            'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");',
-            'dbltr.__dict__["core"] = core;',
+            'sys.modules["debellator"] = debellator = imp.new_module("debellator"); setattr(debellator, "__path__", []);',
+            'sys.modules["debellator.core"] = core = imp.new_module("debellator.core");',
+            'debellator.__dict__["core"] = core;',
 
             'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True);',
             'exec(c, core.__dict__);',
@@ -214,8 +214,8 @@ async def log_remote_stderr(remote):
 async def feed_stdin_to_remotes(**options):
 
     default_lines = {
-        b'\n': b'dbltr.plugins.core:Echo foo=bar bar=123\n',
-        b'i\n': b'dbltr.core:InvokeImport fullname=dbltr.plugins.core\n',
+        b'\n': b'debellator.plugins.core:Echo foo=bar bar=123\n',
+        b'i\n': b'debellator.core:InvokeImport fullname=debellator.plugins.core\n',
     }
 
     process = await Remote(host='localhost').launch(

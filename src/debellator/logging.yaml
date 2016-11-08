@@ -6,13 +6,13 @@ formatters:
 handlers:
   console:
     # FIXME Executor disturbes uvloop
-    #class: dbltr.core.ExecutorConsoleHandler
+    #class: debellator.core.ExecutorConsoleHandler
     class: logging.StreamHandler
     level: DEBUG
     formatter: simple
     stream: ext://sys.stderr
 loggers:
-  dbltr:
+  debellator:
     level: INFO
     handlers: [console]
     propagate: no

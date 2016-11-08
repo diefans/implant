@@ -60,7 +60,7 @@ setup(
     name="Debellator",
     author="Oliver Berger",
     author_email="diefans@gmail.com",
-    url="https://github.com/diefans/dbltr",
+    url="https://github.com/diefans/debellator",
     description='Remote execution via stdin/stdout messaging.',
     long_description=read('README.rst'),
     version=__version__,
@@ -75,18 +75,18 @@ setup(
     keywords="asyncio ssh RPC Remote execution dependency injection stdin stdout messaging",
 
     package_dir={'': 'src'},
-    namespace_packages=['dbltr'],
+    namespace_packages=['debellator'],
     packages=find_packages(
         'src',
         exclude=["tests*"]
     ),
     entry_points={
         'console_scripts': [
-            'dbltr=dbltr.scripts:cli'
+            'debellator=debellator.scripts:cli'
         ],
-        'dbltr.plugins': [
-            '_=dbltr.core',
-            'core=dbltr.plugins.core'
+        'debellator.plugins': [
+            '_=debellator.core',
+            'core=debellator.plugins.core'
         ]
     },
 

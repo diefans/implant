@@ -1,5 +1,5 @@
 def test_uid_eq():
-    from dbltr import core
+    from debellator import core
 
     u1 = core.Uid()
 

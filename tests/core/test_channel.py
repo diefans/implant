@@ -23,7 +23,7 @@ import pytest
     (0b00010001, {'eom': True, 'stop_iter': False, 'compression': True}),
 ])
 def test_flags(kwargs, result):
-    from dbltr import core
+    from debellator import core
 
     flags = core.ChunkFlags(**kwargs)
 
@@ -59,7 +59,7 @@ class TestChannel:
     async def test_send(self):
         import pickle
 
-        from dbltr import core
+        from debellator import core
 
         uid = core.Uid()
 
@@ -90,7 +90,7 @@ class TestChannel:
         import time
         import asyncio
         import uuid
-        from dbltr import core
+        from debellator import core
 
         r_pipe, w_pipe = os.pipe()
 

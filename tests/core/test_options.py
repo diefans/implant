@@ -1,5 +1,5 @@
 def test_encode_decode_options():
-    from dbltr import core
+    from debellator import core
 
     encoded = core.encode_options(foo='bar', bar=123)
 

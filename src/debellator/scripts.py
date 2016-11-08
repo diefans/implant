@@ -30,7 +30,7 @@ def cli(ctx, use_uvloop, debug, log_config):
             pass
 
     if log_config is None:
-        log_config = pkg_resources.resource_string('dbltr', 'logging.yaml')
+        log_config = pkg_resources.resource_string('debellator', 'logging.yaml')
 
     log_config = yaml.load(log_config)
     logging.config.dictConfig(log_config)
@@ -40,7 +40,7 @@ def cli(ctx, use_uvloop, debug, log_config):
         # we need to import master lazy because master imports core,
         # which may use exclusive decorator, which tries to get the actual loop,
         # which is only set after running set_event_loop_policy
-        from dbltr import master
+        from debellator import master
 
         if debug:
             logger.info("Enable asyncio debug")

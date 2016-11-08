@@ -998,7 +998,6 @@ class InvokeImport(Command):
         return await super(InvokeImport, self).execute()
 
     async def local(self, remote_future):
-        # __import__('dbltr.plugins.core', fromlist=[])
         importlib.import_module(self.fullname)
         result = await remote_future
         return result
@@ -1011,8 +1010,6 @@ class InvokeImport(Command):
             asyncio.set_event_loop(thread_loop)
 
             try:
-                # __import__('dbltr.plugins.core', fromlist=[])
-                # import dbltr.plugins.core
                 importlib.import_module(self.fullname)
 
             except ImportError:
@@ -1220,7 +1217,7 @@ def main(debug=False, log_config=None, **kwargs):
                 }
             },
             'loggers': {
-                'dbltr': {
+                'debellator': {
                     'handlers': ['console'],
                     'level': 'INFO',
                     'propagate': False
