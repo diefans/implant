@@ -24,6 +24,9 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
     """A unique representation of a Remote."""
 
     bootstrap = '\n'.join((
+        'import os, site;',
+        'venv_path = "{venv_path}";'
+
         'import sys, imp, base64, zlib;',
         'try:',
         '   import msgpack;',
@@ -64,6 +67,23 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
             code_source = code
             code_path = 'remote-string://'
 
+        if self.host is not None:
+            bootstrap = ''.join(("'", self.bootstrap, "'"))
+        else:
+            bootstrap = self.bootstrap
+
+        msgpack_code = inspect.getsource(mp).encode()
+        msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(mp))
+
+        bootstrap_code = bootstrap.format(
+            venv_path='/tmp/foo',
+            code=base64.b64encode(zlib.compress(code_source, 9)).decode(),
+            code_path=code_path,
+            msgpack_code=base64.b64encode(zlib.compress(msgpack_code, 9)).decode(),
+            msgpack_code_path=msgpack_code_path,
+            options=base64.b64encode(core.encode(options)).decode(),
+        )
+
         def _gen():
             # ssh
             if self.host is not None:
@@ -94,21 +114,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
             yield '-c'
 
-            if self.host is not None:
-                bootstrap = ''.join(("'", self.bootstrap, "'"))
-            else:
-                bootstrap = self.bootstrap
-
-            msgpack_code = inspect.getsource(mp).encode()
-            msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(mp))
-
-            yield bootstrap.format(
-                code=base64.b64encode(zlib.compress(code_source, 9)).decode(),
-                code_path=code_path,
-                msgpack_code=base64.b64encode(zlib.compress(msgpack_code, 9)).decode(),
-                msgpack_code_path=msgpack_code_path,
-                options=base64.b64encode(core.encode(options)).decode(),
-            )
+            yield bootstrap_code
 
             # yield ' 2> /tmp/core.log'
 
@@ -271,7 +277,7 @@ async def feed_stdin_to_remotes(**options):
 
     remote = await Remote.launch(
         code=core,
-        target=Target(host='localhost'),
+        # target=Target(host='localhost'),
         python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
         options=options
     )
