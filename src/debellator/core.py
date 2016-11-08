@@ -659,16 +659,9 @@ class Channel:
 # we should bind it somehow to the used io_queues/remote instance
 def exclusive(fun):
     """Make an async function call exclusive."""
-    logger.debug("\n\nexclusive loop", asyncio.get_event_loop())
     lock = asyncio.Lock()
 
     async def locked_fun(*args, **kwargs):
-        task = asyncio.Task.current_task()
-        logger.debug("task loop: %s", id(task._loop))
-
-        logger.debug("Calling locked function: %s -> %s", lock, fun)
-
-        logger.debug("lock loop: %s", id(lock._loop))
         async with lock:
             logger.debug("Executing locked function: %s -> %s", lock, fun)
             return await fun(*args, **kwargs)
