@@ -28,7 +28,7 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
     def __new__(cls, host=None, user=None, sudo=None):
         return super(Target, cls).__new__(cls, host, user, sudo)
 
-    def command_args(self, code, *, options=None, python_bin=sys.executable):
+    def command_args(self, *, code=None, options=None, python_bin=sys.executable):
         """Generate the command arguments to execute a python process."""
         if options is None:
             options = {}
@@ -162,6 +162,26 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
         return command_args
 
+    def launch(self, *, code=None, options=None, python_bin=sys.executable, stderr_cb=None, **kwargs):
+        command_args = self.command_args(code=code, options=options, python_bin=python_bin)
+
+        class _context:
+            async def __aenter__(ctx):
+                self.transport, remote = await asyncio.get_event_loop().subprocess_exec(
+                    asyncio.subprocess.SubprocessStreamProtocol,
+                    *command_args,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **kwargs
+                )
+                return remote
+
+            async def __aexit__(cts, *args):
+                self.transport.close()
+
+        return _context()
+
 
 class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
@@ -175,13 +195,8 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
             loop=asyncio.get_event_loop()
         )
 
-        self.io_queues = core.IoQueues()
-
         self.pid = None
         self.returncode = None
-
-        # a future indicating a receiving remote
-        self.receiving = None
 
     def connection_made(self, transport):
         super(Remote, self).connection_made(transport)
@@ -199,10 +214,6 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
     def add_finalizer(self, func):
         self.finalizer.append(func)
 
-    async def process_launched(self):
-        # setup all plugin commands for this remote
-        await core.Command.local_setup(self.io_queues)
-
     async def wait(self):
         """Wait until the process exit and return the process return code.
 
@@ -217,61 +228,6 @@ class Remote(asyncio.subprocess.SubprocessStreamProtocol):
 
     def kill(self):
         self._transport.kill()
-
-    @classmethod
-    async def launch(cls, target=None, *, python_bin=sys.executable, code=None, options=None, **kwargs):
-        """Create a remote process."""
-
-        if target is None:
-            target = Target()
-
-        command_args = target.command_args(code, options=options, python_bin=python_bin)
-
-        remote = cls()
-        await asyncio.get_event_loop().subprocess_exec(
-            lambda: remote,
-            *command_args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **kwargs
-        )
-
-        try:
-            return remote
-
-        finally:
-            await remote.process_launched()
-
-    async def _connect_stderr(self):
-        """Collect error messages from remote in stderr queue."""
-
-        async for line in self.stderr:
-            logger.debug("\tRemote #%s: %s", self.pid, line[:-1].decode())
-
-    async def communicate(self):
-        """Start channel communication."""
-
-        receiving = asyncio.gather(
-            asyncio.ensure_future(core.Channel.communicate(self.io_queues, self.stdout, self.stdin)),
-            asyncio.ensure_future(self._connect_stderr()),
-        )
-
-        self.receiving = receiving
-
-        try:
-            await self.receiving
-
-        except asyncio.CancelledError:
-            try:
-                self.terminate()
-
-            except ProcessLookupError:
-                pass
-
-        finally:
-            self.receiving = None
-            self._transport.close()
 
 
 def parse_command(line):
@@ -308,6 +264,11 @@ async def _execute_command(io_queues, line):
         return result
 
 
+async def log_remote_stderr(remote):
+    async for line in remote.stderr:
+        logger.debug("\tRemote #%s: %s", remote.pid, line[:-1].decode())
+
+
 async def feed_stdin_to_remotes(**options):
 
     default_lines = {
@@ -315,36 +276,38 @@ async def feed_stdin_to_remotes(**options):
         b'i\n': b'dbltr.core:InvokeImport fullname=dbltr.plugins.core\n',
     }
 
-    remote = await Remote.launch(
-        code=core,
-        target=Target(host='localhost'),
-        python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
-        options=options
-    )
-
-    # start remote communication
-    asyncio.ensure_future(remote.communicate())
-
     try:
-        async with core.Incomming(pipe=sys.stdin) as reader:
-            while True:
-                line = await reader.readline()
+        async with Target(host='localhost').launch(
+                code=core,
+                python_bin='~/.pyenv/versions/3.5.2/bin/python',
+                options=options
+        ) as remote:
+            # setup launch specific tasks
+            io_queues = core.IoQueues()
+            await core.Command.local_setup(io_queues)
 
-                if line is b'':
-                    break
+            remote_com = asyncio.ensure_future(core.Channel.communicate(io_queues, remote.stdout, remote.stdin))
+            remote_err = asyncio.ensure_future(log_remote_stderr(remote))
 
-                if line in default_lines:
-                    line = default_lines[line]
+            async with core.Incomming(pipe=sys.stdin) as reader:
+                while True:
+                    line = await reader.readline()
 
-                if remote.returncode is None:
-                    result = await _execute_command(remote.io_queues, line)
-                    # result = await asyncio.ensure_future(_execute_command(remote, line))
-                    # result = await asyncio.gather(
-                    #     _execute_command(remote.io_queues, line),
-                    #     _execute_command(remote.io_queues, line),
-                    # )
+                    if line is b'':
+                        break
 
-                    print("< {}\n > ".format(result), end='')
+                    if line in default_lines:
+                        line = default_lines[line]
+
+                    if remote.returncode is None:
+                        result = await _execute_command(io_queues, line)
+                        # result = await asyncio.ensure_future(_execute_command(remote, line))
+                        # result = await asyncio.gather(
+                        #     _execute_command(remote.io_queues, line),
+                        #     _execute_command(remote.io_queues, line),
+                        # )
+
+                        print("< {}\n > ".format(result), end='')
 
     except asyncio.CancelledError:
         pass
@@ -375,7 +338,7 @@ def main(debug=False, log_config=None):
     loop = asyncio.get_event_loop()
 
     options = {
-        'debug': loop.get_debug(),
+        'debug': debug,
         'log_config': log_config,
         'venv': False,
         # 'venv': True,
