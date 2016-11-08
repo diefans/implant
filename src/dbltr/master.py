@@ -14,36 +14,15 @@ from collections import namedtuple
 
 from dbltr import core, task, mp
 
-PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
-
 logger = logging.getLogger(__name__)
+PLUGINS_ENTRY_POINT_GROUP = 'dbltr.plugins'
+VENV_DEFAULT = '~/.debellator'
 
 
 class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
 
     """A unique representation of a Remote."""
 
-    bootstrap = '\n'.join((
-        'import os, site;',
-        'venv_path = "{venv_path}";'
-
-        'import sys, imp, base64, zlib;',
-        'try:',
-        '   import msgpack;',
-        'except ImportError:',
-        '   sys.modules["msgpack"] = msgpack = imp.new_module("msgpack");',
-        '   c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec");',
-        '   exec(c, msgpack.__dict__);',
-
-        'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);',
-        'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");',
-        'dbltr.__dict__["core"] = core;',
-
-        'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True);',
-        'exec(c, core.__dict__);',
-
-        'core.main(**core.decode(base64.b64decode(b"{options}")));',
-    ))
     """Bootstrapping of core module on remote."""
 
     def __new__(cls, host=None, user=None, sudo=None):
@@ -67,16 +46,77 @@ class Target(namedtuple('Target', ('host', 'user', 'sudo'))):
             code_source = code
             code_path = 'remote-string://'
 
-        if self.host is not None:
-            bootstrap = ''.join(("'", self.bootstrap, "'"))
-        else:
-            bootstrap = self.bootstrap
+        # if self.host is not None:
+        #     bootstrap = ''.join(("'", self.bootstrap, "'"))
+        # else:
+        #     bootstrap = self.bootstrap
 
         msgpack_code = inspect.getsource(mp).encode()
         msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(mp))
 
-        bootstrap_code = bootstrap.format(
-            venv_path='/tmp/foo',
+        venv = options.get('venv')
+        venv = VENV_DEFAULT if venv is True\
+            else None if venv is False\
+            else venv
+
+        def iter_bootstrap():
+            if self.host is not None:
+                yield "'"
+
+            if venv:
+                yield from (
+                    'import os, sys, site, pkg_resources;',
+                    'venv_path = os.path.expanduser("{venv}");'
+                    'entry = site.getsitepackages([venv_path])[0]',
+
+                    # create venv if missing
+                    'if not os.path.isdir(entry):',
+                    '   import venv',
+                    '   venv.create(venv_path, system_site_packages=False, clear=True, symlinks=False, with_pip=True)',
+
+                    # insert venv at first position
+                    # pkg_resources is not adding site-packages if there is no distribution
+                    'sys.prefix = venv_path',
+                    'sys.path.insert(0, entry);',
+                    'site.addsitedir(entry);',
+                    'pkg_resources.working_set.add_entry(entry);',
+
+                    # pip should come from venv now
+                    'try:',
+                    '   import msgpack',
+                    'except ImportError:',
+                    # try to install msgpack
+                    '   import pip',
+                    # TODO use ssh port forwarding to install via master
+                    '   pip.main(["install", "--prefix", venv_path, "-q", "msgpack-python"])',
+                )
+
+            yield from (
+                'import sys, imp, base64, zlib;',
+                # just a msgpack fallback if no venv is used or msgpack somehow failed to install
+                'try:',
+                '   import msgpack;',
+                'except ImportError:',
+                '   sys.modules["msgpack"] = msgpack = imp.new_module("msgpack");',
+                '   c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec");',
+                '   exec(c, msgpack.__dict__);',
+
+                'sys.modules["dbltr"] = dbltr = imp.new_module("dbltr"); setattr(dbltr, "__path__", []);',
+                'sys.modules["dbltr.core"] = core = imp.new_module("dbltr.core");',
+                'dbltr.__dict__["core"] = core;',
+
+                'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True);',
+                'exec(c, core.__dict__);',
+
+                'core.main(**core.decode(base64.b64decode(b"{options}")));',
+            )
+
+            if self.host is not None:
+                yield "'"
+
+
+        bootstrap_code = '\n'.join(iter_bootstrap()).format(
+            venv=venv,
             code=base64.b64encode(zlib.compress(code_source, 9)).decode(),
             code_path=code_path,
             msgpack_code=base64.b64encode(zlib.compress(msgpack_code, 9)).decode(),
@@ -277,7 +317,7 @@ async def feed_stdin_to_remotes(**options):
 
     remote = await Remote.launch(
         code=core,
-        # target=Target(host='localhost'),
+        target=Target(host='localhost'),
         python_bin=os.path.expanduser('~/.pyenv/versions/3.5.2/bin/python'),
         options=options
     )
@@ -337,6 +377,9 @@ def main(debug=False, log_config=None):
     options = {
         'debug': loop.get_debug(),
         'log_config': log_config,
+        'venv': False,
+        # 'venv': True,
+        # 'venv': '~/.debellator',
     }
 
     if debug:

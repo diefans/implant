@@ -1007,8 +1007,6 @@ class InvokeImport(Command):
                 # import dbltr.plugins.core
                 importlib.import_module(self.fullname)
 
-                logger.debug("Available modules: %s", list(sorted(sys.modules.keys())))
-
             except ImportError:
                 logger.debug("Error when importing %s:\n%s", self.fullname, traceback.format_exc())
                 raise
@@ -1252,6 +1250,7 @@ def main(debug=False, log_config=None, **kwargs):
     sys.meta_path.append(remote_module_finder)
 
     logger.debug("meta path: %s", sys.meta_path)
+    logger.debug("msgpack used: %s", msgpack)
 
     try:
         loop.run_until_complete(
