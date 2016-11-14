@@ -18,16 +18,16 @@ PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
 VENV_DEFAULT = '~/.debellator'
 
 
-class Remote(namedtuple('Remote', ('host', 'user', 'sudo'))):
+class Remote(namedtuple('Remote', ('hostname', 'user', 'sudo'))):
 
     """A unique representation of a Remote."""
 
-    def __new__(cls, host=None, user=None, sudo=None):
-        return super(Remote, cls).__new__(cls, host, user, sudo)
+    def __new__(cls, hostname=None, user=None, sudo=None):
+        return super(Remote, cls).__new__(cls, hostname, user, sudo)
 
     def _iter_bootstrap(self, venv):
         """Bootstrapping of core module on remote."""
-        if self.host is not None:
+        if self.hostname is not None:
             yield "'"
 
         if venv:
@@ -78,7 +78,7 @@ class Remote(namedtuple('Remote', ('host', 'user', 'sudo'))):
             'core.main(**core.decode(base64.b64decode(b"{options}")));',
         )
 
-        if self.host is not None:
+        if self.hostname is not None:
             yield "'"
 
     def command_args(self, *, code=None, options=None, python_bin=sys.executable):
@@ -118,7 +118,7 @@ class Remote(namedtuple('Remote', ('host', 'user', 'sudo'))):
 
         def _gen():
             # ssh
-            if self.host is not None:
+            if self.hostname is not None:
                 yield 'ssh'
                 yield '-T'
                 # optionally with user
@@ -130,10 +130,10 @@ class Remote(namedtuple('Remote', ('host', 'user', 'sudo'))):
                 yield '-R'
                 yield '10001:localhost:10000'
 
-                yield self.host
+                yield self.hostname
 
             # sudo
-            if self.sudo is not None:
+            if self.sudo:
                 yield 'sudo'
                 # optionally with user
                 if self.sudo is not True:
@@ -218,7 +218,7 @@ async def feed_stdin_to_remotes(**options):
         b'i\n': b'debellator.core:InvokeImport fullname=debellator.plugins.core\n',
     }
 
-    process = await Remote(host='localhost').launch(
+    process = await Remote(hostname='localhost').launch(
         code=core,
         python_bin='~/.pyenv/versions/3.5.2/bin/python',
         options=options

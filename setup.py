@@ -87,7 +87,10 @@ setup(
         'debellator.plugins': [
             '_=debellator.core',
             'core=debellator.plugins.core'
-        ]
+        ],
+        'debellator.specs': [
+            'default=debellator.specs'
+        ],
     },
 
     install_requires=[

@@ -1,0 +1,19 @@
+---
+
+# test specs
+
+localhost: !remote
+    hostname: localhost
+
+
+test: !group
+    - !ref localhost
+
+test: !group
+    - !remote
+        hostname: 127.0.0.1
+
+foo:
+    bar:
+        baz: bam
+        bim: boo
