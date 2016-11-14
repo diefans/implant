@@ -1,3 +1,95 @@
+"""YAML parsing and general plugin layout.
+
+Entry point group: debellator.specs
+
+Each entry point must point to a package, where the package will setup specific yaml extensions and containing yaml
+resource files will be collected for public definitions.  The name and location of a yaml spec file has no semantic and
+serves only as a means to keep things structured for the spec provider.
+
+Thus a definition name has to be unique for an entry point. To address this feature, a definition may be referenced
+by a namespace prefix which is equal to the entry point name:
+
+---
+# hosts.yaml in entry point group `default`
+local: !remote
+    groups:
+        - !ref group
+
+    hostname: localhost
+    # host vars
+    scope: !scope
+        defaults:
+            var1: 123
+            var2: 345
+
+
+# groups.yaml
+group: !group
+  members:
+    - !ref default:local
+    # a reference without namespace points always to the namespace where it is contained
+    - !ref local
+  # group vars will secondary after host vars
+  scope: !scope
+    var1: foo
+    var3: bar
+
+
+# common task params
+task: !task
+    # a task has always an implicite scope
+    # which will be exported
+    scope: !scope
+        defaults: !ref other_scope
+        privates:
+            foo: bar
+
+        publics:
+            baz: bam
+
+    # target
+    target: !remote
+        hostname: localhost
+
+
+- get_var('foobar', remote)
+        |
+        v
+    remote.empty_root_scope
+    group scope
+    host scope
+    facts
+
+
+
+# export facts into the parent scope
+facts: !load_facts
+    # push scope
+
+
+
+
+nginx_package: !package
+    name: nginx-full
+    state: present
+
+nginx_service: !service
+    name: nginx
+    state: started
+
+nginx_default_config: !template
+    scope: !scope
+        server_name: (!ref default:local).hostname
+    depends:
+    src: !asset <namespace>:templates/nginx.conf.j2
+    engine: jinja2
+    dest: /tec/nginx/nginx.conf
+
+
+setup: !queue
+    - !ref nginx_default_config
+
+"""
 import os
 import pkg_resources
 import yaml

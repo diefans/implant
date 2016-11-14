@@ -7,7 +7,7 @@ localhost: !remote
 
 
 test: !group
-    - !ref localhost
+    - !ref default:localhost
 
 test: !group
     - !remote

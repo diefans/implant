@@ -91,6 +91,9 @@ setup(
         'debellator.specs': [
             'default=debellator.specs'
         ],
+        'debellator.assets': [
+            'default=debellator.assets'
+        ],
     },
 
     install_requires=[
