@@ -107,50 +107,32 @@ class DuplicateDefinition(SyntaxError):
     pass
 
 
-class Loader(
-        yaml.loader.Reader,
-        yaml.loader.Scanner,
-        yaml.loader.Parser,
-        yaml.loader.Composer,
-        yaml.loader.Constructor,
-        yaml.loader.Resolver):
-
-    def __init__(self, stream):
-        yaml.loader.Reader.__init__(self, stream)
-        yaml.loader.Scanner.__init__(self)
-        yaml.loader.Parser.__init__(self)
-        yaml.loader.Composer.__init__(self)
-        yaml.loader.Constructor.__init__(self)
-        yaml.loader.Resolver.__init__(self)
-
-        print("Loader:", id(self))
-
-        self.mapping_keys = {}
+class Loader(yaml.loader.Loader):
 
     def construct_yaml_map(self, node):
-        data = OrderedDict()
+        data = OrderedDict(self.construct_pairs(node))
         yield data
-        for k, v in self.contruct_pairs(node):
-            data[k] = v
-        # value = self.construct_mapping(node)
-        # data.update(value)
 
-    def construct_pairs(self, node, deep=False):
+    def construct_no_duplicate_yaml_map(self, node):
+        data = OrderedDict(self.generate_no_duplicate_pairs(node))
+        yield data
+
+    def generate_no_duplicate_pairs(self, node, deep=False):
         if not isinstance(node, yaml.nodes.MappingNode):
             raise yaml.constructor.ConstructorError(None, None,
                                                     "expected a mapping node, but found %s" % node.id,
                                                     node.start_mark)
-        pairs = []
+        mapping_keys = {}
         for key_node, value_node in node.value:
             key = self.construct_object(key_node, deep=deep)
             value = self.construct_object(value_node, deep=deep)
 
             # store k/v for error reporting
-            if key not in self.mapping_keys:
-                self.mapping_keys[key] = (key_node, value_node, value)
+            if key not in mapping_keys:
+                mapping_keys[key] = (key_node, value_node, value)
 
             else:
-                context_key_node, context_value_node, context_value = self.mapping_keys[key]
+                context_key_node, context_value_node, context_value = mapping_keys[key]
 
                 raise DuplicateDefinition(
                     context='\nPrevious definition:\n{}: {}'.format(
@@ -165,36 +147,51 @@ class Loader(
                     note='Duplicate definition!'
                 )
 
-            pairs.append((key, value))
-        return pairs
+            yield key, value
 
 
 class Spec:
-    def __init__(self, namespace, filename):
-        self.namespace = namespace
-        self.filename = filename
+    def __init__(self, source):
+        self.namespace = None
+        self.source = self.filename = source
 
     def __hash__(self):
-        return hash((self.namespace, self.filename))
+        return hash((self.namespace, self.source))
 
     def __eq__(self, other):
         assert isinstance(other, Spec)
-        return self.namespace, self.filename == other.namespace, other.filename
+        return self.namespace, self.source == other.namespace, other.source
+
+    def __repr__(self):
+        return '<Spec {0.namespace}:{0.source}>'.format(self)
 
     def load(self):
         with open(self.filename) as spec_file:
-            definitions = yaml.load(spec_file, Loader=Loader)
+            class SpecLoader(Loader):
+                spec = self
+
+            definitions = yaml.load(spec_file, Loader=SpecLoader)
 
             # set spec of each definition
-            for definition in definition.values():
+            for definition in definitions.values():
                 definition.spec = self
 
         return definitions
 
 
-class NonameSpec(Spec):
-    def __init__(self, filename):
-        super(NonameSpec, self).__init__(None, filename)
+class EntryPointSpec(Spec):
+
+    _entry_point_group = 'debellator.specs'
+
+    def __init__(self, entry_point, resource_name):
+        super(EntryPointSpec, self).__init__(resource_name)
+
+        if isinstance(entry_point, str):
+            entry_point = list(pkg_resources.iter_entry_points(self._entry_point_group, name=entry_point))[0]
+
+        self.entry_point = entry_point
+        self.namespace = entry_point.name
+        self.filename = pkg_resources.resource_filename(entry_point.module_name, resource_name)
 
 
 class YamlMixin(yaml.YAMLObject):
@@ -214,8 +211,9 @@ class MappingConstructor(YamlMixin):
     @classmethod
     def from_yaml(cls, loader, node):
         # collect all root mappings
+        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
         # and verifiy its uniqueness
-        return loader.construct_pairs(node)
+        return loader.construct_no_duplicate_yaml_map(node)
 
 
 class Definition:
@@ -270,9 +268,16 @@ class GroupDefinition(Definition, YamlMixin):
 class ReferenceDefinition(Definition, YamlMixin):
     yaml_tag = '!ref'
 
-    def __init__(self, name):
+    _partition = ':'
+
+    def __init__(self, name, *, namespace=None, source=None):
+        if source is None:
+            assert namespace is None, "A reference to a namespace without source may be ambiguous!"
+
         super(ReferenceDefinition, self).__init__()
         self.name = name
+        self.namespace = namespace
+        self.source = source
 
     @classmethod
     def to_yaml(cls, dumper, data):
@@ -281,8 +286,18 @@ class ReferenceDefinition(Definition, YamlMixin):
 
     @classmethod
     def from_yaml(cls, loader, node):
-        name = loader.construct_scalar(node)
-        return cls(name)
+        if isinstance(node, yaml.nodes.ScalarNode):
+            fq_name = loader.construct_scalar(node)
+
+            ns_source, _, name = fq_name.rpartition(cls._partition)
+            ns, _, source = ns_source.rpartition(cls._partition)
+
+            return cls(name, namespace=ns, source=source)
+
+        else:
+            # assert mapping
+            mapping = loader.construct_mapping(node)
+            return cls(mapping['name'], namespace=mapping['namespace'], source=mapping['source'])
 
 
 class Specs(set):
@@ -316,7 +331,7 @@ class Specs(set):
             else:
                 _, ext = os.path.splitext(resource_name)
                 if ext in ('.yml', '.yaml'):
-                    self.add(Spec(entry_point.name, pkg_resources.resource_filename(module_name, resource_name)))
+                    self.add(EntryPointSpec(entry_point, resource_name))
 
     def _collect_from_directory(self, path):
         pass

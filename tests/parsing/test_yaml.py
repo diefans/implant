@@ -3,11 +3,11 @@ def test_collect_specs():
     import os
     from debellator import parsing
 
-    specs = parsing.Specs(*pkg_resources.iter_entry_points(group='debellator.specs', name='default'))
+    ep, *_ = pkg_resources.iter_entry_points(group='debellator.test.specs', name='default')
+    specs = parsing.Specs(ep)
 
     assert specs == {
-        parsing.Spec('default', os.path.join(pkg_resources.resource_filename('debellator.specs', ''),
-                                             'test.yaml'))
+        parsing.EntryPointSpec(ep, 'test.yaml')
     }
 
 
@@ -15,7 +15,7 @@ def test_load_definitions():
     import pkg_resources
     from debellator import parsing
 
-    specs = parsing.Specs(*pkg_resources.iter_entry_points(group='debellator.specs', name='default'))
+    specs = parsing.Specs(*pkg_resources.iter_entry_points(group='debellator.test.specs', name='default'))
 
     for spec in specs:
         defs = spec.load()

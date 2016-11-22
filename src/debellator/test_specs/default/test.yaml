@@ -1,0 +1,20 @@
+---
+
+# test specs
+
+localhost: !remote
+    hostname: localhost
+
+
+test: !group
+    - !ref localhost
+    - !ref foo.yaml:localhost
+    - !ref foobar:foo/bar.yaml:localhost
+    - !ref
+        namespace: default
+        source: test.yaml
+        name: localhost
+
+foo:
+    bar:
+        test: foobar

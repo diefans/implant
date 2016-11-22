@@ -89,7 +89,11 @@ setup(
             'core=debellator.plugins.core'
         ],
         'debellator.specs': [
-            'default=debellator.specs'
+            'default=debellator.specs',
+        ],
+        'debellator.test.specs': [
+            'default=debellator.test_specs.default',
+            'duplicate=debellator.test_specs.duplicate'
         ],
         'debellator.assets': [
             'default=debellator.assets'
