@@ -68,6 +68,24 @@ facts: !load_facts
 
 
 
+upstream1: foo
+upstream2: bar
+
+node: !node
+    join:
+        - !condition
+            when: foo
+            do: !export
+                name: upstream_result
+                value: !ref upstream1
+        - !copy
+            src: !scope upstream_result
+            dest: foo
+    spawn:
+        - !service
+            name: nginx
+            state: started
+        - !event startup
 
 nginx_package: !package
     name: nginx-full
@@ -85,9 +103,22 @@ nginx_default_config: !template
     engine: jinja2
     dest: /tec/nginx/nginx.conf
 
+nginx: !composition
+    - !ref
+
 
 setup: !queue
+    - !ref nginx_package
     - !ref nginx_default_config
+    - !ref nginx_service
+
+
+---
+
+# Component to remote attribution
+# group to node mapping
+
+
 
 """
 import os
