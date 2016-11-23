@@ -8,10 +8,16 @@ localhost: !remote
 
 test: !group
     - !ref localhost
-    - !ref foo.yaml:localhost
+    - !ref ./:test.yaml:localhost
+    - !ref default:test.yaml:localhost
+    - !ref debellator#default:test.yaml:localhost
     - !ref foobar:foo/bar.yaml:localhost
     - !ref
-        namespace: default
+        namespace: !ns ./
+        source: test.yaml
+        name: localhost
+    - !ref
+        namespace: !ns default
         source: test.yaml
         name: localhost
 

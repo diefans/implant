@@ -94,6 +94,7 @@ import os
 import pkg_resources
 import yaml
 from collections import OrderedDict
+import functools
 
 
 root_definitions = OrderedDict()
@@ -150,25 +151,119 @@ class Loader(yaml.loader.Loader):
             yield key, value
 
 
-class Spec:
-    def __init__(self, source):
-        self.namespace = None
-        self.source = self.filename = source
+class NamespaceMeta(type):
+    def from_scalar(cls, value):
+        if value[0] in (os.path.sep, '.'):
+            ns = Namespace(value)
+        else:
+            ns = EntryPointNamespace.from_scalar(value)
+
+        return ns
+
+
+class Namespace(metaclass=NamespaceMeta):
+    def __init__(self, path=None):
+        self.path = path or './'
+
+    def listdir(self, resource_name):
+        return os.path.listdir(self.path(resource_name))
+
+    def isdir(self, resource_name):
+        return os.path.isdir(self.path(resource_name))
+
+    def path(self, resource_name):
+        return os.path.join(self.path, resource_name)
+
+    def open(self, source):
+        return open(self.path(source))
+
+    def __repr__(self):
+        return self.path
+
+    def __hash__(self):
+        return hash(repr(self))
+
+    def __eq__(self, other):
+        assert isinstance(other, Namespace)
+        return repr(self) == repr(other)
+
+    def iter_sources(self, resource_name=''):
+        resources = [resource_name]
+
+        while resources:
+            resource_name = resources.pop(0)
+
+            if self.isdir(resource_name):
+                resources.extend([
+                    os.path.join(resource_name, child)
+                    for child in self.listdir(resource_name)
+                ])
+
+            else:
+                _, ext = os.path.splitext(resource_name)
+                if ext in ('.yml', '.yaml'):
+                    yield resource_name
+
+
+class EntryPointNamespace(Namespace):
+    _entry_point_group = 'debellator.specs'
+
+    def __init__(self, entry_point):
+        self.entry_point = entry_point
+
+        module_name = entry_point.module_name
+
+        self.isdir = functools.partial(pkg_resources.resource_isdir, module_name)
+        self.listdir = functools.partial(pkg_resources.resource_listdir, module_name)
+
+    def open(self, source):
+        return pkg_resources.resource_stream(self.entry_point.module_name, source)
+
+    def __repr__(self):
+        return '{0.dist.key}#{0.name}:'.format(self.entry_point)
+
+    @classmethod
+    def from_scalar(cls, value):
+        dist, _, name = value.rpartition('#')
+        if not dist:
+            # take first ep found
+            ep = list(pkg_resources.iter_entry_points(cls._entry_point_group, name))[0]
+
+        else:
+            ep = pkg_resources.get_entry_map(dist, group=cls._entry_point_group)[name]
+
+        return cls(ep)
+
+
+class Spec(OrderedDict):
+    def __init__(self, source, *, namespace=None):
+        self.namespace = namespace or Namespace()
+        self.source = source
+
+        super(Spec, self).__init__(self.load())
 
     def __hash__(self):
         return hash((self.namespace, self.source))
 
     def __eq__(self, other):
         assert isinstance(other, Spec)
-        return self.namespace, self.source == other.namespace, other.source
+        return self.namespace == other.namespace and self.source == other.source
 
     def __repr__(self):
-        return '<Spec {0.namespace}:{0.source}>'.format(self)
+        return '<Spec {0.namespace}{0.source}>'.format(self)
 
     def load(self):
-        with open(self.filename) as spec_file:
+        """Load a yaml source from the namespace."""
+        with self.namespace.open(self.source) as spec_file:
             class SpecLoader(Loader):
                 spec = self
+
+                def construct_object(self, node, deep=False):
+                    data = super(SpecLoader, self).construct_object(node, deep=deep)
+                    if isinstance(data, Definition):
+                        data.spec = self.spec
+
+                    return data
 
             definitions = yaml.load(spec_file, Loader=SpecLoader)
 
@@ -179,23 +274,28 @@ class Spec:
         return definitions
 
 
-class EntryPointSpec(Spec):
+class Specs(dict):
+    # TODO Specs should be a dict of namespaces and sources pointing to a spec
+    def __init__(self, *roots):
+        super(Specs, self).__init__()
 
-    _entry_point_group = 'debellator.specs'
+        for root in roots:
+            if isinstance(root, pkg_resources.EntryPoint):
+                namespace = EntryPointNamespace(root)
 
-    def __init__(self, entry_point, resource_name):
-        super(EntryPointSpec, self).__init__(resource_name)
+            else:
+                namespace = Namespace(root)
 
-        if isinstance(entry_point, str):
-            entry_point = list(pkg_resources.iter_entry_points(self._entry_point_group, name=entry_point))[0]
+            if namespace not in self:
+                namespace_specs = self[namespace] = {}
 
-        self.entry_point = entry_point
-        self.namespace = entry_point.name
-        self.filename = pkg_resources.resource_filename(entry_point.module_name, resource_name)
+            namespace_specs.update(
+                ((resource_name, Spec(resource_name, namespace=namespace)) for resource_name in namespace.iter_sources())
+            )
 
 
 class YamlMixin(yaml.YAMLObject):
-    yaml_loader = Loader
+    # yaml_loader = Loader
     yaml_flow_style = False
 
     def __str__(self):
@@ -210,15 +310,25 @@ class MappingConstructor(YamlMixin):
 
     @classmethod
     def from_yaml(cls, loader, node):
-        # collect all root mappings
-        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
-        # and verifiy its uniqueness
         return loader.construct_no_duplicate_yaml_map(node)
 
 
 class Definition:
     def __init__(self):
         self.spec = None
+
+
+class NamespaceDefinition(Definition, YamlMixin):
+    yaml_tag = '!ns'
+
+    def __init__(self, namespace):
+        super(NamespaceDefinition, self).__init__()
+        self.namespace = namespace
+
+    @classmethod
+    def from_yaml(cls, loader, node):
+        value = loader.construct_scalar(node)
+        return cls(Namespace.from_scalar(value))
 
 
 class RemoteDefinition(Definition, YamlMixin):
@@ -292,51 +402,14 @@ class ReferenceDefinition(Definition, YamlMixin):
             ns_source, _, name = fq_name.rpartition(cls._partition)
             ns, _, source = ns_source.rpartition(cls._partition)
 
-            return cls(name, namespace=ns, source=source)
+            namespace = ns or loader.spec.namespace
+            source = source or loader.spec.source
 
         else:
             # assert mapping
             mapping = loader.construct_mapping(node)
-            return cls(mapping['name'], namespace=mapping['namespace'], source=mapping['source'])
+            name = mapping['name']
+            namespace = mapping.get('namespace', loader.spec.namespace)
+            source = mapping.get('source', loader.spec.source)
 
-
-class Specs(set):
-    def __init__(self, *roots):
-        super(Specs, self).__init__()
-
-        for root in roots:
-            if isinstance(root, pkg_resources.EntryPoint):
-                self._collect_from_entry_point(root)
-
-            else:
-                self._collect_from_directory(root)
-
-    def _collect_from_entry_point(self, entry_point, resource_name=''):
-        module_name = entry_point.module_name
-
-        assert pkg_resources.resource_isdir(module_name, resource_name),\
-            'Entrypoint {} is no directory'.format(entry_point)
-
-        resources = [resource_name]
-
-        while resources:
-            resource_name = resources.pop(0)
-
-            if pkg_resources.resource_isdir(module_name, resource_name):
-                resources.extend([
-                    os.path.join(resource_name, child)
-                    for child in pkg_resources.resource_listdir(module_name, resource_name)
-                ])
-
-            else:
-                _, ext = os.path.splitext(resource_name)
-                if ext in ('.yml', '.yaml'):
-                    self.add(EntryPointSpec(entry_point, resource_name))
-
-    def _collect_from_directory(self, path):
-        pass
-
-
-def collect_definitions(specs):
-    """traverse specs and create definitions."""
-
+        return cls(name, namespace=namespace, source=source)
