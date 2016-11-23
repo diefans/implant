@@ -174,8 +174,8 @@ class Namespace(metaclass=NamespaceMeta):
     def path(self, resource_name):
         return os.path.join(self.path, resource_name)
 
-    def open(self, source):
-        return open(self.path(source))
+    def open(self, resource_name):
+        return open(self.path(resource_name))
 
     def __repr__(self):
         return self.path
@@ -216,8 +216,11 @@ class EntryPointNamespace(Namespace):
         self.isdir = functools.partial(pkg_resources.resource_isdir, module_name)
         self.listdir = functools.partial(pkg_resources.resource_listdir, module_name)
 
-    def open(self, source):
-        return pkg_resources.resource_stream(self.entry_point.module_name, source)
+    def path(self, resource_name):
+        return pkg_resources.resource_filename(self.entry_point.module_name, resource_name)
+
+    def open(self, resource_name):
+        return pkg_resources.resource_stream(self.entry_point.module_name, resource_name)
 
     def __repr__(self):
         return '{0.dist.key}#{0.name}:'.format(self.entry_point)
