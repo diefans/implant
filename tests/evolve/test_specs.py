@@ -26,24 +26,24 @@ def specs_entry_point_duplicates(dist):
 
 
 def test_collect_specs(specs_entry_point):
-    from debellator import parsing
+    from debellator.evolve import specs
 
-    specs = parsing.Specs(specs_entry_point)
+    spx = specs.Specs(specs_entry_point)
 
-    assert specs == {
-        parsing.EntryPointNamespace(specs_entry_point): {
-            'test.yaml': parsing.Spec('test.yaml', namespace=parsing.EntryPointNamespace(specs_entry_point))
+    assert spx == {
+        specs.EntryPointNamespace(specs_entry_point): {
+            'test.yaml': specs.Spec('test.yaml', namespace=specs.EntryPointNamespace(specs_entry_point))
         }
     }
 
 
 def test_definitions(specs_entry_point):
-    from debellator import parsing
+    from debellator.evolve import specs
 
-    specs = parsing.Specs(specs_entry_point)
-    namespace = parsing.EntryPointNamespace(specs_entry_point)
+    spx = specs.Specs(specs_entry_point)
+    namespace = specs.EntryPointNamespace(specs_entry_point)
 
-    namespace_specs = specs[namespace]
+    namespace_specs = spx[namespace]
 
     assert list(namespace_specs.keys()) == ['test.yaml']
     assert list(namespace_specs['test.yaml'].keys()) == ['localhost', 'test', 'foo']
