@@ -1,0 +1,15 @@
+---
+
+hosts: !group
+    - !remote
+        hostname: foobar
+        sudo: true
+        user: dbltr
+
+evolve:
+    - !for
+        iterate: !ref hosts
+        name: host
+        do: !spawn {}
+
+

@@ -258,3 +258,31 @@ class ReferenceDefinition(specs.Definition, YamlMixin):
             source = mapping.get('source', loader.spec.source)
 
         return cls(name, namespace=namespace, source=source)
+
+
+class ForDefinition(specs.Definition, YamlMixin):
+    yaml_tag = '!for'
+
+    def __init__(self, *, iterate, name, do):
+        super(ForDefinition, self).__init__()
+        self.iterate = iterate
+        self.name = name
+        self.do = do
+
+    @classmethod
+    def from_yaml(cls, loader, node):
+        mapping = loader.construct_mapping(node)
+        return cls(**mapping)
+
+
+class SpawnDefinition(specs.Definition, YamlMixin):
+    yaml_tag = '!spawn'
+
+    def __init_(self):
+        super(SpawnDefinition, self).__init__()
+
+    @classmethod
+    def from_yaml(cls, loader, node):
+        mapping = loader.construct_mapping(node)
+
+        return cls(**mapping)

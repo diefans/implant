@@ -122,7 +122,7 @@ class DirectoryNamespace(Namespace):
         self.root = root or './'
 
     def listdir(self, resource_name):
-        return os.path.listdir(self.path(resource_name))
+        return os.listdir(self.path(resource_name))
 
     def isdir(self, resource_name):
         return os.path.isdir(self.path(resource_name))
@@ -134,7 +134,7 @@ class DirectoryNamespace(Namespace):
         return open(self.path(resource_name))
 
     def __repr__(self):
-        return self.path
+        return '{}:'.format(self.root)
 
 
 class EntryPointNamespace(Namespace):
@@ -223,18 +223,27 @@ class Specs(dict):
         super(Specs, self).__init__()
 
         for root in roots:
-            if isinstance(root, pkg_resources.EntryPoint):
-                namespace = EntryPointNamespace(root)
+            self.add_root(root)
 
-            else:
-                namespace = DirectoryNamespace(root)
+    def add_root(self, root):
+        if isinstance(root, pkg_resources.EntryPoint):
+            namespace = EntryPointNamespace(root)
 
-            if namespace not in self:
-                namespace_specs = self[namespace] = {}
+        else:
+            namespace = DirectoryNamespace(root)
 
-            namespace_specs.update(
-                ((resource_name, Spec(resource_name, namespace=namespace)) for resource_name in namespace.iter_sources())
+        if namespace not in self:
+            namespace_specs = self[namespace] = {}
+        else:
+            namespace_specs = self[namespace]
+
+        namespace_specs.update(
+            (
+                (resource_name, Spec(resource_name, namespace=namespace))
+                for resource_name in namespace.iter_sources()
             )
+        )
+
 
 
 class Definition:
