@@ -4,8 +4,7 @@ from collections import OrderedDict
 
 import pkg_resources
 import yaml
-
-root_definitions = OrderedDict()
+from zope import interface
 
 
 class YAMLSyntaxError(yaml.error.MarkedYAMLError):
@@ -245,7 +244,11 @@ class Specs(dict):
         )
 
 
+class IDefinition(interface.Interface):
+    spec = interface.Attribute('The spec this deinition belongs to.')
 
+
+@interface.implementer(IDefinition)
 class Definition:
 
     """A Definition holds a reference to its spec."""

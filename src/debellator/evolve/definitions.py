@@ -122,8 +122,9 @@ setup: !queue
 
 """
 import yaml
+from zope import interface
 
-from . import specs
+from . import specs, interfaces
 
 
 class YamlMixin(yaml.YAMLObject):
@@ -138,6 +139,12 @@ class YamlMixin(yaml.YAMLObject):
 
     def __repr__(self):
         return "<Def: {} {}>".format(self.yaml_tag, self.__dict__)
+
+    @classmethod
+    def from_yaml(cls, loader, node):
+        """Construct an object by mapping."""
+        mapping = loader.construct_mapping(node)
+        return cls(**mapping)
 
 
 class MappingConstructor(YamlMixin):
@@ -167,17 +174,32 @@ class NamespaceDefinition(specs.Definition, YamlMixin):
         return cls(specs.Namespace.from_scalar(value))
 
 
+@interface.implementer(interfaces.IEvolvable)
 class RemoteDefinition(specs.Definition, YamlMixin):
 
-    """A definition of a remote host."""
+    """A definition of a remote host.
+
+    .. code-block:: yaml
+
+        ---
+        host: !remote
+            hostname: foobar.example.com
+            user: dbltr
+            sudo: true
+            fallback: !remote
+                hostname: foobar.example.com
+                user: root
+
+    """
 
     yaml_tag = '!remote'
 
-    def __init__(self, hostname=None, user=None, sudo=None):
+    def __init__(self, *, hostname=None, user=None, sudo=None, fallback=None):
         super(RemoteDefinition, self).__init__()
         self.hostname = hostname
         self.user = user
         self.sudo = sudo or False
+        self.fallback = fallback
 
     @classmethod
     def to_yaml(cls, dumper, data):
@@ -192,8 +214,11 @@ class RemoteDefinition(specs.Definition, YamlMixin):
 
     @classmethod
     def from_yaml(cls, loader, node):
+        if isinstance(node, yaml.nodes.ScalarNode):
+            return cls()
+
         mapping = loader.construct_mapping(node)
-        return cls(*mapping)
+        return cls(**mapping)
 
 
 class GroupDefinition(specs.Definition, YamlMixin):
@@ -269,11 +294,6 @@ class ForDefinition(specs.Definition, YamlMixin):
         self.name = name
         self.do = do
 
-    @classmethod
-    def from_yaml(cls, loader, node):
-        mapping = loader.construct_mapping(node)
-        return cls(**mapping)
-
 
 class SpawnDefinition(specs.Definition, YamlMixin):
     yaml_tag = '!spawn'
@@ -281,8 +301,10 @@ class SpawnDefinition(specs.Definition, YamlMixin):
     def __init_(self):
         super(SpawnDefinition, self).__init__()
 
-    @classmethod
-    def from_yaml(cls, loader, node):
-        mapping = loader.construct_mapping(node)
 
-        return cls(**mapping)
+class CopyDefinition(specs.Definition, YamlMixin):
+    yaml_tag = '!copy'
+
+    def __init__(self, *, src, dest):
+        self.src = src
+        self.dest = dest

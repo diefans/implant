@@ -1,15 +1,8 @@
 ---
 
-hosts: !group
-    - !remote
-        hostname: foobar
-        sudo: true
-        user: dbltr
+host: !remote
+    #hostname: localhost
 
-evolve:
-    - !for
-        iterate: !ref hosts
-        name: host
-        do: !spawn {}
-
-
+dummy: !copy
+    src: foo
+    dest: bar

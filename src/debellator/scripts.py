@@ -54,8 +54,16 @@ def cli(ctx, use_uvloop, debug, log_config):
               default=None,
               type=click.Path(exists=True, file_okay=False, resolve_path=True),
               help='Lookup specs in this directory.')
+@click.option('--host', '-h', help='The host to evolve the targets on.')
+# @click.option('--include', '-i', help='Include these host or groups.')
+# @click.option('--exclude', '-e', help='Exclude these host or groups.')
+@click.argument('targets', nargs=-1, required=True)
 @click.pass_context
-def evolve(ctx, root):
+def evolve(ctx, root, host, targets):
     from debellator import evolve
 
-    evolve.main(root=root)
+    evolve.main(
+        *targets,
+        root=root,
+        host=host,
+    )
