@@ -9,7 +9,6 @@ import sys
 import traceback
 import types
 import zlib
-from collections import namedtuple
 
 from debellator import core, mp
 
@@ -18,12 +17,29 @@ PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
 VENV_DEFAULT = '~/.debellator'
 
 
-class Remote(namedtuple('Remote', ('hostname', 'user', 'sudo'))):
+class ProcessNotLaunchError(Exception):
+    pass
+
+
+class MetaRemote(type):
+    processes = {}
+
+
+class Remote(metaclass=MetaRemote):
 
     """A unique representation of a Remote."""
 
-    def __new__(cls, hostname=None, user=None, sudo=None):
-        return super(Remote, cls).__new__(cls, hostname, user, sudo)
+    def __init__(self, hostname=None, user=None, sudo=None):
+        self.hostname = hostname
+        self.user = user
+        self.sudo = sudo
+
+    def __hash__(self):
+        return hash((self.hostname, self.user, self.sudo))
+
+    def __eq__(self, other):
+        assert isinstance(other, Remote)
+        return hash(self) == hash(other)
 
     def _iter_bootstrap(self, venv):
         """Bootstrapping of core module on remote."""
@@ -161,15 +177,34 @@ class Remote(namedtuple('Remote', ('hostname', 'user', 'sudo'))):
         """
         command_args = self.command_args(code=code, options=options, python_bin=python_bin)
 
+        return await self._launch(*command_args, **kwargs)
+
+    async def _launch(self, *args, **kwargs):
         process = await asyncio.create_subprocess_exec(
-            *command_args,
+            *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             **kwargs
         )
 
+        # cache process
+        self.__class__.processes[self] = process
+
         return process
+
+    async def relaunch(self):
+        """Wait until terminated and start a new process with the same args."""
+        process = self.__class__.processes.get(self)
+        if not process:
+            raise ProcessNotLaunchedError()
+
+        command_args = process._transport._proc.args
+
+        process.terminate()
+        await process.wait()
+
+        return await self._launch(*command_args, **kwargs)
 
 
 def parse_command(line):
