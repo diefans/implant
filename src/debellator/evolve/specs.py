@@ -1,6 +1,7 @@
+import collections
 import functools
 import os
-from collections import OrderedDict
+import types
 
 import pkg_resources
 import yaml
@@ -22,11 +23,116 @@ class OrderedLoader(yaml.loader.Loader):
     """Create orderewd dictionaries by default."""
 
     def construct_yaml_map(self, node):
-        data = OrderedDict(self.construct_pairs(node))
+        data = collections.OrderedDict(self.construct_pairs(node))
         yield data
 
+    def construct_document(self, node):
+        data = self.construct_object(node)
+        while self.state_generators:
+            state_generators = self.state_generators
+            self.state_generators = []
+            for generator in state_generators:
+                for dummy in generator:
+                    pass
+        self.constructed_objects = {}
+        self.recursive_objects = {}
+        self.deep_construct = False
+        return data
+
+    def construct_object(self, node, deep=False):
+        if node in self.constructed_objects:
+            return self.constructed_objects[node]
+        if deep:
+            old_deep = self.deep_construct
+            self.deep_construct = True
+        if node in self.recursive_objects:
+            raise yaml.constructor.ConstructorError(None, None,
+                                                    "found unconstructable recursive node", node.start_mark)
+        self.recursive_objects[node] = None
+        constructor = None
+        tag_suffix = None
+        if node.tag in self.yaml_constructors:
+            constructor = self.yaml_constructors[node.tag]
+        else:
+            for tag_prefix in self.yaml_multi_constructors:
+                if node.tag.startswith(tag_prefix):
+                    tag_suffix = node.tag[len(tag_prefix):]
+                    constructor = self.yaml_multi_constructors[tag_prefix]
+                    break
+            else:
+                if None in self.yaml_multi_constructors:
+                    tag_suffix = node.tag
+                    constructor = self.yaml_multi_constructors[None]
+                elif None in self.yaml_constructors:
+                    constructor = self.yaml_constructors[None]
+                elif isinstance(node, yaml.nodes.ScalarNode):
+                    constructor = self.__class__.construct_scalar
+                elif isinstance(node, yaml.nodes.SequenceNode):
+                    constructor = self.__class__.construct_sequence
+                elif isinstance(node, yaml.nodes.MappingNode):
+                    constructor = self.__class__.construct_mapping
+        if tag_suffix is None:
+            data = constructor(self, node)
+        else:
+            data = constructor(self, tag_suffix, node)
+        if isinstance(data, types.GeneratorType):
+            generator = data
+            data = next(generator)
+            if self.deep_construct:
+                for dummy in generator:
+                    pass
+            else:
+                self.state_generators.append(generator)
+        self.constructed_objects[node] = data
+        del self.recursive_objects[node]
+        if deep:
+            self.deep_construct = old_deep
+        return data
+
+    def construct_scalar(self, node):
+        if not isinstance(node, yaml.nodes.ScalarNode):
+            raise yaml.constructor.ConstructorError(None, None,
+                                                    "expected a scalar node, but found %s" % node.id,
+                                                    node.start_mark)
+        return node.value
+
+    def construct_sequence(self, node, deep=False):
+        if not isinstance(node, yaml.nodes.SequenceNode):
+            raise yaml.constructor.ConstructorError(None, None,
+                                                    "expected a sequence node, but found %s" % node.id,
+                                                    node.start_mark)
+        return [self.construct_object(child, deep=deep)
+                for child in node.value]
+
+    def construct_mapping(self, node, deep=False):
+        if not isinstance(node, yaml.nodes.MappingNode):
+            raise yaml.constructor.ConstructorError(None, None,
+                                                    "expected a mapping node, but found %s" % node.id,
+                                                    node.start_mark)
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, collections.Hashable):
+                raise yaml.constructor.ConstructorError("while constructing a mapping", node.start_mark,
+                                                        "found unhashable key", key_node.start_mark)
+            value = self.construct_object(value_node, deep=deep)
+            mapping[key] = value
+        return mapping
+
+    def construct_pairs(self, node, deep=False):
+        if not isinstance(node, yaml.nodes.MappingNode):
+            raise yaml.constructor.ConstructorError(None, None,
+                                                    "expected a mapping node, but found %s" % node.id,
+                                                    node.start_mark)
+        pairs = []
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            value = self.construct_object(value_node, deep=deep)
+            pairs.append((key, value))
+        return pairs
+
     def construct_no_duplicate_yaml_map(self, node):
-        data = OrderedDict(self.generate_no_duplicate_pairs(node))
+        data = collections.OrderedDict(self.generate_no_duplicate_pairs(node))
         yield data
 
     def generate_no_duplicate_pairs(self, node, deep=False):
@@ -172,7 +278,7 @@ class EntryPointNamespace(Namespace):
         return cls(ep)
 
 
-class Spec(OrderedDict):
+class Spec(collections.OrderedDict):
 
     """A `Spec` is the top level dictionary of a yaml definition file.
 
