@@ -24,3 +24,8 @@ test: !group
 foo:
     bar:
         test: foobar
+        seq:
+            - 1
+            - 2
+            - 3.5
+            - null

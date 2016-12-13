@@ -155,7 +155,23 @@ class MappingConstructor(YamlMixin):
 
     @classmethod
     def from_yaml(cls, loader, node):
-        return loader.construct_no_duplicate_yaml_map(node)
+        return specs.Mapping(loader.generate_no_duplicate_pairs(node))
+
+
+class SequenceConstructor(YamlMixin):
+
+    """Create a Sequence which can evolve."""
+
+    yaml_tag = 'tag:yaml.org,2002:seq'
+
+    @classmethod
+    def from_yaml(cls, loader, node):
+        if not isinstance(node, yaml.nodes.SequenceNode):
+            raise yaml.constructor.ConstructorError(None, None,
+                                                    "expected a sequence node, but found %s" % node.id,
+                                                    node.start_mark)
+        return specs.Sequence(loader.construct_object(child, deep=False)
+                              for child in node.value)
 
 
 class NamespaceDefinition(specs.Definition, YamlMixin):

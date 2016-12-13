@@ -7,6 +7,8 @@ import pkg_resources
 import yaml
 from zope import interface
 
+from . import interfaces
+
 
 class YAMLSyntaxError(yaml.error.MarkedYAMLError):
 
@@ -16,6 +18,18 @@ class YAMLSyntaxError(yaml.error.MarkedYAMLError):
 class DuplicateDefinition(YAMLSyntaxError):
 
     """Defines a duplicate key in a yaml dictionary."""
+
+
+@interface.implementer(interfaces.IEvolvable)
+class Sequence(list):
+    async def evolve(self, scope):
+        return self
+
+
+@interface.implementer(interfaces.IEvolvable)
+class Mapping(collections.OrderedDict):
+    async def evolve(self, scope):
+        return self
 
 
 class OrderedLoader(yaml.loader.Loader):
