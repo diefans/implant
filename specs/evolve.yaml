@@ -1,8 +1,37 @@
 ---
 
-host: !remote
-    #hostname: localhost
+foo:
+    bar:
+        test: foobar
+        seq:
+            - 1
+            - 2
+            - 3.5
+            - null
 
-dummy: !copy
-    src: foo
-    dest: bar
+host: !remote
+    hostname: localhost
+
+#!private dummy: !copy
+#    src: foo
+#    dest: bar
+
+localhost: !remote
+    hostname: localhost
+
+
+test: !group
+    - !ref localhost
+    - !ref ./:test.yaml:localhost
+    - !ref default:test.yaml:localhost
+    - !ref debellator#default:test.yaml:localhost
+    - !ref foobar:foo/bar.yaml:localhost
+    - !ref
+        namespace: !ns ./
+        source: test.yaml
+        name: localhost
+    - !ref
+        namespace: !ns default
+        source: test.yaml
+        name: localhost
+

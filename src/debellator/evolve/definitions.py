@@ -122,7 +122,7 @@ setup: !queue
 
 """
 import yaml
-from zope import interface
+from zope import interface, component
 
 from . import specs, interfaces
 

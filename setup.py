@@ -84,10 +84,16 @@ setup(
         'console_scripts': [
             'debellator=debellator.scripts:cli'
         ],
+        # register modules with rpc classes
         'debellator.plugins': [
             '_=debellator.core',
             'core=debellator.plugins.core'
         ],
+        # register yaml constructors
+        'debellator.registry': [
+            'setup=debellator.evolve:setup',
+        ],
+        # register spec packages
         'debellator.specs': [
             'default=debellator.specs',
         ],
@@ -102,7 +108,9 @@ setup(
 
     install_requires=[
         'click',
-        'pyyaml'
+        'pyyaml',
+        'msgpack-python',
+        'zope.component'
     ],
 
     tests_require=['tox'],
