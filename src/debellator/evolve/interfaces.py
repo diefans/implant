@@ -42,7 +42,7 @@ class IEvolvable(IDefinition):
 
     """Define the possibility to evolve."""
 
-    async def evolve(self, scope):
+    async def evolve(registry, scope):
         """Evolve remote by using scope."""
 
 
@@ -51,7 +51,13 @@ class IRemote(interface.Interface):
     """A remote."""
 
 
-class IEvolve(interface.Interface):
+class IConfiguration(interface.Interface):
+
+    dependencies = interface.Attribute("Actual working set dependencies")
+    registry = interface.Attribute("The zope component registry.""")
+
+
+class IEvolve(IEvolvable):
 
     """A marker for utility registration."""
 

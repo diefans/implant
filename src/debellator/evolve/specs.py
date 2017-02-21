@@ -7,6 +7,7 @@ Private specs are only accessible within the defining project/namespace itself.
 """
 import collections
 import functools
+import itertools
 import logging
 import os
 import pathlib
@@ -16,7 +17,7 @@ import pkg_resources
 import yaml
 from zope import interface, component
 
-from . import interfaces
+from . import interfaces, config
 
 
 log = logging.getLogger(__name__)
@@ -40,23 +41,6 @@ class ComponentLoader(yaml.loader.Loader):
     def __init__(self, stream, *, registry=None):
         self.registry = registry
         yaml.loader.Loader.__init__(self, stream)
-
-    def construct_yaml_map(self, node):
-        data = collections.OrderedDict(self.construct_pairs(node))
-        yield data
-
-    def construct_document(self, node):
-        data = self.construct_object(node)
-        while self.state_generators:
-            state_generators = self.state_generators
-            self.state_generators = []
-            for generator in state_generators:
-                for dummy in generator:
-                    pass
-        self.constructed_objects = {}
-        self.recursive_objects = {}
-        self.deep_construct = False
-        return data
 
     def construct_object(self, node, deep=False):
         if node in self.constructed_objects:
@@ -137,21 +121,6 @@ class ComponentLoader(yaml.loader.Loader):
             self.deep_construct = old_deep
         return data
 
-    def construct_scalar(self, node):
-        if not isinstance(node, yaml.nodes.ScalarNode):
-            raise yaml.constructor.ConstructorError(None, None,
-                                                    "expected a scalar node, but found %s" % node.id,
-                                                    node.start_mark)
-        return node.value
-
-    def construct_sequence(self, node, deep=False):
-        if not isinstance(node, yaml.nodes.SequenceNode):
-            raise yaml.constructor.ConstructorError(None, None,
-                                                    "expected a sequence node, but found %s" % node.id,
-                                                    node.start_mark)
-        return [self.construct_object(child, deep=deep)
-                for child in node.value]
-
     def generate_sequence(self, node, deep=False):
         if not isinstance(node, yaml.nodes.SequenceNode):
             raise yaml.constructor.ConstructorError(None, None,
@@ -159,37 +128,6 @@ class ComponentLoader(yaml.loader.Loader):
                                                     node.start_mark)
         return (self.construct_object(child, deep=deep)
                 for child in node.value)
-
-    def construct_mapping(self, node, deep=False):
-        if not isinstance(node, yaml.nodes.MappingNode):
-            raise yaml.constructor.ConstructorError(None, None,
-                                                    "expected a mapping node, but found %s" % node.id,
-                                                    node.start_mark)
-        mapping = {}
-        for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            if not isinstance(key, collections.Hashable):
-                raise yaml.constructor.ConstructorError("while constructing a mapping", node.start_mark,
-                                                        "found unhashable key", key_node.start_mark)
-            value = self.construct_object(value_node, deep=deep)
-            mapping[key] = value
-        return mapping
-
-    def construct_pairs(self, node, deep=False):
-        if not isinstance(node, yaml.nodes.MappingNode):
-            raise yaml.constructor.ConstructorError(None, None,
-                                                    "expected a mapping node, but found %s" % node.id,
-                                                    node.start_mark)
-        pairs = []
-        for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            value = self.construct_object(value_node, deep=deep)
-            pairs.append((key, value))
-        return pairs
-
-    def construct_no_duplicate_yaml_map(self, node):
-        data = Mapping(self.generate_no_duplicate_pairs(node))
-        yield data
 
     def generate_no_duplicate_pairs(self, node, deep=False):
         if not isinstance(node, yaml.nodes.MappingNode):
@@ -226,6 +164,8 @@ class ComponentLoader(yaml.loader.Loader):
 
 class SpecLoader(ComponentLoader):
 
+    """Add a spec to the definitions."""
+
     def __init__(self, *args, spec=None, **kwargs):
         super(SpecLoader, self).__init__(*args, **kwargs)
         self.spec = spec
@@ -240,25 +180,19 @@ class SpecLoader(ComponentLoader):
         return data
 
 
+def find_files_relative_to(root, *patterns, recurse=False):
+    root = pathlib.Path(root)
+
+    # just recurse or not
+    glob = root.rglob if recurse else root.glob
+
+    return itertools.chain.from_iterable(glob(pattern) for pattern in patterns)
+
+
 @interface.implementer(interfaces.INamespace)
 class Namespace(dict):
 
     """A Namespace provides means to iterate over yaml files in subdirectories."""
-
-    def __init__(self):
-        super(Namespace, self).__init__(self._load())
-
-    def listdir(self, resource_name):
-        return list(self.path(resource_name).iterdir())
-
-    def isdir(self, resource_name):
-        return self.path(resource_name).is_dir()
-
-    def open(self, resource_name):
-        return self.path(resource_name).open()
-
-    def path(self, resource_name):
-        raise NotImplementedError()
 
     def __bool__(self):
         return True
@@ -270,46 +204,44 @@ class Namespace(dict):
         assert isinstance(other, Namespace)
         return repr(self) == repr(other)
 
-    def iter_sources(self, resource_name='', spec_ext=('.yml', '.yaml')):
-        resources = [resource_name]
-
-        while resources:
-            resource_name = resources.pop(0)
-
-            if self.isdir(resource_name):
-                resources.extend([
-                    os.path.join(resource_name, str(child))
-                    for child in self.listdir(resource_name)
-                ])
-
-            else:
-                _, ext = os.path.splitext(resource_name)
-                if ext in ('.yml', '.yaml'):
-                    yield resource_name
-
-    def _load(self):
-        for resource_name in self.iter_sources():
-            yield resource_name, Spec(self, resource_name)
-
 
 @component.adapter(pathlib.Path)
 class DirectoryNamespace(Namespace):
 
     """A Namespace pointing to the contents of a directory."""
 
-    def __init__(self, root):
-        self.root = root
+    def __init__(self, root, *pattern):
+        self.root = pathlib.Path(root)
+
         super(DirectoryNamespace, self).__init__()
 
-    def path(self, resource_name):
-        return self.root.joinpath(resource_name)
+    def config_specs(self, registry, *pattern):
+
+        # XXX TODO simplify namespace/spec/specloader config
+        if not pattern:
+            pattern = [
+                '**/*.yaml',
+                '**/*.yml'
+            ]
+        for f in find_files_relative_to(self.root, *pattern):
+            log.debug('Found spec: %s', f)
+
+            source_name = f.relative_to(self.root)
+            with self.open(source_name) as spec_file:
+                 spec = Spec(self, source_name)
+                 spec.update(load_spec_file(spec, spec_file, registry))
+
+            self[source_name] = spec
+
+    def open(self, source_name):
+        return (self.root / source_name).open()
 
     def __repr__(self):
         return '{}'.format(self.root)
 
 
 @component.adapter(pkg_resources.EntryPoint)
-class EntryPointNamespace(Namespace):
+class EntryPointNamespace(DirectoryNamespace):
 
     """A Namespace pointing to the contents of a python package."""
 
@@ -317,7 +249,8 @@ class EntryPointNamespace(Namespace):
 
     def __init__(self, entry_point):
         self.entry_point = entry_point
-        super(EntryPointNamespace, self).__init__()
+        root = pkg_resources.resource_filename(self.entry_point.module_name, '')
+        super(EntryPointNamespace, self).__init__(root)
 
     def path(self, resource_name):
         return pathlib.Path(pkg_resources.resource_filename(self.entry_point.module_name, resource_name))
@@ -341,6 +274,18 @@ def namespace_adapter(scalar):
     return cls(ep)
 
 
+def load_spec_file(spec, spec_file, registry):
+    """Load yaml into spec."""
+    loader = SpecLoader(spec_file, registry=registry, spec=spec)
+    definitions = loader.get_single_data()
+
+    try:
+        return definitions
+
+    finally:
+        loader.dispose()
+
+
 class Spec(collections.OrderedDict):
 
     """A `Spec` is the top level dictionary of a yaml definition file.
@@ -352,7 +297,7 @@ class Spec(collections.OrderedDict):
         self.namespace = namespace
         self.source = source
 
-        super(Spec, self).__init__(self.load())
+        super(Spec, self).__init__()
 
     def __hash__(self):
         return hash((self.namespace, self.source))
@@ -363,48 +308,6 @@ class Spec(collections.OrderedDict):
 
     def __repr__(self):
         return '<Spec {0.namespace}{0.source}>'.format(self)
-
-    def load(self):
-        """Load a yaml source from the namespace."""
-        with self.namespace.open(self.source) as spec_file:
-            registry = component.getSiteManager()
-            loader = SpecLoader(spec_file, registry=registry, spec=self)
-            definitions = loader.get_single_data()
-
-            try:
-                return definitions
-            finally:
-                loader.dispose()
-
-
-class Specs(dict):
-
-    """An index for all namespaces and specs found."""
-
-    def __init__(self, *roots):
-        super(Specs, self).__init__()
-
-        for root in roots:
-            self.add_root(root)
-
-    def add_root(self, root):
-        if isinstance(root, pkg_resources.EntryPoint):
-            namespace = EntryPointNamespace(root)
-
-        else:
-            namespace = DirectoryNamespace(root)
-
-        if namespace not in self:
-            namespace_specs = self[namespace] = {}
-        else:
-            namespace_specs = self[namespace]
-
-        namespace_specs.update(
-            (
-                (resource_name, Spec(resource_name, namespace=namespace))
-                for resource_name in namespace.iter_sources()
-            )
-        )
 
 
 class SpecDescriptior:
@@ -430,24 +333,16 @@ class Definition:
     spec = SpecDescriptior()
 
 
-@interface.implementer(interfaces.IEvolvable)
+@interface.implementer(interfaces.IYamlConstructor)
 @component.adapter(interfaces.IYamlSequenceNode, interfaces.IYamlLoader)
-class Sequence(list, Definition):
-    def __init__(self, node, loader):
-        super(Sequence, self).__init__(loader.generate_sequence(node))
-
-    async def evolve(self, scope):
-        return self
+def create_list(node, loader):
+    return list(loader.generate_sequence(node))
 
 
-@interface.implementer(interfaces.IEvolvable)
+@interface.implementer(interfaces.IYamlConstructor)
 @component.adapter(interfaces.IYamlMappingNode, interfaces.IYamlLoader)
-class Mapping(collections.OrderedDict, Definition):
-    def __init__(self, node, loader):
-        super(Mapping, self).__init__(loader.generate_no_duplicate_pairs(node))
-
-    async def evolve(self, scope):
-        return self
+def create_ordered_dict(node, loader):
+    return collections.OrderedDict(loader.generate_no_duplicate_pairs(node))
 
 
 # TODO eventually use classes for str, int, float
@@ -491,12 +386,18 @@ def register_adapters(registry):
     interface.classImplements(yaml.nodes.SequenceNode, interfaces.IYamlSequenceNode)
     interface.classImplements(yaml.nodes.CollectionNode, interfaces.IYamlCollectionNode)
 
-    registry.registerAdapter(Mapping, name='tag:yaml.org,2002:map')
-    registry.registerAdapter(Sequence, name='tag:yaml.org,2002:seq')
+    registry.registerAdapter(create_ordered_dict, name='tag:yaml.org,2002:map')
+    registry.registerAdapter(create_list, name='tag:yaml.org,2002:seq')
     registry.registerAdapter(create_str_scalar, name='tag:yaml.org,2002:str')
     registry.registerAdapter(create_int_scalar, name='tag:yaml.org,2002:int')
     registry.registerAdapter(create_float_scalar, name='tag:yaml.org,2002:float')
     registry.registerAdapter(Null, name='tag:yaml.org,2002:null')
+
+    @interface.implementer(interfaces.IEvolve)
+    @component.adapter(interfaces.IEvolvable)
+    def adapt_evolvable(evolvable):
+        return evolvable.evolve(registry)
+    registry.registerAdapter(adapt_evolvable)
 
     # general fallback constructors
     # TODO do we need them?

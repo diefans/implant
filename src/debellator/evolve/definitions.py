@@ -127,200 +127,157 @@ from zope import interface, component
 from . import specs, interfaces
 
 
-class YamlMixin(yaml.YAMLObject):
+# @interface.implement(interfaces.IEvolvable)
+# class NamespaceDefinition:
 
-    """Common Yaml properties."""
+#     """A definition for a Namespace."""
 
-    # yaml_loader = Loader
-    yaml_flow_style = False
+#     def __init__(self, loader, node):
 
-    def __str__(self):
-        return repr(self)
+#         self.namespace = interfaces.INamespace(nodynamespace
 
-    def __repr__(self):
-        return "<Def: {} {}>".format(self.yaml_tag, self.__dict__)
-
-    @classmethod
-    def from_yaml(cls, loader, node):
-        """Construct an object by mapping."""
-        mapping = loader.construct_mapping(node)
-        return cls(**mapping)
+#     @classmethod
+#     def from_yaml(cls, loader, node):
+#         value = loader.construct_scalar(node)
+#         return cls(specs.Namespace.from_scalar(value))
 
 
-class MappingConstructor(YamlMixin):
+# @interface.implementer(interfaces.IEvolvable)
+# class RemoteDefinition(specs.Definition, YamlMixin):
 
-    """Create an ordered dict from a mapping and complain about duplicate keys."""
+#     """A definition of a remote host.
 
-    yaml_tag = 'tag:yaml.org,2002:map'
+#     .. code-block:: yaml
 
-    @classmethod
-    def from_yaml(cls, loader, node):
-        return specs.Mapping(loader.generate_no_duplicate_pairs(node))
+#         ---
+#         host: !remote
+#             hostname: foobar.example.com
+#             user: dbltr
+#             sudo: true
+#             fallback: !remote
+#                 hostname: foobar.example.com
+#                 user: root
 
+#     """
 
-class SequenceConstructor(YamlMixin):
+#     yaml_tag = '!remote'
 
-    """Create a Sequence which can evolve."""
+#     def __init__(self, *, hostname=None, user=None, sudo=None, fallback=None):
+#         super(RemoteDefinition, self).__init__()
+#         self.hostname = hostname
+#         self.user = user
+#         self.sudo = sudo or False
+#         self.fallback = fallback
 
-    yaml_tag = 'tag:yaml.org,2002:seq'
+#     @classmethod
+#     def to_yaml(cls, dumper, data):
+#         mapping = [
+#             ('hostname', data.hostname),
+#             ('user', data.user),
+#             ('sudo', data.sudo),
+#         ]
 
-    @classmethod
-    def from_yaml(cls, loader, node):
-        if not isinstance(node, yaml.nodes.SequenceNode):
-            raise yaml.constructor.ConstructorError(None, None,
-                                                    "expected a sequence node, but found %s" % node.id,
-                                                    node.start_mark)
-        return specs.Sequence(loader.construct_object(child, deep=False)
-                              for child in node.value)
+#         node = dumper.represent_mapping(cls.yaml_tag, mapping)
+#         return node
 
+#     @classmethod
+#     def from_yaml(cls, loader, node):
+#         if isinstance(node, yaml.nodes.ScalarNode):
+#             return cls()
 
-class NamespaceDefinition(specs.Definition, YamlMixin):
-
-    """A definition for a Namespace."""
-
-    yaml_tag = '!ns'
-
-    def __init__(self, namespace):
-        super(NamespaceDefinition, self).__init__()
-        self.namespace = namespace
-
-    @classmethod
-    def from_yaml(cls, loader, node):
-        value = loader.construct_scalar(node)
-        return cls(specs.Namespace.from_scalar(value))
-
-
-@interface.implementer(interfaces.IEvolvable)
-class RemoteDefinition(specs.Definition, YamlMixin):
-
-    """A definition of a remote host.
-
-    .. code-block:: yaml
-
-        ---
-        host: !remote
-            hostname: foobar.example.com
-            user: dbltr
-            sudo: true
-            fallback: !remote
-                hostname: foobar.example.com
-                user: root
-
-    """
-
-    yaml_tag = '!remote'
-
-    def __init__(self, *, hostname=None, user=None, sudo=None, fallback=None):
-        super(RemoteDefinition, self).__init__()
-        self.hostname = hostname
-        self.user = user
-        self.sudo = sudo or False
-        self.fallback = fallback
-
-    @classmethod
-    def to_yaml(cls, dumper, data):
-        mapping = [
-            ('hostname', data.hostname),
-            ('user', data.user),
-            ('sudo', data.sudo),
-        ]
-
-        node = dumper.represent_mapping(cls.yaml_tag, mapping)
-        return node
-
-    @classmethod
-    def from_yaml(cls, loader, node):
-        if isinstance(node, yaml.nodes.ScalarNode):
-            return cls()
-
-        mapping = loader.construct_mapping(node)
-        return cls(**mapping)
+#         mapping = loader.construct_mapping(node)
+#         return cls(**mapping)
 
 
-class GroupDefinition(specs.Definition, YamlMixin):
+# class GroupDefinition(specs.Definition, YamlMixin):
 
-    """A definition of a group of hosts or groups."""
+#     """A definition of a group of hosts or groups."""
 
-    yaml_tag = '!group'
+#     yaml_tag = '!group'
 
-    def __init__(self, members):
-        super(GroupDefinition, self).__init__()
-        self.members = members
+#     def __init__(self, members):
+#         super(GroupDefinition, self).__init__()
+#         self.members = members
 
-    @classmethod
-    def to_yaml(cls, dumper, data):
-        node = dumper.represent_sequence(cls.yaml_tag, data.members)
-        return node
+#     @classmethod
+#     def to_yaml(cls, dumper, data):
+#         node = dumper.represent_sequence(cls.yaml_tag, data.members)
+#         return node
 
-    @classmethod
-    def from_yaml(cls, loader, node):
-        members = loader.construct_sequence(node)
-        return cls(members)
-
-
-class ReferenceDefinition(specs.Definition, YamlMixin):
-
-    """A reference definition to another definition."""
-
-    yaml_tag = '!ref'
-
-    _partition = ':'
-
-    def __init__(self, name, *, namespace=None, source=None):
-        if source is None:
-            assert namespace is None, "A reference to a namespace without source may be ambiguous!"
-
-        super(ReferenceDefinition, self).__init__()
-        self.name = name
-        self.namespace = namespace
-        self.source = source
-
-    @classmethod
-    def to_yaml(cls, dumper, data):
-        node = dumper.represent_scalar(cls.yaml_tag, data.name)
-        return node
-
-    @classmethod
-    def from_yaml(cls, loader, node):
-        if isinstance(node, yaml.nodes.ScalarNode):
-            fq_name = loader.construct_scalar(node)
-
-            ns_source, _, name = fq_name.rpartition(cls._partition)
-            ns, _, source = ns_source.rpartition(cls._partition)
-
-            namespace = ns or loader.spec.namespace
-            source = source or loader.spec.source
-
-        else:
-            # assert mapping
-            mapping = loader.construct_mapping(node)
-            name = mapping['name']
-            namespace = mapping.get('namespace', loader.spec.namespace)
-            source = mapping.get('source', loader.spec.source)
-
-        return cls(name, namespace=namespace, source=source)
+#     @classmethod
+#     def from_yaml(cls, loader, node):
+#         members = loader.construct_sequence(node)
+#         return cls(members)
 
 
-class ForDefinition(specs.Definition, YamlMixin):
-    yaml_tag = '!for'
+# class ReferenceDefinition(specs.Definition, YamlMixin):
 
-    def __init__(self, *, iterate, name, do):
-        super(ForDefinition, self).__init__()
-        self.iterate = iterate
-        self.name = name
-        self.do = do
+#     """A reference definition to another definition."""
+
+#     yaml_tag = '!ref'
+
+#     _partition = ':'
+
+#     def __init__(self, name, *, namespace=None, source=None):
+#         if source is None:
+#             assert namespace is None, "A reference to a namespace without source may be ambiguous!"
+
+#         super(ReferenceDefinition, self).__init__()
+#         self.name = name
+#         self.namespace = namespace
+#         self.source = source
+
+#     @classmethod
+#     def to_yaml(cls, dumper, data):
+#         node = dumper.represent_scalar(cls.yaml_tag, data.name)
+#         return node
+
+#     @classmethod
+#     def from_yaml(cls, loader, node):
+#         if isinstance(node, yaml.nodes.ScalarNode):
+#             fq_name = loader.construct_scalar(node)
+
+#             ns_source, _, name = fq_name.rpartition(cls._partition)
+#             ns, _, source = ns_source.rpartition(cls._partition)
+
+#             namespace = ns or loader.spec.namespace
+#             source = source or loader.spec.source
+
+#         else:
+#             # assert mapping
+#             mapping = loader.construct_mapping(node)
+#             name = mapping['name']
+#             namespace = mapping.get('namespace', loader.spec.namespace)
+#             source = mapping.get('source', loader.spec.source)
+
+#         return cls(name, namespace=namespace, source=source)
 
 
-class SpawnDefinition(specs.Definition, YamlMixin):
-    yaml_tag = '!spawn'
+# class ForDefinition(specs.Definition, YamlMixin):
+#     yaml_tag = '!for'
 
-    def __init_(self):
-        super(SpawnDefinition, self).__init__()
+#     def __init__(self, *, iterate, name, do):
+#         super(ForDefinition, self).__init__()
+#         self.iterate = iterate
+#         self.name = name
+#         self.do = do
 
 
-class CopyDefinition(specs.Definition, YamlMixin):
-    yaml_tag = '!copy'
+# class SpawnDefinition(specs.Definition, YamlMixin):
+#     yaml_tag = '!spawn'
 
-    def __init__(self, *, src, dest):
-        self.src = src
-        self.dest = dest
+#     def __init_(self):
+#         super(SpawnDefinition, self).__init__()
+
+
+# class CopyDefinition(specs.Definition, YamlMixin):
+#     yaml_tag = '!copy'
+
+#     def __init__(self, *, src, dest):
+#         self.src = src
+#         self.dest = dest
+
+
+
+def register_definitions(registry):
+    registry.registerAdapter()
