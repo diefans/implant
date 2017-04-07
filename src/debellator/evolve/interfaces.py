@@ -1,7 +1,7 @@
-from zope import interface
+from zope.interface import Interface, Attribute
 
 
-class IYamlNode(interface.Interface):
+class IYamlNode(Interface):
     pass
 
 
@@ -21,12 +21,12 @@ class IYamlScalarNode(IYamlNode):
     pass
 
 
-class IYamlLoader(interface.Interface):
+class IYamlLoader(Interface):
 
     """A marker for yaml laoder."""
 
 
-class IYamlConstructor(interface.Interface):
+class IYamlConstructor(Interface):
 
     """A marker interface for a node adapter."""
 
@@ -35,7 +35,7 @@ class IDefinition(IYamlConstructor):
 
     """A Definition holds a reference to its spec."""
 
-    spec = interface.Attribute('The spec this deinition belongs to.')
+    spec = Attribute('The spec this deinition belongs to.')
 
 
 class IEvolvable(IDefinition):
@@ -46,15 +46,30 @@ class IEvolvable(IDefinition):
         """Evolve remote by using scope."""
 
 
-class IRemote(interface.Interface):
+class IRemote(Interface):
 
     """A remote."""
 
 
-class IConfiguration(interface.Interface):
+class ISettings(Interface):
 
-    dependencies = interface.Attribute("Actual working set dependencies")
-    registry = interface.Attribute("The zope component registry.""")
+    """Hold all variable application settings."""
+
+
+class IDependencies(Interface):
+
+    """Just a marker to hold dependency tree."""
+
+
+class IConfiguration(Interface):
+
+    dependencies = Attribute("Actual working set dependencies")
+    registry = Attribute("The zope component registry.""")
+
+
+class IConfigurationEvent(Interface):
+
+    configuration = Attribute("The application configuration.")
 
 
 class IEvolve(IEvolvable):
@@ -62,7 +77,7 @@ class IEvolve(IEvolvable):
     """A marker for utility registration."""
 
 
-class INamespace(interface.Interface):
+class INamespace(Interface):
 
     """A unique namespace for spec lookup."""
 
@@ -83,3 +98,21 @@ class INamespace(interface.Interface):
 
     def iter_sources(resource_name=''):
         pass
+
+
+class IIncommingQueue(Interface):
+    pass
+
+
+class IRequest(Interface):
+
+    """A unique request to evolve."""
+
+    time = Attribute('The time the request entered.')
+    source = Attribute('The source of the request.')
+    definition = Attribute('The definition, which should evolve.')
+    scope = Attribute('The extra scope for this request')
+
+
+class IReference(Interface):
+    pass

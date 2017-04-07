@@ -121,10 +121,126 @@ setup: !queue
 
 
 """
+import re
+import pathlib
+import logging
 import yaml
 from zope import interface, component
 
-from . import specs, interfaces
+from . import specs, interfaces, config
+
+
+log = logging.getLogger(__name__)
+
+
+@interface.implementer(interfaces.IEvolvable)
+@component.adapter(interfaces.IYamlMappingNode, interfaces.IYamlLoader)
+class Debug_mapping(specs.Definition):
+    def __init__(self, node, loader):
+        pass
+
+    async def evolve(self, scope):
+        return None
+
+
+@interface.implementer(interfaces.IEvolvable)
+@component.adapter(interfaces.IYamlMappingNode, interfaces.IYamlLoader)
+class For(specs.Definition):
+    def __init__(self, node, loader):
+        pass
+
+    async def evolve(self, scope):
+        return None
+
+
+# XXX TODO FIXME do we need IEvolable to be declared or can we just test, if a node provides this IF
+# and when not cast it
+@interface.implementer(interfaces.IEvolvable)
+@interface.implementer(interfaces.IReference)
+@component.adapter(str)
+class Reference(specs.Definition):
+    def __init__(self, ref_string):
+        """A `Reference` may constructed via string.
+
+        dist#ep:spec:key    - full reference
+        ep:spec:key         - dist local reference
+        spec:key            - entrypoint local reference
+        key                 - spec local reference
+        """
+        self.ref_string = ref_string
+
+    @property
+    def target(self):
+        return _lookup_reference(self.ref_string, self.spec)
+
+
+@interface.implementer(interfaces.IReference)
+@component.adapter(interfaces.IYamlScalarNode, interfaces.IYamlLoader)
+def adapt_ref_scalar(node, loader):
+    scalar = loader.construct_scalar(node)
+    return interfaces.IReference(scalar)
+
+
+class NamespaceNotFound(Exception):
+    pass
+
+
+def _lookup_namespace(ns_name):
+    try:
+        namespace = component.getUtility(interfaces.INamespace, ns_name)
+
+    except component.ComponentLookupError:
+        # namespace is not defined
+        # try to guess
+        if ns_name and '#' not in ns_name:
+            # without '#' we assume entrypoint name
+            for ep in pkg_resources.iter_entry_points(config.ENTRY_POINT_GROUP_SPECS, ns_name):
+                ns_name = '#'.join((ep.dist.key, ep.name))
+                namespace = component.queryUtility(interfaces.INamespace, ns_name)
+
+                if namespace:
+                    break
+
+        else:
+            # error
+            log.error('Namespace for `%s` not registered or misspelled', ns_name)
+            raise NamespaceNotFound('Namespace for `{}` not registered or misspelled'.format(ns_name))
+
+    return namespace
+
+
+re_reference_string = re.compile(r'^(?:(?:(?P<ns>.*):)?(?P<spec>[^:]+):)?(?P<def>[^:]+)$')
+
+
+def _lookup_reference(ref_string, spec=None):
+    match = re_reference_string.match(ref_string)
+
+    if match is None:
+        raise RuntimeError(
+            'Reference syntax of `{}` wrong! See {} for details'.format(ref_string, re_reference_string.pattern)
+        )
+
+    ns_name, spec_name, def_name = match.groups()
+
+    if (spec_name is None or ns_name is None) and not spec:
+        raise RuntimeError('Reference lookup without any spec context!')
+
+    # an empty string is the root namespace
+    ns = _lookup_namespace(ns_name) if ns_name is not None else spec.namespace
+
+    if spec_name is not None:
+        spec = ns[spec_name]
+
+    ref = spec[def_name]
+
+    return ref
+
+
+def register_adapters():
+    component.provideAdapter(Debug_mapping, name='!debug')
+    component.provideAdapter(For, name='!for')
+    component.provideAdapter(adapt_ref_scalar, provides=interfaces.IYamlConstructor, name='!ref')
+    component.provideAdapter(Reference, provides=interfaces.IReference)
 
 
 # @interface.implement(interfaces.IEvolvable)
@@ -276,8 +392,3 @@ from . import specs, interfaces
 #     def __init__(self, *, src, dest):
 #         self.src = src
 #         self.dest = dest
-
-
-
-def register_definitions(registry):
-    registry.registerAdapter()

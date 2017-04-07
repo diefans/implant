@@ -1,6 +1,14 @@
 """Scope is the basic means for information transport between tasks and subtasks."""
 
 import itertools
+from zope.interface.registry import Components
+
+
+class Registry(Components, dict):
+    def __init__(self, name, *args, **kwargs):
+        Components.__init__(self, name, *args, **kwargs)
+        dict.__init__(self)
+
 
 
 class Scope:

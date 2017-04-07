@@ -1,23 +1,21 @@
-"""
-Specifications a.k.a. specs are a set of maybe exported toplevel definitions of a control flow.
+"""Specifications a.k.a. specs are a set of maybe exported toplevel definitions of a control flow.
 
 Specs can be organized in separate files and directories.
 Private specs are only accessible within the defining project/namespace itself.
 
 """
 import collections
-import functools
 import itertools
 import logging
-import os
 import pathlib
 import types
+import weakref
 
 import pkg_resources
 import yaml
 from zope import interface, component
 
-from . import interfaces, config
+from . import interfaces
 
 
 log = logging.getLogger(__name__)
@@ -38,8 +36,7 @@ class ComponentLoader(yaml.loader.Loader):
 
     """Create orderewd dictionaries by default."""
 
-    def __init__(self, stream, *, registry=None):
-        self.registry = registry
+    def __init__(self, stream):
         yaml.loader.Loader.__init__(self, stream)
 
     def construct_object(self, node, deep=False):
@@ -55,27 +52,21 @@ class ComponentLoader(yaml.loader.Loader):
         constructor = None
         tag_suffix = None
 
-        # lookup constructor in registry
         try:
-            if self.registry:
-                try:
-                    data = self.registry.getMultiAdapter(
-                        (node, self),
-                        interfaces.IYamlConstructor,
-                        name=node.tag
-                    )
-                    log.debug('Named yaml constructor lookup: %s', node)
-                except component.ComponentLookupError:
-                    # fallback
-                    data = self.registry.getMultiAdapter(
-                        (node, self),
-                        interfaces.IYamlConstructor
-                    )
-                    log.debug('General yaml constructor lookup: %s', node)
-                # constructor = self.registry.queryAdapter(node, IYamlConstructor, name=node.tag)
-
-            else:
-                raise ValueError('No Registry found.')
+            try:
+                data = component.getMultiAdapter(
+                    (node, self),
+                    interfaces.IYamlConstructor,
+                    name=node.tag
+                )
+                log.debug('Named yaml constructor lookup: %s', node)
+            except component.ComponentLookupError:
+                # fallback
+                data = component.getMultiAdapter(
+                    (node, self),
+                    interfaces.IYamlConstructor
+                )
+                log.debug('General yaml constructor lookup: %s', node)
 
         except (ValueError, component.ComponentLookupError):
             log.warning('Yaml constructor not found: %s', node)
@@ -204,6 +195,13 @@ class Namespace(dict):
         assert isinstance(other, Namespace)
         return repr(self) == repr(other)
 
+    def __getitem__(self, key):
+        # for convenience cast str to Path
+        if isinstance(key, str):
+            key = pathlib.Path(key)
+
+        return super(Namespace, self).__getitem__(key)
+
 
 @component.adapter(pathlib.Path)
 class DirectoryNamespace(Namespace):
@@ -215,7 +213,7 @@ class DirectoryNamespace(Namespace):
 
         super(DirectoryNamespace, self).__init__()
 
-    def config_specs(self, registry, *pattern):
+    def config_specs(self, *pattern):
 
         # XXX TODO simplify namespace/spec/specloader config
         if not pattern:
@@ -228,8 +226,8 @@ class DirectoryNamespace(Namespace):
 
             source_name = f.relative_to(self.root)
             with self.open(source_name) as spec_file:
-                 spec = Spec(self, source_name)
-                 spec.update(load_spec_file(spec, spec_file, registry))
+                spec = Spec(self, source_name)
+                spec.update(load_spec_file(spec, spec_file))
 
             self[source_name] = spec
 
@@ -274,10 +272,12 @@ def namespace_adapter(scalar):
     return cls(ep)
 
 
-def load_spec_file(spec, spec_file, registry):
+def load_spec_file(spec, spec_file):
     """Load yaml into spec."""
-    loader = SpecLoader(spec_file, registry=registry, spec=spec)
+    loader = SpecLoader(spec_file, spec=spec)
     definitions = loader.get_single_data()
+
+    assert isinstance(definitions, dict), 'The top level data type of a spec file must be a mapping!'
 
     try:
         return definitions
@@ -307,7 +307,7 @@ class Spec(collections.OrderedDict):
         return self.namespace == other.namespace and self.source == other.source
 
     def __repr__(self):
-        return '<Spec {0.namespace}{0.source}>'.format(self)
+        return '<Spec {0}>'.format(self.namespace.root.joinpath(self.source))
 
 
 class SpecDescriptior:
@@ -316,13 +316,18 @@ class SpecDescriptior:
 
     def __init__(self):
         self.spec = None
+        self.instances = weakref.WeakKeyDictionary()
 
-    def __get__(self, inst, type):
-        # always return our registry
+    def __get__(self, inst, cls):
         if inst:
-            return self.spec
+            return self.instances[inst]
+
+        return self.spec
 
     def __set__(self, inst, value):
+        if inst:
+            self.instances[inst] = value
+
         self.spec = value
 
 
@@ -377,27 +382,28 @@ class Null(Definition):
         return None
 
 
-def register_adapters(registry):
-    registry.registerAdapter(EntryPointNamespace)
-    registry.registerAdapter(DirectoryNamespace)
+def register_adapters():
+    component.provideAdapter(EntryPointNamespace)
+    component.provideAdapter(DirectoryNamespace)
 
     interface.classImplements(yaml.nodes.ScalarNode, interfaces.IYamlScalarNode)
     interface.classImplements(yaml.nodes.MappingNode, interfaces.IYamlMappingNode)
     interface.classImplements(yaml.nodes.SequenceNode, interfaces.IYamlSequenceNode)
     interface.classImplements(yaml.nodes.CollectionNode, interfaces.IYamlCollectionNode)
 
-    registry.registerAdapter(create_ordered_dict, name='tag:yaml.org,2002:map')
-    registry.registerAdapter(create_list, name='tag:yaml.org,2002:seq')
-    registry.registerAdapter(create_str_scalar, name='tag:yaml.org,2002:str')
-    registry.registerAdapter(create_int_scalar, name='tag:yaml.org,2002:int')
-    registry.registerAdapter(create_float_scalar, name='tag:yaml.org,2002:float')
-    registry.registerAdapter(Null, name='tag:yaml.org,2002:null')
+    component.provideAdapter(create_ordered_dict, name='tag:yaml.org,2002:map')
+    component.provideAdapter(create_list, name='tag:yaml.org,2002:seq')
+    component.provideAdapter(create_str_scalar, name='tag:yaml.org,2002:str')
+    component.provideAdapter(create_int_scalar, name='tag:yaml.org,2002:int')
+    component.provideAdapter(create_float_scalar, name='tag:yaml.org,2002:float')
+    component.provideAdapter(Null, name='tag:yaml.org,2002:null')
 
+    # TODO
     @interface.implementer(interfaces.IEvolve)
     @component.adapter(interfaces.IEvolvable)
     def adapt_evolvable(evolvable):
         return evolvable.evolve(registry)
-    registry.registerAdapter(adapt_evolvable)
+    component.provideAdapter(adapt_evolvable)
 
     # general fallback constructors
     # TODO do we need them?

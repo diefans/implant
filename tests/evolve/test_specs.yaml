@@ -1,0 +1,10 @@
+---
+
+# test module
+
+foo: bar
+
+# for ref testing
+bar1: !ref foo
+bar2: !ref test_specs.yaml:foo
+bar3: !ref :test_specs.yaml:foo

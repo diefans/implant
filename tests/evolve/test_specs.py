@@ -1,12 +1,6 @@
 import pytest
 
 
-@pytest.fixture(scope='session')
-def dist():
-    import pkg_resources
-    return pkg_resources.get_distribution('debellator')
-
-
 @pytest.fixture
 def specs_entry_point(dist):
     import pkg_resources
