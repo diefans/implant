@@ -67,3 +67,13 @@ def test_spec_references(definitions, df, target):
     spec = ns['test_specs.yaml']
 
     assert spec[df].target == target
+
+
+@pytest.mark.usefixtures('bootstrap')
+def test_specs(definitions):
+    ns = definitions._lookup_namespace('')
+    spec = ns['test_specs.yaml']
+
+    keys = list(spec.keys())
+
+    assert keys == ['foo', 'bar1', 'bar2', 'bar3']

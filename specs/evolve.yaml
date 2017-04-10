@@ -9,8 +9,8 @@ foo:
             - 3.5
             - null
 
-task: !debug
-    "message": !eval locals()
+#task: !debug
+#    "message": !eval locals()
 
 run: !for
     item: x
@@ -20,11 +20,12 @@ run: !for
         - null
         - true
         - 1.23
-    do: !scope
-        defaults:
-            foo: bar
-        do: !spawn
-            task: !ref task
+    do: null
+    #do: !scope
+    #    defaults:
+    #        foo: bar
+    #    do: !spawn
+    #        task: !ref task
 
 
 

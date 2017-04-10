@@ -121,6 +121,7 @@ setup: !queue
 
 
 """
+import collections
 import re
 import pathlib
 import logging
@@ -133,12 +134,18 @@ from . import specs, interfaces, config
 log = logging.getLogger(__name__)
 
 
-@interface.implementer(interfaces.IEvolvable)
-@component.adapter(interfaces.IYamlMappingNode, interfaces.IYamlLoader)
-class Debug_mapping(specs.Definition):
-    def __init__(self, node, loader):
-        pass
+class EvolvableMappingMixin:
 
+    """A mixin to evolve over a mapping."""
+
+    async def evolve(self, scope):
+        odict = collections.OrderedDict((
+            (k, await component.IEvolvabl(v).evolve(scope)) for k, v in self.items()
+        ))
+
+
+@component.adapter(dict)
+class DebugMapping(collections.OrderedDict, specs.Definition):
     async def evolve(self, scope):
         return None
 
@@ -147,7 +154,11 @@ class Debug_mapping(specs.Definition):
 @component.adapter(interfaces.IYamlMappingNode, interfaces.IYamlLoader)
 class For(specs.Definition):
     def __init__(self, node, loader):
-        pass
+        for_mapping = loader.construct_mapping(node)
+
+        self.in_iterable = for_mapping['in']
+        self.do = for_mapping['do']
+        self.item = for_mapping['item']
 
     async def evolve(self, scope):
         return None
@@ -236,9 +247,15 @@ def _lookup_reference(ref_string, spec=None):
     return ref
 
 
+@component.adapter(dict)
+class Scope(specs.Definition):
+    def __init__(self, mapping):
+        self.df = mapping
+
+
 def register_adapters():
-    component.provideAdapter(Debug_mapping, name='!debug')
-    component.provideAdapter(For, name='!for')
+    component.provideAdapter(DebugMapping, provides=interfaces.IDefinition, name='!debug')
+    component.provideAdapter(For, provides=interfaces.IYamlConstructor, name='!for')
     component.provideAdapter(adapt_ref_scalar, provides=interfaces.IYamlConstructor, name='!ref')
     component.provideAdapter(Reference, provides=interfaces.IReference)
 

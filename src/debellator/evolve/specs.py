@@ -34,83 +34,79 @@ class DuplicateDefinition(YAMLSyntaxError):
 @interface.implementer(interfaces.IYamlLoader)
 class ComponentLoader(yaml.loader.Loader):
 
-    """Create orderewd dictionaries by default."""
+    """Use component adapters for unknown tags.
+
+    Create ordered dictionaries by default.
+    """
 
     def __init__(self, stream):
         yaml.loader.Loader.__init__(self, stream)
 
-    def construct_object(self, node, deep=False):
-        if node in self.constructed_objects:
-            return self.constructed_objects[node]
-        if deep:
-            old_deep = self.deep_construct
-            self.deep_construct = True
-        if node in self.recursive_objects:
-            raise yaml.constructor.ConstructorError(None, None,
-                                                    "found unconstructable recursive node", node.start_mark)
-        self.recursive_objects[node] = None
+        for tag, constructor in [
+                (None, self.construct_by_components),
+                ('tag:yaml.org,2002:map', self.create_ordered_dict),
+                ('tag:yaml.org,2002:seq', self.create_list),
+                ('tag:yaml.org,2002:str', self.create_str_scalar),
+                ('tag:yaml.org,2002:int', self.create_int_scalar),
+                ('tag:yaml.org,2002:float', self.create_float_scalar),
+        ]:
+            self.add_constructor(tag, constructor)
+
+    @classmethod
+    def construct_by_components(cls, loader, node):
+        tag = node.tag
+
         constructor = None
-        tag_suffix = None
+        if isinstance(node, yaml.nodes.ScalarNode):
+            constructor = cls.construct_scalar
+        elif isinstance(node, yaml.nodes.SequenceNode):
+            constructor = cls.construct_sequence
+        elif isinstance(node, yaml.nodes.MappingNode):
+            constructor = loader.create_ordered_dict
 
-        try:
-            try:
-                data = component.getMultiAdapter(
-                    (node, self),
-                    interfaces.IYamlConstructor,
-                    name=node.tag
-                )
-                log.debug('Named yaml constructor lookup: %s', node)
-            except component.ComponentLookupError:
-                # fallback
-                data = component.getMultiAdapter(
-                    (node, self),
-                    interfaces.IYamlConstructor
-                )
-                log.debug('General yaml constructor lookup: %s', node)
+        if constructor:
+            data = constructor(loader, node)
 
-        except (ValueError, component.ComponentLookupError):
-            log.warning('Yaml constructor not found: %s', node)
+            df_data = component.queryAdapter(data, interfaces.IDefinition, tag)
+            if df_data:
+                return df_data
 
-            if node.tag in self.yaml_constructors:
-                constructor = self.yaml_constructors[node.tag]
+        data = component.queryMultiAdapter(
+            (node, loader),
+            interfaces.IYamlConstructor,
+            name=tag
+        )
 
-            else:
-                for tag_prefix in self.yaml_multi_constructors:
-                    if node.tag.startswith(tag_prefix):
-                        tag_suffix = node.tag[len(tag_prefix):]
-                        constructor = self.yaml_multi_constructors[tag_prefix]
-                        break
-                else:
-                    if None in self.yaml_multi_constructors:
-                        tag_suffix = node.tag
-                        constructor = self.yaml_multi_constructors[None]
-                    elif None in self.yaml_constructors:
-                        constructor = self.yaml_constructors[None]
-                    elif isinstance(node, yaml.nodes.ScalarNode):
-                        constructor = self.__class__.construct_scalar
-                    elif isinstance(node, yaml.nodes.SequenceNode):
-                        constructor = self.__class__.construct_sequence
-                    elif isinstance(node, yaml.nodes.MappingNode):
-                        constructor = self.__class__.construct_mapping
+        if data is None:
+            data = component.queryMultiAdapter(
+                (node, loader),
+                interfaces.IYamlConstructor,
+            )
 
-            if tag_suffix is None:
-                data = constructor(self, node)
-            else:
-                data = constructor(self, tag_suffix, node)
+        if data is None:
+            log.error('Unable to construct `%s`', tag)
 
-        if isinstance(data, types.GeneratorType):
-            generator = data
-            data = next(generator)
-            if self.deep_construct:
-                for dummy in generator:
-                    pass
-            else:
-                self.state_generators.append(generator)
-        self.constructed_objects[node] = data
-        del self.recursive_objects[node]
-        if deep:
-            self.deep_construct = old_deep
         return data
+
+    @staticmethod
+    def create_list(loader, node):
+        return list(loader.generate_sequence(node))
+
+    @staticmethod
+    def create_ordered_dict(loader, node):
+        return collections.OrderedDict(loader.generate_no_duplicate_pairs(node))
+
+    @staticmethod
+    def create_str_scalar(loader, node):
+        return loader.construct_scalar(node)
+
+    @staticmethod
+    def create_int_scalar(loader, node):
+        return int(loader.construct_scalar(node))
+
+    @staticmethod
+    def create_float_scalar(loader, node):
+        return float(loader.construct_scalar(node))
 
     def generate_sequence(self, node, deep=False):
         if not isinstance(node, yaml.nodes.SequenceNode):
@@ -310,9 +306,12 @@ class Spec(collections.OrderedDict):
         return '<Spec {0}>'.format(self.namespace.root.joinpath(self.source))
 
 
-class SpecDescriptior:
+class _SpecDescriptior:
 
-    """Initialize the spec attribute via this descriptor."""
+    """Initialize the spec attribute via this descriptor.
+
+    This is just to keep __init__ method untouched.
+    """
 
     def __init__(self):
         self.spec = None
@@ -331,42 +330,12 @@ class SpecDescriptior:
         self.spec = value
 
 
+@interface.implementer(interfaces.IDefinition)
 class Definition:
 
     """A Definition holds a reference to its spec."""
 
-    spec = SpecDescriptior()
-
-
-@interface.implementer(interfaces.IYamlConstructor)
-@component.adapter(interfaces.IYamlSequenceNode, interfaces.IYamlLoader)
-def create_list(node, loader):
-    return list(loader.generate_sequence(node))
-
-
-@interface.implementer(interfaces.IYamlConstructor)
-@component.adapter(interfaces.IYamlMappingNode, interfaces.IYamlLoader)
-def create_ordered_dict(node, loader):
-    return collections.OrderedDict(loader.generate_no_duplicate_pairs(node))
-
-
-# TODO eventually use classes for str, int, float
-@interface.implementer(interfaces.IYamlConstructor)
-@component.adapter(interfaces.IYamlScalarNode, interfaces.IYamlLoader)
-def create_str_scalar(node, loader):
-    return loader.construct_scalar(node)
-
-
-@interface.implementer(interfaces.IYamlConstructor)
-@component.adapter(interfaces.IYamlScalarNode, interfaces.IYamlLoader)
-def create_int_scalar(node, loader):
-    return int(loader.construct_scalar(node))
-
-
-@interface.implementer(interfaces.IYamlConstructor)
-@component.adapter(interfaces.IYamlScalarNode, interfaces.IYamlLoader)
-def create_float_scalar(node, loader):
-    return float(loader.construct_scalar(node))
+    spec = _SpecDescriptior()
 
 
 @interface.implementer(interfaces.IEvolvable)
@@ -391,22 +360,9 @@ def register_adapters():
     interface.classImplements(yaml.nodes.SequenceNode, interfaces.IYamlSequenceNode)
     interface.classImplements(yaml.nodes.CollectionNode, interfaces.IYamlCollectionNode)
 
-    component.provideAdapter(create_ordered_dict, name='tag:yaml.org,2002:map')
-    component.provideAdapter(create_list, name='tag:yaml.org,2002:seq')
-    component.provideAdapter(create_str_scalar, name='tag:yaml.org,2002:str')
-    component.provideAdapter(create_int_scalar, name='tag:yaml.org,2002:int')
-    component.provideAdapter(create_float_scalar, name='tag:yaml.org,2002:float')
-    component.provideAdapter(Null, name='tag:yaml.org,2002:null')
-
     # TODO
     @interface.implementer(interfaces.IEvolve)
     @component.adapter(interfaces.IEvolvable)
     def adapt_evolvable(evolvable):
         return evolvable.evolve(registry)
     component.provideAdapter(adapt_evolvable)
-
-    # general fallback constructors
-    # TODO do we need them?
-    # registry.registerAdapter(Mapping)
-    # registry.registerAdapter(Sequence)
-    # registry.registerAdapter(create_str_scalar)
