@@ -150,23 +150,15 @@ class DebugMapping(collections.OrderedDict, specs.Definition):
         return None
 
 
-@interface.implementer(interfaces.IEvolvable)
-@component.adapter(interfaces.IYamlMappingNode, interfaces.IYamlLoader)
-class For(specs.Definition):
-    def __init__(self, node, loader):
-        for_mapping = loader.construct_mapping(node)
-
-        self.in_iterable = for_mapping['in']
-        self.do = for_mapping['do']
-        self.item = for_mapping['item']
+@component.adapter(dict)
+class For(dict, specs.Definition):
+    def __init__(self, *args, **kwargs):
+        super(For, self).__init__(*args, **kwargs)
 
     async def evolve(self, scope):
         return None
 
 
-# XXX TODO FIXME do we need IEvolable to be declared or can we just test, if a node provides this IF
-# and when not cast it
-@interface.implementer(interfaces.IEvolvable)
 @interface.implementer(interfaces.IReference)
 @component.adapter(str)
 class Reference(specs.Definition):
@@ -255,7 +247,7 @@ class Scope(specs.Definition):
 
 def register_adapters():
     component.provideAdapter(DebugMapping, provides=interfaces.IDefinition, name='!debug')
-    component.provideAdapter(For, provides=interfaces.IYamlConstructor, name='!for')
+    component.provideAdapter(For, provides=interfaces.IDefinition, name='!for')
     component.provideAdapter(adapt_ref_scalar, provides=interfaces.IYamlConstructor, name='!ref')
     component.provideAdapter(Reference, provides=interfaces.IReference)
 

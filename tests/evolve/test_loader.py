@@ -24,6 +24,15 @@ def test_construction():
         foo: bar
         bar: baz
 
+    for: !for
+        item: x
+        in:
+            - 1
+            - 2
+            - 3
+        do: bla
+
+
     """
 
     loader = specs.ComponentLoader(io.StringIO(yaml))
@@ -35,6 +44,7 @@ def test_construction():
         ('baz', definitions.DebugMapping([
             ('foo', 'bar'),
             ('bar', 'baz')
-        ]))
+        ])),
+        ('for', {'do': 'bla', 'in': [1, 2, 3], 'item': 'x'}),
     ])
     assert data == result

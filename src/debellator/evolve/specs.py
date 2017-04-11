@@ -44,69 +44,58 @@ class ComponentLoader(yaml.loader.Loader):
 
         for tag, constructor in [
                 (None, self.construct_by_components),
-                ('tag:yaml.org,2002:map', self.create_ordered_dict),
-                ('tag:yaml.org,2002:seq', self.create_list),
-                ('tag:yaml.org,2002:str', self.create_str_scalar),
-                ('tag:yaml.org,2002:int', self.create_int_scalar),
-                ('tag:yaml.org,2002:float', self.create_float_scalar),
+                ('tag:yaml.org,2002:map', self.construct_ordered_dict),
+                ('tag:yaml.org,2002:seq', self.construct_list),
         ]:
             self.add_constructor(tag, constructor)
 
     @classmethod
-    def construct_by_components(cls, loader, node):
+    def _construct_data(cls, loader, node):
+        """Construct data by adapter lookup.
+
+        As fallback will just create a scalar, sequence or oredered dict.
+        """
         tag = node.tag
 
-        constructor = None
-        if isinstance(node, yaml.nodes.ScalarNode):
-            constructor = cls.construct_scalar
-        elif isinstance(node, yaml.nodes.SequenceNode):
-            constructor = cls.construct_sequence
-        elif isinstance(node, yaml.nodes.MappingNode):
-            constructor = loader.create_ordered_dict
-
-        if constructor:
-            data = constructor(loader, node)
-
-            df_data = component.queryAdapter(data, interfaces.IDefinition, tag)
-            if df_data:
-                return df_data
-
-        data = component.queryMultiAdapter(
-            (node, loader),
-            interfaces.IYamlConstructor,
-            name=tag
-        )
-
-        if data is None:
-            data = component.queryMultiAdapter(
+        try:
+            return component.getMultiAdapter(
                 (node, loader),
                 interfaces.IYamlConstructor,
+                name=tag
             )
 
-        if data is None:
-            log.error('Unable to construct `%s`', tag)
+        except component.ComponentLookupError:
+            try:
+                return component.getMultiAdapter(
+                    (node, loader),
+                    interfaces.IYamlConstructor,
+                )
 
-        return data
+            except component.ComponentLookupError:
+                for node_type, constructor in [
+                        (yaml.nodes.ScalarNode, cls.construct_scalar),
+                        (yaml.nodes.SequenceNode, cls.construct_list),
+                        (yaml.nodes.MappingNode, cls.construct_ordered_dict),
+                ]:
+                    if isinstance(node, node_type):
+                        return constructor(loader, node)
+
+                raise RuntimeError(f'Node is instance of `{type(node)}, which has no constructor!')
+
+    @classmethod
+    def construct_by_components(cls, loader, node):
+        """Construct data and further apply an adapter if registered."""
+
+        data = cls._construct_data(loader, node)
+        return component.queryAdapter(data, interfaces.IDefinition, default=data)
 
     @staticmethod
-    def create_list(loader, node):
+    def construct_list(loader, node):
         return list(loader.generate_sequence(node))
 
     @staticmethod
-    def create_ordered_dict(loader, node):
+    def construct_ordered_dict(loader, node):
         return collections.OrderedDict(loader.generate_no_duplicate_pairs(node))
-
-    @staticmethod
-    def create_str_scalar(loader, node):
-        return loader.construct_scalar(node)
-
-    @staticmethod
-    def create_int_scalar(loader, node):
-        return int(loader.construct_scalar(node))
-
-    @staticmethod
-    def create_float_scalar(loader, node):
-        return float(loader.construct_scalar(node))
 
     def generate_sequence(self, node, deep=False):
         if not isinstance(node, yaml.nodes.SequenceNode):
@@ -210,8 +199,6 @@ class DirectoryNamespace(Namespace):
         super(DirectoryNamespace, self).__init__()
 
     def config_specs(self, *pattern):
-
-        # XXX TODO simplify namespace/spec/specloader config
         if not pattern:
             pattern = [
                 '**/*.yaml',
@@ -221,10 +208,7 @@ class DirectoryNamespace(Namespace):
             log.debug('Found spec: %s', f)
 
             source_name = f.relative_to(self.root)
-            with self.open(source_name) as spec_file:
-                spec = Spec(self, source_name)
-                spec.update(load_spec_file(spec, spec_file))
-
+            spec = Spec(self, source_name)
             self[source_name] = spec
 
     def open(self, source_name):
@@ -253,35 +237,6 @@ class EntryPointNamespace(DirectoryNamespace):
         return '{0.dist.key}#{0.name}'.format(self.entry_point)
 
 
-@component.adapter(str)
-@interface.implementer(interfaces.INamespace)
-def namespace_adapter(scalar):
-    # TODO
-    dist, _, name = value.rpartition('#')
-    if not dist:
-        # take first ep found
-        ep = list(pkg_resources.iter_entry_points(cls._entry_point_group, name))[0]
-
-    else:
-        ep = pkg_resources.get_entry_map(dist, group=cls._entry_point_group)[name]
-
-    return cls(ep)
-
-
-def load_spec_file(spec, spec_file):
-    """Load yaml into spec."""
-    loader = SpecLoader(spec_file, spec=spec)
-    definitions = loader.get_single_data()
-
-    assert isinstance(definitions, dict), 'The top level data type of a spec file must be a mapping!'
-
-    try:
-        return definitions
-
-    finally:
-        loader.dispose()
-
-
 class Spec(collections.OrderedDict):
 
     """A `Spec` is the top level dictionary of a yaml definition file.
@@ -293,7 +248,8 @@ class Spec(collections.OrderedDict):
         self.namespace = namespace
         self.source = source
 
-        super(Spec, self).__init__()
+        definitions = self._load_spec_file()
+        super(Spec, self).__init__(definitions)
 
     def __hash__(self):
         return hash((self.namespace, self.source))
@@ -304,6 +260,19 @@ class Spec(collections.OrderedDict):
 
     def __repr__(self):
         return '<Spec {0}>'.format(self.namespace.root.joinpath(self.source))
+
+    def _load_spec_file(self):
+        """Load yaml into spec."""
+        with self.namespace.open(self.source) as spec_file:
+            loader = SpecLoader(spec_file, spec=self)
+            definitions = loader.get_single_data()
+            try:
+                assert isinstance(definitions, dict), \
+                    'The top level data type of a spec file must be a mapping!'
+                return definitions
+
+            finally:
+                loader.dispose()
 
 
 class _SpecDescriptior:

@@ -38,6 +38,7 @@ class IDefinition(IYamlConstructor):
     spec = Attribute('The spec this deinition belongs to.')
 
 
+# TODO XXX do we need evolvable to be definition?
 class IEvolvable(IDefinition):
 
     """Define the possibility to evolve."""
