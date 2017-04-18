@@ -1,6 +1,7 @@
 """Scope is the basic means for information transport between tasks and subtasks."""
 
 import itertools
+
 from zope.interface.registry import Components
 
 

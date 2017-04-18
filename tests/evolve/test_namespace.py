@@ -43,17 +43,16 @@ def test_lookup_namespace(definitions, test_dir):
     from debellator.evolve import specs
     # from zope import component
 
-    ns = definitions._lookup_namespace('')
+    ns = definitions.interfaces.INamespace('')
     assert isinstance(ns, specs.DirectoryNamespace)
     assert str(ns.root) == test_dir
 
 
 @pytest.mark.usefixtures('bootstrap')
 def test_lookup_reference(definitions):
-    ref = definitions._lookup_reference(':test_specs.yaml:bar1')
+    ref = definitions.Reference(':test_specs.yaml:bar1')
 
-    assert ref.ref_string == 'foo'
-    assert ref.target == 'bar'
+    assert ref.resolve() == 'bar'
 
 
 @pytest.mark.parametrize('df,target', [
@@ -63,7 +62,7 @@ def test_lookup_reference(definitions):
 ])
 @pytest.mark.usefixtures('bootstrap')
 def test_spec_references(definitions, df, target):
-    ns = definitions._lookup_namespace('')
+    ns = definitions.interfaces.INamespace('')
     spec = ns['test_specs.yaml']
 
     assert spec[df].target == target
@@ -71,7 +70,7 @@ def test_spec_references(definitions, df, target):
 
 @pytest.mark.usefixtures('bootstrap')
 def test_specs(definitions):
-    ns = definitions._lookup_namespace('')
+    ns = definitions.interfaces.INamespace('')
     spec = ns['test_specs.yaml']
 
     keys = list(spec.keys())

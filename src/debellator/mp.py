@@ -1,13 +1,13 @@
 # coding: utf-8
 """Fallback pure Python implementation of msgpack"""
-import os
-import sys
 import array
+import os
 import struct
+import sys
+from collections import namedtuple
 
 version = (0, 4, 8)
 
-from collections import namedtuple
 
 
 class UnpackException(Exception):

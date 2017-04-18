@@ -13,10 +13,9 @@ import weakref
 
 import pkg_resources
 import yaml
-from zope import interface, component
+from zope import component, interface
 
 from . import interfaces
-
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +84,6 @@ class ComponentLoader(yaml.loader.Loader):
     @classmethod
     def construct_by_components(cls, loader, node):
         """Construct data and further apply an adapter if registered."""
-
         data = cls._construct_data(loader, node)
         return component.queryAdapter(data, interfaces.IDefinition, default=data)
 
@@ -188,6 +186,28 @@ class Namespace(dict):
         return super(Namespace, self).__getitem__(key)
 
 
+@component.adapter(str)
+@interface.implementer(interfaces.INamespace)
+def namespace_lookup(ns_name):
+    try:
+        return component.getUtility(interfaces.INamespace, ns_name)
+
+    except component.ComponentLookupError:
+        # namespace is not defined
+        # try to guess
+        if ns_name and '#' not in ns_name:
+            # without '#' we assume entrypoint name
+            for ep in pkg_resources.iter_entry_points(config.ENTRY_POINT_GROUP_SPECS, ns_name):
+                ns_name = '#'.join((ep.dist.key, ep.name))
+                namespace = component.queryUtility(interfaces.INamespace, ns_name)
+
+                if namespace:
+                    return namespace
+
+    # error
+    log.error('Namespace for `%s` not registered or misspelled', ns_name)
+
+
 @component.adapter(pathlib.Path)
 class DirectoryNamespace(Namespace):
 
@@ -283,20 +303,17 @@ class _SpecDescriptior:
     """
 
     def __init__(self):
-        self.spec = None
         self.instances = weakref.WeakKeyDictionary()
 
     def __get__(self, inst, cls):
         if inst:
-            return self.instances[inst]
+            return self.instances.get(inst, None)
 
-        return self.spec
+        return self
 
     def __set__(self, inst, value):
         if inst:
             self.instances[inst] = value
-
-        self.spec = value
 
 
 @interface.implementer(interfaces.IDefinition)
@@ -307,31 +324,12 @@ class Definition:
     spec = _SpecDescriptior()
 
 
-@interface.implementer(interfaces.IEvolvable)
-@component.adapter(interfaces.IYamlScalarNode, interfaces.IYamlLoader)
-class Null(Definition):
-
-    """Just a hack overcome zope adapter logic."""
-
-    def __init__(self, node, loader):
-        pass
-
-    async def evolve(self, scope):
-        return None
-
-
 def register_adapters():
     component.provideAdapter(EntryPointNamespace)
     component.provideAdapter(DirectoryNamespace)
+    component.provideAdapter(namespace_lookup)
 
     interface.classImplements(yaml.nodes.ScalarNode, interfaces.IYamlScalarNode)
     interface.classImplements(yaml.nodes.MappingNode, interfaces.IYamlMappingNode)
     interface.classImplements(yaml.nodes.SequenceNode, interfaces.IYamlSequenceNode)
     interface.classImplements(yaml.nodes.CollectionNode, interfaces.IYamlCollectionNode)
-
-    # TODO
-    @interface.implementer(interfaces.IEvolve)
-    @component.adapter(interfaces.IEvolvable)
-    def adapt_evolvable(evolvable):
-        return evolvable.evolve(registry)
-    component.provideAdapter(adapt_evolvable)

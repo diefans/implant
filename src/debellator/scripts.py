@@ -1,11 +1,10 @@
 import asyncio
-import click
 import logging
 import logging.config
+
+import click
 import pkg_resources
-
 import yaml
-
 
 log = logging.getLogger(__name__)
 

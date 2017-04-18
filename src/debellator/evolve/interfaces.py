@@ -1,4 +1,4 @@
-from zope.interface import Interface, Attribute
+from zope.interface import Attribute, Interface
 
 
 class IYamlNode(Interface):
@@ -31,19 +31,18 @@ class IYamlConstructor(Interface):
     """A marker interface for a node adapter."""
 
 
-class IDefinition(IYamlConstructor):
+class IDefinition(Interface):
 
     """A Definition holds a reference to its spec."""
 
     spec = Attribute('The spec this deinition belongs to.')
 
 
-# TODO XXX do we need evolvable to be definition?
-class IEvolvable(IDefinition):
+class IEvolvable(Interface):
 
     """Define the possibility to evolve."""
 
-    async def evolve(registry, scope):
+    async def evolve(scope):
         """Evolve remote by using scope."""
 
 
