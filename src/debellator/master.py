@@ -1,20 +1,15 @@
 """Controlles a bunch of remotes."""
 
 import asyncio
-import base64
-import inspect
 import logging
 import shlex
 import sys
 import traceback
-import types
-import zlib
 
-from debellator import core, mp
+from debellator import core, bootstrap
 
 logger = logging.getLogger(__name__)
 PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
-VENV_DEFAULT = '~/.debellator'
 
 
 class ProcessNotLaunchError(Exception):
@@ -41,96 +36,15 @@ class Remote(metaclass=MetaRemote):
         assert isinstance(other, Remote)
         return hash(self) == hash(other)
 
-    def _iter_bootstrap(self, venv):
-        """Bootstrapping of core module on remote."""
-        if self.hostname is not None:
-            yield "'"
-
-        if venv:
-            yield from (
-                'import os, sys, site, pkg_resources;',
-                'venv_path = os.path.expanduser("{venv}");'
-                'entry = site.getsitepackages([venv_path])[0]',
-
-                # create venv if missing
-                'if not os.path.isdir(entry):',
-                '   import venv',
-                '   venv.create(venv_path, system_site_packages=False, clear=True, symlinks=False, with_pip=True)',
-
-                # insert venv at first position
-                # pkg_resources is not adding site-packages if there is no distribution
-                'sys.prefix = venv_path',
-                'sys.path.insert(0, entry);',
-                'site.addsitedir(entry);',
-                'pkg_resources.working_set.add_entry(entry);',
-
-                # pip should come from venv now
-                'try:',
-                '   import msgpack',
-                'except ImportError:',
-                # try to install msgpack
-                '   import pip',
-                # TODO use ssh port forwarding to install via master
-                '   pip.main(["install", "--prefix", venv_path, "-q", "msgpack-python"])',
-            )
-
-        yield from (
-            'import sys, imp, base64, zlib;',
-            # just a msgpack fallback if no venv is used or msgpack somehow failed to install
-            'try:',
-            '   import msgpack;',
-            'except ImportError:',
-            '   sys.modules["msgpack"] = msgpack = imp.new_module("msgpack");',
-            '   c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec");',
-            '   exec(c, msgpack.__dict__);',
-
-            'sys.modules["debellator"] = debellator = imp.new_module("debellator"); setattr(debellator, "__path__", []);',
-            'sys.modules["debellator.core"] = core = imp.new_module("debellator.core");',
-            'debellator.__dict__["core"] = core;',
-
-            'c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True);',
-            'exec(c, core.__dict__);',
-
-            'core.main(**core.decode(base64.b64decode(b"{options}")));',
-        )
-
-        if self.hostname is not None:
-            yield "'"
-
     def command_args(self, *, code=None, options=None, python_bin=sys.executable):
         """Generate the command arguments to execute a python process."""
-        if options is None:
-            options = {}
 
-        assert isinstance(options, dict), 'options must be a dict'
+        bootstrap_code = str(bootstrap.Bootstrap(code, options))
 
-        if code is None:
-            code = sys.modules[__name__]
+        if self.hostname is not None:
+            bootstrap_code = "'{}'".format(bootstrap_code)
 
-        if isinstance(code, types.ModuleType):
-            code_source = inspect.getsource(code).encode()
-            code_path = 'remote://{}'.format(inspect.getsourcefile(code))
-
-        else:
-            code_source = code
-            code_path = 'remote-string://'
-
-        msgpack_code = inspect.getsource(mp).encode()
-        msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(mp))
-
-        venv = options.get('venv')
-        venv = VENV_DEFAULT if venv is True\
-            else None if venv is False\
-            else venv
-
-        bootstrap_code = '\n'.join(self._iter_bootstrap(venv)).format(
-            venv=venv,
-            code=base64.b64encode(zlib.compress(code_source, 9)).decode(),
-            code_path=code_path,
-            msgpack_code=base64.b64encode(zlib.compress(msgpack_code, 9)).decode(),
-            msgpack_code_path=msgpack_code_path,
-            options=base64.b64encode(core.encode(options)).decode(),
-        )
+        # from pdb import set_trace; set_trace()       # XXX BREAKPOINT
 
         def _gen():
             # ssh
@@ -147,6 +61,9 @@ class Remote(metaclass=MetaRemote):
                 yield '10001:localhost:10000'
 
                 yield self.hostname
+            else:
+                yield 'bash'
+                yield '-c'
 
             # sudo
             if self.sudo:
@@ -253,7 +170,9 @@ async def feed_stdin_to_remotes(**options):
         b'i\n': b'debellator.core:InvokeImport fullname=debellator.plugins.core\n',
     }
 
-    process = await Remote(hostname='localhost').launch(
+    process = await Remote(
+        hostname='localhost'
+    ).launch(
         code=core,
         python_bin='~/.pyenv/versions/3.5.2/bin/python',
         options=options
