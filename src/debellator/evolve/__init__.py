@@ -68,6 +68,17 @@ class Request:
         self.source = source
         self.scope = scope
 
+    def __repr__(self):
+        return f'<{self.__class__.__name__} at {self.time} by {self.source}>'
+
+    async def process(self):
+        log.info('Processing request: %s', self)
+        log.info('Using scope: %s', self.scope)
+
+        result = await interfaces.IEvolvable(self.definition.resolve()).evolve(self.scope)
+
+        return result
+
     # def __hash__(self):
     #     """A unique hash for this request to lock duplicates."""
 
@@ -81,25 +92,18 @@ def create_incomming_queue():
     return incomming
 
 
-async def process_request(request):
-    log.info('Processing request: %s', request)
-
-
-
-
 async def process_incomming(*, server=False):
     incomming = component.getUtility(interfaces.IIncommingQueue)
     request_locks = collections.defaultdict(asyncio.Lock)
 
-    log.info("processing... %s", incomming)
-
     while True:
         request = await incomming.get()
-        log.debug("request: %s", request)
 
         # try to process request
         async with request_locks[hash(request)]:
-            result = await process_request(request)
+            result = await request.process()
+
+            log.info('Result: %s', result)
 
         if not server and incomming.empty():
             log.info('Finished all requests.')

@@ -1,5 +1,6 @@
 import collections
 import logging
+import os
 import pathlib
 import re
 
@@ -21,9 +22,8 @@ class EvolvableMapping:
         self.mapping = mapping
 
     async def evolve(self, scope):
-        odict = collections.OrderedDict((
-            (key, await component.IEvolvable(value).evolve(scope)) for key, value in self.mapping.items()
-        ))
+        lst = [(key, await interfaces.IEvolvable(value).evolve(scope)) for key, value in self.mapping.items()]
+        odict = collections.OrderedDict(lst)
         return odict
 
 
@@ -37,7 +37,7 @@ class EvolvableSequence:
         self.sequence = sequence
 
     async def evolve(self, scope):
-        sequence = [await component.IEvolvable(item).evolve(scope) for item in self.sequence]
+        sequence = [await interfaces.IEvolvable(item).evolve(scope) for item in self.sequence]
         return sequence
 
 
@@ -45,11 +45,13 @@ class EvolvableSequence:
 @component.adapter(None)
 class EvolvableDefault:
 
+    """Default adapter for evolables."""
+
     def __init__(self, data):
         self.data = data
 
     async def evolve(self, scope):
-        return data
+        return self.data
 
 
 @component.adapter(dict)
@@ -59,14 +61,26 @@ class DebugMapping(collections.OrderedDict, specs.Definition):
         return None
 
 
-@component.adapter(dict)
-class For(dict, specs.Definition):
-    def __init__(self, *args, **kwargs):
-        super(For, self).__init__(*args, **kwargs)
+@interface.implementer(interfaces.IEvolvable)
+class For(specs.Definition):
+    @classmethod
+    @component.adapter(dict)
+    def adapt_dict(cls, dct):
+        return For(**{f'for_{key}': value for key, value in dct.items()})
+
+    def __init__(self, *, for_in, for_do, for_item='item'):
+        self.item_name = for_item
+        self.iterable = for_in
+        self.evolving = for_do
 
     async def evolve(self, scope):
-        # TODO
-        return None
+        lst = []
+        for item in await interfaces.IEvolvable(self.iterable).evolve(scope):
+            scope[self.item_name] = item
+            log.debug('Scope: %s', dict(scope))
+            lst.append(await interfaces.IEvolvable(self.evolving).evolve(scope))
+
+        return lst
 
 
 re_reference_string = re.compile(r'^(?:(?:(?P<ns>.*):)?(?P<spec>[^:]+):)?(?P<def>[^:]+)$')
@@ -127,17 +141,38 @@ def adapt_ref_scalar(node, loader):
     return interfaces.IReference(scalar)
 
 
-@component.adapter(dict)
-class Scope(specs.Definition):
-    def __init__(self, mapping):
-        self.df = mapping
+@component.adapter(str)
+def adapt_environ(name):
+    envvar = os.environ.get(name, None)
+    return envvar
+
+
+@component.adapter(interfaces.IYamlScalarNode, interfaces.IYamlLoader)
+def adapt_environ_scalar(node, loader):
+    name = loader.construct_scalar(node)
+    envvar = os.environ.get(name, None)
+
+    return envvar
+
+
+@interface.implementer(interfaces.IEvolvable)
+@component.adapter(str)
+class Eval(specs.Definition):
+    def __init__(self, expression):
+        self.expression = expression
+
+    async def evolve(self, scope):
+        result = scope.eval(self.expression)
+        return result
 
 
 def register_adapters():
     component.provideAdapter(EvolvableDefault)
     component.provideAdapter(EvolvableSequence)
     component.provideAdapter(EvolvableMapping)
+    component.provideAdapter(Eval, provides=interfaces.IDefinition, name='!eval')
     component.provideAdapter(DebugMapping, provides=interfaces.IDefinition, name='!debug')
-    component.provideAdapter(For, provides=interfaces.IDefinition, name='!for')
+    component.provideAdapter(For.adapt_dict, provides=interfaces.IDefinition, name='!for')
     component.provideAdapter(adapt_ref_scalar, provides=interfaces.IYamlConstructor, name='!ref')
+    component.provideAdapter(adapt_environ_scalar, provides=interfaces.IYamlConstructor, name='!env')
     component.provideAdapter(Reference, provides=interfaces.IReference)

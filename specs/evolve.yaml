@@ -20,7 +20,8 @@ run: !for
         - null
         - true
         - 1.23
-    do: null
+        - !eval env('FOO')
+    do: !eval x
     #do: !scope
     #    defaults:
     #        foo: bar

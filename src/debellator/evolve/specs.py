@@ -85,7 +85,7 @@ class ComponentLoader(yaml.loader.Loader):
     def construct_by_components(cls, loader, node):
         """Construct data and further apply an adapter if registered."""
         data = cls._construct_data(loader, node)
-        return component.queryAdapter(data, interfaces.IDefinition, default=data)
+        return component.queryAdapter(data, interfaces.IDefinition, name=node.tag, default=data)
 
     @staticmethod
     def construct_list(loader, node):
