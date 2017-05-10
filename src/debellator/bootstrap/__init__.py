@@ -1,10 +1,13 @@
+"""Bootstrap of a remote python process."""
 import base64
 import inspect
 import types
 import zlib
 
+import pkg_resources
+
 from .. import core
-from . import message_pack, _main, _with_venv
+from . import message_pack
 
 
 VENV_DEFAULT = '~/.debellator'
@@ -39,18 +42,20 @@ class Bootstrap(dict):
         self.msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(message_pack))
         self.msgpack_code = base64.b64encode(zlib.compress(msgpack_code_source, 9)).decode(),
 
-    def formatsourcelines(self, module):
-        lines, _ = inspect.getsourcelines(module)
-        for line in lines:
+    def formatsourcelines(self, lines):
+        # lines, _ = inspect.getsourcelines(module)
+        for line in map(lambda l: l.decode('utf-8', 'replace'), lines):
             stripped = line.strip()
             if stripped and not stripped.startswith('#'):
                 yield line.format(**self)
 
     def __iter__(self):
         if self.venv:
-            yield from self.formatsourcelines(_with_venv)
+            _with_venv_fmt = pkg_resources.resource_stream(__name__, '_with_venv.py.fmt')
+            yield from self.formatsourcelines(_with_venv_fmt.readlines())
 
-        yield from self.formatsourcelines(_main)
+        _main_fmt = pkg_resources.resource_stream(__name__, '_main.py.fmt')
+        yield from self.formatsourcelines(_main_fmt.readlines())
 
     def __str__(self):
         return ''.join(self)

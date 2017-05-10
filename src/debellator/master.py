@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import pathlib
 import shlex
 import sys
 import traceback
@@ -61,9 +62,6 @@ class Remote(metaclass=MetaRemote):
                 yield '10001:localhost:10000'
 
                 yield self.hostname
-            else:
-                yield 'bash'
-                yield '-c'
 
             # sudo
             if self.sudo:
@@ -73,7 +71,7 @@ class Remote(metaclass=MetaRemote):
                     yield '-u'
                     yield self.sudo
 
-            yield from shlex.split(python_bin)
+            yield str(python_bin)
             yield '-c'
             yield bootstrap_code
 
@@ -171,10 +169,10 @@ async def feed_stdin_to_remotes(**options):
     }
 
     process = await Remote(
-        hostname='localhost'
+        # hostname='localhost'
     ).launch(
         code=core,
-        python_bin='~/.pyenv/versions/3.5.2/bin/python',
+        python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
         options=options
     )
 
