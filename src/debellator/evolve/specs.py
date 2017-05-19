@@ -144,6 +144,11 @@ class SpecLoader(ComponentLoader):
         super(SpecLoader, self).__init__(*args, **kwargs)
         self.spec = spec
 
+    def compose_node(self, parent, index):
+        node = super(SpecLoader, self).compose_node( parent, index)
+        node.spec = self.spec
+        return node
+
     def construct_object(self, node, deep=False):
         data = super(SpecLoader, self).construct_object(node, deep=deep)
 
@@ -285,10 +290,11 @@ class Spec(collections.OrderedDict):
         """Load yaml into spec."""
         with self.namespace.open(self.source) as spec_file:
             loader = SpecLoader(spec_file, spec=self)
-            definitions = loader.get_single_data()
+            # we override empty data
+            definitions = loader.get_single_data() or {}
             try:
                 assert isinstance(definitions, dict), \
-                    'The top level data type of a spec file must be a mapping!'
+                    f'The top level data type of a spec file must be a mapping! Is {type(definitions)}.'
                 return definitions
 
             finally:

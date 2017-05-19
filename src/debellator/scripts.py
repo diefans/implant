@@ -57,8 +57,14 @@ def cli(ctx, use_uvloop, debug, log_config):
             log.setLevel(logging.DEBUG)
 
 
+class EvolveCfg:
+    def __init__(self, root, settings):
+        import yaml
+        self.root = root
+        self.settings = yaml.load(settings) if settings is not None else {}
 
-@cli.command()
+
+@cli.group()
 @click.option('--root', '-r',
               default=None,
               type=click.Path(exists=True, file_okay=False, resolve_path=True),
@@ -68,14 +74,32 @@ def cli(ctx, use_uvloop, debug, log_config):
               type=click.File(),
               envvar='SETTINGS'
 )
-@click.argument('definitions', nargs=-1, required=True)
 @click.pass_context
-def evolve(ctx, root, settings, definitions):
-    import yaml
+def evolve(ctx, root, settings):
+    ctx.obj = EvolveCfg(root, settings)
+
+
+@evolve.command('launch')
+@click.argument('definitions', nargs=-1, required=True)
+@click.pass_obj
+def evolve_launch(cfg, definitions):
     from debellator import evolve
 
     evolve.main(
         definitions=definitions,
-        settings=yaml.load(settings) if settings is not None else {},
-        root=root,
+        settings=cfg.settings,
+        root=cfg.root,
     )
+
+
+@evolve.command('definitions')
+@click.pass_obj
+def evolve_definitions(cfg):
+    from debellator import evolve
+
+    evolve.config.bootstrap(cfg.root)
+    for def_tuple, definition in evolve.config.find_definitions().items():
+        def_name = ':'.join(map(str, def_tuple))
+        click.echo(f'{def_name} - {type(definition)}')
+
+

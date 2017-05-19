@@ -72,6 +72,27 @@ def register_namespaces(root=None, entry_point_group=ENTRY_POINT_GROUP_SPECS):
         component.provideUtility(ns, name=str(ns))
 
 
+def find_registered_namespaces():
+    return {key: ns for key, ns in component.getUtilitiesFor(interfaces.INamespace)}
+
+
+def find_definitions():
+    namespaces = find_registered_namespaces()
+
+    # for ns_name, ns in namespaces.items():
+    #     for spec_name, spec in ns.items():
+    #         for def_name in spec:
+    #             yield ns_name, spec_name, def_name
+
+    definitions = {
+        (ns_name, spec_name, def_name): definition
+        for ns_name, ns in namespaces.items()
+        for spec_name, spec in ns.items()
+        for def_name, definition in spec.items()
+    }
+    return definitions
+
+
 def load_registry_entry_points(entry_point_group=ENTRY_POINT_GROUP_REGISTRY):
     log.debug('Iterate over entry point group: %s', entry_point_group)
     dependencies = component.getUtility(interfaces.IDependencies)
