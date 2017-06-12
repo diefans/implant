@@ -3,12 +3,14 @@
 It creates default io queues and distributes commands accordingly.
 
 """  # pylint: disable=C0302
+import abc
 import asyncio
 import concurrent
 import functools
 import hashlib
 import importlib.abc
 import importlib.machinery
+import importlib._bootstrap_external
 import inspect
 import logging
 import logging.config
@@ -29,16 +31,25 @@ import msgpack
 logger = logging.getLogger(__name__)
 
 
-class MsgpackMixin:
+class MsgpackEncoder(metaclass=abc.ABCMeta):
 
     """Add msgpack en/decoding to a type."""
 
-    def __msgpack_encode__(self):   # noqa
+    @abc.abstractclassmethod
+    def __msgpack_encode__(cls, data, data_type):   # noqa
+        return None
+
+    @abc.abstractclassmethod
+    def __msgpack_decode__(cls, data, data_type):
         return None
 
     @classmethod
-    def __msgpack_decode__(cls, data):
-        return None
+    def __subclasshook__(cls, C):
+        if cls is MsgpackEncoder:
+            if any("__msgpack_encode__" in B.__dict__ for B in C.__mro__) \
+            and any("__msgpack_decode__" in B.__dict__ for B in C.__mro__):
+                return True
+        return NotImplemented
 
 
 class MsgpackDefaultEncoder(dict):
@@ -49,13 +60,13 @@ class MsgpackDefaultEncoder(dict):
         data_type = type(data)
         data_module = data_type.__module__
 
-        encoder = data if hasattr(data, '__msgpack_encode__') else self.encoders.get(data_type)(data)
+        encoder = data if isinstance(data, MsgpackEncoder) else self._get_encoder(data_type)
         if encoder:
             return {
                 '__custom_object__': True,
                 '__module__': data_module,
                 '__type__': data_type.__name__,
-                '__data__': data.__msgpack_encode__()
+                '__data__': encoder.__msgpack_encode__(data, data_type=data_type)
             }
 
         return data
@@ -66,37 +77,54 @@ class MsgpackDefaultEncoder(dict):
             module = sys.modules.get(encoded['__module__'])
 
             if not module:
+                # TODO import missing module
                 raise TypeError("The module of the encoded data type is not loaded: {}".format(encoded))
 
             data_type = getattr(module, encoded['__type__'])
-            decoder = data_type if hasattr(data_type, '__msgpack_decode__') else self.encoders.get(data_type)
-            decoded = decoder.__msgpack_decode__(encoded['__data__'])
+
+            decoder = data_type if issubclass(data_type, MsgpackEncoder) else self._get_encoder(data_type)
+            decoded = decoder.__msgpack_decode__(encoded['__data__'], data_type=data_type)
 
             return decoded
 
         return encoded
 
+    def _get_encoder(self, data_type):
+        # lookup data types for registered encoders
+        for cls in data_type.__mro__:
+            if cls in self:
+                encoder = self[cls]
+                return encoder
 
-class MsgpackExceptionEncoder(MsgpackMixin):
+        return None
+
+    def register_encoder(self, data_type):
+        def decorator(func):
+            self[data_type] = func
+
+            return func
+
+        return decorator
+
+
+msgpack_default_encoder = MsgpackDefaultEncoder()
+
+
+@msgpack_default_encoder.register_encoder(Exception)
+class MsgpackExceptionEncoder(MsgpackEncoder):
 
     """Encode and decode Exception arguments.
 
     Traceback and other internals will be lost.
     """
 
-    def __init__(self, data):
-        self.data = data
-
-    def __msgpack_encode__(self):
-        return self.data.args
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return data.args
 
     @classmethod
-    def __msgpack_decode__(cls, encoded):
-        return cls(*encoded)
-
-
-msgpack_default_encoder = MsgpackDefaultEncoder()
-msgpack_default_encoder[Exception] = MsgpackExceptionEncoder
+    def __msgpack_decode__(cls, encoded, data_type):
+        return data_type(*encoded)
 
 
 def encode_msgpack(data):
@@ -104,7 +132,7 @@ def encode_msgpack(data):
         return msgpack.packb(data, default=msgpack_default_encoder.encode, use_bin_type=True, encoding="utf-8")
 
     except:
-        logger.error("Error:\n%s", traceback.format_exc())
+        logger.error("Error packing:\n%s", traceback.format_exc())
         raise
 
 
@@ -205,11 +233,12 @@ class Uid:
     def __str__(self):
         return '-'.join(map(str, (self.time, self.id, self.tid, self.seq)))
 
-    def __msgpack_encode__(self):
-        return self.bytes
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return data.bytes
 
     @classmethod
-    def __msgpack_decode__(cls, encoded):
+    def __msgpack_decode__(cls, encoded, data_type):
         return cls(bytes=encoded)
 
 
@@ -807,7 +836,7 @@ class Command(metaclass=_CommandMeta):
         return self.channel_name
 
 
-class ExecuteException(MsgpackMixin):
+class ExecuteException(MsgpackEncoder):
 
     """Remote execution ended in an exception."""
 
@@ -821,16 +850,17 @@ class ExecuteException(MsgpackMixin):
         logger.error("Remote exception for %s:\n%s", self.fqin, self.tb)
         future.set_exception(self.exception)
 
-    def __msgpack_encode__(self):
-        return (self.fqin, self.exception, self.tb)
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return (data.fqin, data.exception, data.tb)
 
     @classmethod
-    def __msgpack_decode__(cls, encoded):
+    def __msgpack_decode__(cls, encoded, data_type):
         fqin, exc, tb = encoded
         return cls(fqin, exc, tb)
 
 
-class ExecuteResult(MsgpackMixin):
+class ExecuteResult(MsgpackEncoder):
 
     """The result of a remote execution."""
 
@@ -842,15 +872,16 @@ class ExecuteResult(MsgpackMixin):
         future = Execute.pending_commands[self.fqin]
         future.set_result(self.result)
 
-    def __msgpack_encode__(self):
-        return (self.fqin, self.result)
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return (data.fqin, data.result)
 
     @classmethod
-    def __msgpack_decode__(cls, encoded):
+    def __msgpack_decode__(cls, encoded, data_type):
         return cls(*encoded)
 
 
-class ExecuteArgs(MsgpackMixin):
+class ExecuteArgs(MsgpackEncoder):
 
     """Arguments for an execution."""
 
@@ -863,11 +894,12 @@ class ExecuteArgs(MsgpackMixin):
         execute = Execute(io_queues, command)
         asyncio.ensure_future(execute.remote())
 
-    def __msgpack_encode__(self):
-        return (self.fqin, self.params)
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return (data.fqin, data.params)
 
     @classmethod
-    def __msgpack_decode__(cls, encoded):
+    def __msgpack_decode__(cls, encoded, data_type):
         return cls(*encoded)
 
 
@@ -1025,25 +1057,62 @@ class FindModule(Command):
 
         return module_loaded
 
+    def _is_namespace(self, module):
+        # see https://www.python.org/dev/peps/pep-0451/#how-loading-will-work
+        spec = module.__spec__
+        is_namespace = spec.loader is None and spec.submodule_search_locations is not None
+        return is_namespace
+
+    def _is_package(self, module):
+        is_package = bool(getattr(module, '__path__', None) is not None)
+        return is_package
+
+    def _get_source(self, module):
+        spec = module.__spec__
+        if isinstance(spec.loader, importlib.abc.InspectLoader):
+            source = spec.loader.get_source(module.__name__)
+        else:
+            try:
+                source = inspect.getsource(module)
+            except OSError:
+                # when source is empty
+                source = ''
+
+        return source
+
+    def _get_source_filename(self, module):
+        spec = module.__spec__
+        if isinstance(spec.loader, importlib.abc.ExecutionLoader):
+            filename = spec.loader.get_filename(module.__name__)
+        else:
+            filename = inspect.getsourcefile(module)
+
+        return filename
+
     async def remote(self):
         module = sys.modules.get(self.module_name)
+
         if module:
-            is_package = bool(getattr(module, '__path__', None) is not None)
+            is_namespace = self._is_namespace(module)
+            is_package = self._is_package(module)
+
             logger.debug("module found: %s", module)
-            try:
-                source_file = inspect.getsourcefile(module)
+            remote_module_data = {
+                'name': self.module_name,
+                'is_namespace': is_namespace,
+                'is_package': is_package
+            }
 
-                try:
-                    source = inspect.getsource(module)
-                except OSError:
-                    # when source is empty
-                    source = ''
+            if not is_namespace:
+                remote_module_data.update({
+                    'source': self._get_source(module),
+                    'source_filename': self._get_source_filename(module)
+                })
 
-                return (is_package, source, source_file)
-
-            except TypeError:
-                # this fails with a type error when a module is created without source file
-                pass
+            return remote_module_data
+        else:
+            logger.error('Module not loaded: %s', self.module_name)
+            return None
 
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
@@ -1053,14 +1122,16 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
     The import itself is run in a separate executor thread to keep things async.
 
     http://stackoverflow.com/questions/32059732/send-asyncio-tasks-to-loop-running-in-other-thread
-
+    https://www.python.org/dev/peps/pep-0302/
+    https://www.python.org/dev/peps/pep-0420/
+    https://www.python.org/dev/peps/pep-0451/
     """
 
     def __init__(self, io_queues, loop):
         self.io_queues = io_queues
         self.main_loop = loop
 
-    def find_spec(self, module_name, path, target=None):
+    def _find_remote_module(self, module_name):
         # ask master for this module
         logger.debug("Module lookup: %s", module_name)
 
@@ -1070,23 +1141,48 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         )
         module_data = future.result()
 
-        if module_data:
-            is_package, module_source, module_file = module_data
+        return module_data
 
-            logger.debug("Module found for %s: %s", module_name, module_file)
-            origin = 'remote://{}'.format(module_file)
+    def find_spec(self, fullname, path, target=None):
+        logger.debug('Path for module %s: %s', fullname, path)
 
-            spec = importlib.machinery.ModuleSpec(
-                name=module_name,
-                loader=RemoteModuleLoader(module_source, filename=origin, is_package=is_package),
-                origin=origin,
-                loader_state=1234,
-                is_package=is_package
-            )
+        remote_module_data = self._find_remote_module(fullname)
+
+        if remote_module_data:
+            # FIXME logging blocks
+            # logger.debug("Module found for %s: %s", fullname, remote_module_data)
+
+            if remote_module_data['is_namespace']:
+                logger.debug("Namespace package found for %s", fullname)
+                spec = importlib.machinery.ModuleSpec(
+                    name=fullname,
+                    loader=None,
+                    origin='remote namespace',
+                    is_package=remote_module_data['is_package']
+                )
+
+            else:
+                logger.debug("Module found for %s", fullname)
+                origin = 'remote://{}'.format(remote_module_data.get('source_filename', fullname))
+                is_package = remote_module_data['is_package']
+
+                loader = RemoteModuleLoader(
+                    remote_module_data.get('source', ''),
+                    filename=origin,
+                    is_package=is_package
+                )
+
+                spec = importlib.machinery.ModuleSpec(
+                    name=fullname,
+                    loader=loader,
+                    origin=origin,
+                    is_package=is_package
+                )
+
             return spec
 
         else:
-            logger.debug("No module found for %s", module_name)
+            logger.debug("No module found for %s", fullname)
 
 
 class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0223
@@ -1109,6 +1205,24 @@ class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0
 
     def get_source(self, fullname):
         return self.source
+
+    @classmethod
+    def module_repr(cls, module):
+        return "<module '{}' (namespace)>".format(module.__name__)
+
+class RemoteNamespaceFinder(importlib.abc.MetaPathFinder):
+    def _find_remote_namespace(self, fullname):
+        pass
+
+    def find_loader(self, fullname):
+        pass
+
+
+# TODO
+class RemoteNamespaceLoader:
+    @classmethod
+    def module_repr(cls, module):
+        return "<module '{}' (namespace)>".format(module.__name__)
 
 
 async def run(*tasks):

@@ -329,6 +329,16 @@ class Definition:
 
     spec = _SpecDescriptior()
 
+    def __eq__(self, other):
+        if not type(self) == type(other):
+            return False
+
+        return self.__dict__ == other.__dict__
+
+    def __hash__(self):
+        # TODO XXX FIXME I do not know if this is enough to keep identity
+        return id(self)
+
 
 def register_adapters():
     component.provideAdapter(EntryPointNamespace)

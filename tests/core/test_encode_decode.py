@@ -5,13 +5,14 @@ class Foo:
     def __init__(self, foo):
         self.foo = foo
 
-    def __msgpack_encode__(self):
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
         return {
-            'foo': self.foo
+            'foo': data.foo
         }
 
     @classmethod
-    def __msgpack_decode__(cls, encoded):
+    def __msgpack_decode__(cls, encoded, data_type):
         foo = cls(encoded['foo'])
         return foo
 
@@ -40,3 +41,15 @@ def test_encode_uid():
 
     assert uid == decoded
     assert isinstance(uid, core.Uid)
+
+
+def test_default_encoder_exception():
+    from debellator import core
+
+    ex = Exception('foobar')
+
+    encoded = core.encode(ex)
+
+    decoded = core.decode(encoded)
+
+    assert ex.args == decoded.args

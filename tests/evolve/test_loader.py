@@ -45,6 +45,6 @@ def test_construction():
             ('foo', 'bar'),
             ('bar', 'baz')
         ])),
-        ('for', {'do': 'bla', 'in': [1, 2, 3], 'item': 'x'}),
+        ('for', definitions.For(for_do='bla', for_in=[1, 2, 3], for_item='x')),
     ])
     assert data == result

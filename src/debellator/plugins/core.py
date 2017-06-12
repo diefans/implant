@@ -8,6 +8,7 @@ import threading
 import traceback
 
 from debellator import core
+from zope import interface, component
 
 
 class Echo(core.Command):
