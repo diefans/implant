@@ -66,11 +66,11 @@ class TestChannel:
         data = b'1234567890' * 10
         chunk_size, rest = divmod(len(pickle.dumps(data)), 10)
 
-        with mock.patch.object(core.Channel, 'chunk_size', chunk_size):
+        with mock.patch.object(core.IoQueues, 'chunk_size', chunk_size):
             with mock.patch.object(core.Uid, '__call__') as mock_uuid:
                 mock_uuid.return_value = uid
                 c = core.Channel('foo')
-                queue = c.io_queues.send
+                queue = c.io_queues.outgoing
 
                 await c.send(data)
 
@@ -95,11 +95,11 @@ class TestChannel:
 
         # TODO mock Outgoing/os.kill to prevent shutdown of test run
         # alternativelly think about some other means to shutdown remote process if ssh closes
-        with mock.patch.object(core.Channel, 'chunk_size', 0x800):
+        with mock.patch.object(core.IoQueues, 'chunk_size', 0x800):
             async with core.Incomming(pipe=r_pipe) as reader:
                 async with core.Outgoing(pipe=w_pipe) as writer:
                     io_queues = core.IoQueues()
-                    com_future = asyncio.ensure_future(core.Channel.communicate(io_queues, reader, writer))
+                    com_future = asyncio.ensure_future(io_queues.communicate(reader, writer))
 
                     try:
                         # channel will receive its own messages

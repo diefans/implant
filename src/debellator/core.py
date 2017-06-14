@@ -266,29 +266,6 @@ def create_module(module_name, is_package=False):
     return sys.modules[module_name]
 
 
-class IoQueues:
-
-    """Just to keep send and receive queues together."""
-
-    def __init__(self, send=None):
-        if send is None:
-            send = asyncio.Queue()
-
-        self.send = send
-        self.receive = defaultdict(asyncio.Queue)
-
-    def __getitem__(self, channel_name):
-        return self.receive[channel_name]
-
-    def __delitem__(self, channel_name):
-        try:
-            del self.receive[channel_name]
-
-        except KeyError:
-            # we ignore missing queues, since not all commands use it
-            pass
-
-
 class Incomming(asyncio.StreamReader):
 
     """A context for an incomming pipe."""
@@ -421,14 +398,221 @@ HEADER_FMT = '!32sQHI'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 
-class Channel:
+def _encode_header(uid, channel_name=None, data=None, *, flags=None):
+    """Create chunk header.
 
-    """Channel provides means to send and receive messages."""
+    [header length = 30 bytes]
+    [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
+    {data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
+
+    """
+    assert isinstance(uid, Uid), "uid must be an Uid instance"
+
+    if flags is None:
+        flags = {}
+
+    if channel_name:
+        encoded_channel_name = channel_name.encode()
+        channel_name_length = len(encoded_channel_name)
+    else:
+        channel_name_length = 0
+
+    data_length = data and len(data) or 0
+    chunk_flags = ChunkFlags(**flags)
+
+    header = struct.pack(HEADER_FMT, uid.bytes, chunk_flags.encode(), channel_name_length, data_length)
+    check = hashlib.md5(header).digest()
+
+    return b''.join((header, check))
+
+
+def _decode_header(header):
+    assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
+    uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
+
+    uid = Uid(bytes=uid_bytes)
+    return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
+
+
+class IoQueues:
+
+    """Just to keep send and receive queues together."""
 
     chunk_size = 0x8000
 
     acknowledgements = weakref.WeakValueDictionary()
     """Global acknowledgment futures distinctive by uid."""
+
+    def __init__(self, send=None):
+        self.outgoing = asyncio.Queue() if send is None else send
+        self.incomming = defaultdict(asyncio.Queue)
+
+    def __getitem__(self, channel_name):
+        return self.incomming[channel_name]
+
+    def __delitem__(self, channel_name):
+        try:
+            del self.incomming[channel_name]
+
+        except KeyError:
+            # we ignore missing queues, since not all commands use it
+            pass
+
+    async def communicate(self, reader, writer):
+        """Schedule send and receive tasks.
+
+        :param reader: the `StreamReader` instance
+        :param writer: the `StreamWriter` instance
+
+        """
+        fut_send_recv = asyncio.gather(
+            self._send_writer(writer),
+            self._receive_reader(reader)
+        )
+
+        await fut_send_recv
+
+    async def _send_writer(self, writer):
+        # send outgoing queue to writer
+        queue = self.outgoing
+
+        try:
+            while True:
+                data = await queue.get()
+                if isinstance(data, tuple):
+                    for part in data:
+                        writer.write(part)
+                else:
+                    writer.write(data)
+
+                queue.task_done()
+                await writer.drain()
+
+        except asyncio.CancelledError:
+            if queue.qsize():
+                log.warning("Send queue was not empty when canceled!")
+
+        except:
+            log.error("Error while sending:\n%s", traceback.format_exc())
+            raise
+
+    async def _receive_single_message(self, reader, buffer):
+        # read header
+        raw_header = await reader.readexactly(HEADER_SIZE + 16)
+        uid, flags, channel_name_length, data_length = _decode_header(raw_header)
+
+        if channel_name_length:
+            channel_name = (await reader.readexactly(channel_name_length)).decode()
+
+        if data_length:
+            if uid not in buffer:
+                buffer[uid] = bytearray()
+
+            part = await reader.readexactly(data_length)
+            if flags.compression:
+                part = zlib.decompress(part)
+
+            buffer[uid].extend(part)
+
+        if channel_name_length:
+            log.debug("Channel %s receives: %s bytes", channel_name, data_length)
+        else:
+            log.debug("Message %s, received: %s", uid, flags)
+
+        if flags.send_ack:
+            # we have to acknowledge the reception
+            await self._send_ack(uid)
+
+        if flags.eom:
+            # put message into channel queue
+            if uid in buffer and channel_name_length:
+                msg = decode(buffer[uid])
+                await self[channel_name].put(msg)
+                del buffer[uid]
+
+            # acknowledge reception
+            ack_future = self.acknowledgements.get(uid)
+            if ack_future and flags.recv_ack:
+                duration = time.time() - uid.time
+                ack_future.set_result((uid, duration))
+
+    async def _receive_reader(self, reader):
+        # receive incomming data into queues
+        buffer = {}
+        try:
+            while True:
+                await self._receive_single_message(reader, buffer)
+
+        except asyncio.IncompleteReadError:
+            # incomplete is always a cancellation
+            log.warning("While waiting for data, we received EOF!")
+
+        except asyncio.CancelledError:
+            if buffer:
+                log.warning("Receive buffer was not empty when canceled!")
+
+        except:
+            log.error("Error while receiving:\n%s", traceback.format_exc())
+            raise
+
+    async def _send_ack(self, uid):
+        # no channel_name, no data
+        header = _encode_header(uid, None, None, flags={
+            'eom': True, 'recv_ack': True
+        })
+
+        await self.outgoing.put(header)
+
+    async def send(self, channel_name, data, ack=False, compress=6):
+        """Send data in a encoded form to the channel.
+
+        :param data: the python object to send
+        :param ack: request acknowledgement of the reception of that message
+        :param compress: compress the data with zlib
+
+        """
+        uid = Uid()
+        encoded_channel_name = channel_name.encode()
+        loop = asyncio.get_event_loop()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            encoded_data = await loop.run_in_executor(executor, encode, data)
+
+        log.debug("Channel %s sends: %s bytes", channel_name, len(encoded_data))
+
+        for part in split_data(encoded_data, self.chunk_size):
+            if compress:
+                raw_len = len(part)
+                part = zlib.compress(part, compress)
+                comp_len = len(part)
+
+                log.debug("Compression ratio of %s -> %s: %.2f%%", raw_len, comp_len, comp_len * 100 / raw_len)
+
+            header = _encode_header(uid, channel_name, part, flags={
+                'eom': False, 'send_ack': False, 'compression': bool(compress)
+            })
+
+            await self.outgoing.put((header, encoded_channel_name, part))
+
+        header = _encode_header(uid, channel_name, None, flags={
+            'eom': True, 'send_ack': ack, 'compression': False
+        })
+
+        # if acknowledgement is asked for, we await this future and return its result
+        # see _receive_reader for resolution of future
+        if ack:
+            ack_future = asyncio.Future()
+            self.acknowledgements[uid] = ack_future
+
+        await self.outgoing.put((header, encoded_channel_name))
+
+        if ack:
+            return await ack_future
+
+
+class Channel:
+
+    """Channel provides means to send and receive messages."""
 
     def __init__(self, name=None, *, io_queues=None):
         """Initialize the channel.
@@ -439,7 +623,7 @@ class Channel:
         """
         self.name = name
         self.io_queues = io_queues or IoQueues()
-        self.io_outgoing = self.io_queues.send
+        self.io_outgoing = self.io_queues.outgoing
         self.io_incomming = self.io_queues[self.name]
 
     def __repr__(self):
@@ -481,42 +665,6 @@ class Channel:
 
         return context()
 
-    @staticmethod
-    def _encode_header(uid, channel_name=None, data=None, *, flags=None):
-        """Create chunk header.
-
-        [header length = 30 bytes]
-        [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
-        {data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
-
-        """
-        assert isinstance(uid, Uid), "uid must be an Uid instance"
-
-        if flags is None:
-            flags = {}
-
-        if channel_name:
-            name = channel_name.encode()
-            channel_name_length = len(name)
-        else:
-            channel_name_length = 0
-
-        data_length = data and len(data) or 0
-        chunk_flags = ChunkFlags(**flags)
-
-        header = struct.pack(HEADER_FMT, uid.bytes, chunk_flags.encode(), channel_name_length, data_length)
-        check = hashlib.md5(header).digest()
-
-        return b''.join((header, check))
-
-    @staticmethod
-    def _decode_header(header):
-        assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
-        uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
-
-        uid = Uid(bytes=uid_bytes)
-        return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
-
     async def send(self, data, ack=False, compress=6):
         """Send data in a encoded form to the channel.
 
@@ -525,154 +673,7 @@ class Channel:
         :param compress: compress the data with zlib
 
         """
-        uid = Uid()
-        name = self.name.encode()
-        loop = asyncio.get_event_loop()
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            encoded_data = await loop.run_in_executor(executor, encode, data)
-
-        log.debug("Channel %s sends: %s bytes", self.name, len(encoded_data))
-
-        for part in split_data(encoded_data, self.chunk_size):
-            if compress:
-                raw_len = len(part)
-                part = zlib.compress(part, compress)
-                comp_len = len(part)
-
-                log.debug("Compression ratio of %s -> %s: %.2f%%", raw_len, comp_len, comp_len * 100 / raw_len)
-
-            header = self._encode_header(uid, self.name, part, flags={
-                'eom': False, 'send_ack': False, 'compression': bool(compress)
-            })
-
-            await self.io_outgoing.put((header, name, part))
-
-        header = self._encode_header(uid, self.name, None, flags={
-            'eom': True, 'send_ack': ack, 'compression': False
-        })
-
-        # if acknowledgement is asked for, we await this future and return its result
-        # see _receive_reader for resolution of future
-        if ack:
-            ack_future = asyncio.Future()
-            self.acknowledgements[uid] = ack_future
-
-        await self.io_outgoing.put((header, name))
-
-        if ack:
-            return await ack_future
-
-    @classmethod
-    async def _send_ack(cls, io_queues, uid):
-        # no channel_name, no data
-        header = cls._encode_header(uid, None, None, flags={
-            'eom': True, 'recv_ack': True
-        })
-
-        await io_queues.send.put(header)
-
-    @classmethod
-    async def communicate(cls, io_queues, reader, writer):
-        """Schedule send and receive tasks.
-
-        :param io_queues: the queues to use
-        :param reader: the `StreamReader` instance
-        :param writer: the `StreamWriter` instance
-
-        """
-        fut_send_recv = asyncio.gather(
-            cls._send_writer(io_queues, writer),
-            cls._receive_reader(io_queues, reader)
-        )
-
-        await fut_send_recv
-
-    @classmethod
-    async def _send_writer(cls, io_queues, writer):
-        # send outgoing queue to writer
-        queue = io_queues.send
-
-        try:
-            while True:
-                data = await queue.get()
-                if isinstance(data, tuple):
-                    for part in data:
-                        writer.write(part)
-                else:
-                    writer.write(data)
-
-                queue.task_done()
-                await writer.drain()
-
-        except asyncio.CancelledError:
-            if queue.qsize():
-                log.warning("Send queue was not empty when canceled!")
-
-        except:
-            log.error("Error while sending:\n%s", traceback.format_exc())
-            raise
-
-    @classmethod
-    async def _receive_single_message(cls, io_queues, reader, buffer):
-        # read header
-        raw_header = await reader.readexactly(HEADER_SIZE + 16)
-        uid, flags, channel_name_length, data_length = cls._decode_header(raw_header)
-
-        if channel_name_length:
-            channel_name = (await reader.readexactly(channel_name_length)).decode()
-
-        if data_length:
-            if uid not in buffer:
-                buffer[uid] = bytearray()
-
-            part = await reader.readexactly(data_length)
-            if flags.compression:
-                part = zlib.decompress(part)
-
-            buffer[uid].extend(part)
-
-        if channel_name_length:
-            log.debug("Channel %s receives: %s bytes", channel_name, data_length)
-        else:
-            log.debug("Message %s, received: %s", uid, flags)
-
-        if flags.send_ack:
-            # we have to acknowledge the reception
-            await cls._send_ack(io_queues, uid)
-
-        if flags.eom:
-            # put message into channel queue
-            if uid in buffer and channel_name_length:
-                msg = decode(buffer[uid])
-                await io_queues[channel_name].put(msg)
-                del buffer[uid]
-
-            # acknowledge reception
-            ack_future = cls.acknowledgements.get(uid)
-            if ack_future and flags.recv_ack:
-                duration = time.time() - uid.time
-                ack_future.set_result((uid, duration))
-
-    @classmethod
-    async def _receive_reader(cls, io_queues, reader):
-        # receive incomming data into queues
-        buffer = {}
-        try:
-            while True:
-                await cls._receive_single_message(io_queues, reader, buffer)
-
-        except asyncio.IncompleteReadError:
-            # incomplete is always a cancellation
-            log.warning("While waiting for data, we received EOF!")
-
-        except asyncio.CancelledError:
-            if buffer:
-                log.warning("Receive buffer was not empty when canceled!")
-
-        except:
-            log.error("Error while receiving:\n%s", traceback.format_exc())
-            raise
+        return await self.io_queues.send(self.name, data, ack=ack, compress=compress)
 
 
 # FIXME at the moment the exclusive lock is global for all calls
