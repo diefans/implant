@@ -47,7 +47,7 @@ class MsgpackEncoder(metaclass=abc.ABCMeta):
     def __subclasshook__(cls, C):
         if cls is MsgpackEncoder:
             if any("__msgpack_encode__" in B.__dict__ for B in C.__mro__) \
-            and any("__msgpack_decode__" in B.__dict__ for B in C.__mro__):
+                    and any("__msgpack_decode__" in B.__dict__ for B in C.__mro__):
                 return True
         return NotImplemented
 
@@ -131,7 +131,7 @@ def encode_msgpack(data):
     try:
         return msgpack.packb(data, default=msgpack_default_encoder.encode, use_bin_type=True, encoding="utf-8")
 
-    except:
+    except:     # noqa
         log.error("Error packing:\n%s", traceback.format_exc())
         raise
 
@@ -140,7 +140,7 @@ def decode_msgpack(data):
     try:
         return msgpack.unpackb(data, object_hook=msgpack_default_encoder.decode, encoding="utf-8")
 
-    except:
+    except:     # noqa
         log.error("Error unpacking:\n%s", traceback.format_exc())
         raise
 
@@ -417,7 +417,7 @@ def _encode_header(uid, channel_name=None, data=None, *, flags=None):
     else:
         channel_name_length = 0
 
-    data_length = data and len(data) or 0
+    data_length = len(data) if data else 0
     chunk_flags = ChunkFlags(**flags)
 
     header = struct.pack(HEADER_FMT, uid.bytes, chunk_flags.encode(), channel_name_length, data_length)
@@ -492,7 +492,7 @@ class IoQueues:
             if queue.qsize():
                 log.warning("Send queue was not empty when canceled!")
 
-        except:
+        except:     # noqa
             log.error("Error while sending:\n%s", traceback.format_exc())
             raise
 
@@ -551,7 +551,7 @@ class IoQueues:
             if buffer:
                 log.warning("Receive buffer was not empty when canceled!")
 
-        except:
+        except:     # noqa
             log.error("Error while receiving:\n%s", traceback.format_exc())
             raise
 
@@ -609,39 +609,47 @@ class IoQueues:
         if ack:
             return await ack_future
 
+    def get_channel(self, name):
+        """Create a channel context."""
+        channel = Channel(
+            name,
+            send=functools.partial(self.send, name),
+            queue=self[name]
+        )
+        return channel
+
 
 class Channel:
 
-    """Channel provides means to send and receive messages."""
+    """Channel provides means to send and receive messages bound to a specific channel name."""
 
-    def __init__(self, name=None, *, io_queues=None):
+    def __init__(self, name=None, *, send, queue):
         """Initialize the channel.
 
         :param name: the channel name
-        :param io_queues: the queues to send and receive with
+        :param send: the partial send method of IoQueues
+        :param queue: the incomming queue
 
         """
         self.name = name
-        self.io_queues = io_queues or IoQueues()
-        self.io_outgoing = self.io_queues.outgoing
-        self.io_incomming = self.io_queues[self.name]
+        self.queue = queue
+        self.send = send
 
     def __repr__(self):
-        return '<{0.name} {in_size} / {out_size}>'.format(
+        return '<{0.name} {in_size}>'.format(
             self,
-            in_size=self.io_incomming.qsize(),
-            out_size=self.io_outgoing.qsize(),
+            in_size=self.queue.qsize(),
         )
 
     def __await__(self):
         """Receive the next message in this channel."""
         async def coro():
-            msg = await self.io_incomming.get()
+            msg = await self.queue.get()
 
             try:
                 return msg
             finally:
-                self.io_incomming.task_done()
+                self.queue.task_done()
 
         return coro().__await__()
 
@@ -664,16 +672,6 @@ class Channel:
                 await self.send(StopAsyncIteration())
 
         return context()
-
-    async def send(self, data, ack=False, compress=6):
-        """Send data in a encoded form to the channel.
-
-        :param data: the python object to send
-        :param ack: request acknowledgement of the reception of that message
-        :param compress: compress the data with zlib
-
-        """
-        return await self.io_queues.send(self.name, data, ack=ack, compress=compress)
 
 
 # FIXME at the moment the exclusive lock is global for all calls
@@ -825,7 +823,7 @@ class Command(metaclass=_CommandMeta):
 
     @reify
     def channel(self):
-        return Channel(self.channel_name, io_queues=self.io_queues)
+        return self.io_queues.get_channel(self.channel_name)
 
     def __repr__(self):
         return self.channel_name
@@ -924,7 +922,7 @@ class Execute(Command):
     @classmethod
     async def execute_io_queues(cls, io_queues):
         # listen to the global execute channel
-        channel = Channel(cls.command_name, io_queues=io_queues)
+        channel = io_queues.get_channel(cls.command_name)
 
         try:
             async for message in channel:
@@ -1052,17 +1050,20 @@ class FindModule(Command):
 
         return module_loaded
 
-    def _is_namespace(self, module):
+    @staticmethod
+    def _is_namespace(module):
         # see https://www.python.org/dev/peps/pep-0451/#how-loading-will-work
         spec = module.__spec__
         is_namespace = spec.loader is None and spec.submodule_search_locations is not None
         return is_namespace
 
-    def _is_package(self, module):
+    @staticmethod
+    def _is_package(module):
         is_package = bool(getattr(module, '__path__', None) is not None)
         return is_package
 
-    def _get_source(self, module):
+    @staticmethod
+    def _get_source(module):
         spec = module.__spec__
         if isinstance(spec.loader, importlib.abc.InspectLoader):
             source = spec.loader.get_source(module.__name__)
@@ -1075,7 +1076,8 @@ class FindModule(Command):
 
         return source
 
-    def _get_source_filename(self, module):
+    @staticmethod
+    def _get_source_filename(module):
         spec = module.__spec__
         if isinstance(spec.loader, importlib.abc.ExecutionLoader):
             filename = spec.loader.get_filename(module.__name__)
@@ -1205,6 +1207,7 @@ class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0
     def module_repr(cls, module):
         return "<module '{}' (namespace)>".format(module.__name__)
 
+
 class RemoteNamespaceFinder(importlib.abc.MetaPathFinder):
     def _find_remote_namespace(self, fullname):
         pass
@@ -1270,7 +1273,7 @@ async def log_tcp_10001():
 async def communicate(io_queues):
     async with Incomming(pipe=sys.stdin) as reader:
         async with Outgoing(pipe=sys.stdout, shutdown=True) as writer:
-            await Channel.communicate(io_queues, reader, writer)
+            await io_queues.communicate(reader, writer)
 
 
 class ExecutorConsoleHandler(logging.StreamHandler):

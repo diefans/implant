@@ -69,8 +69,9 @@ class TestChannel:
         with mock.patch.object(core.IoQueues, 'chunk_size', chunk_size):
             with mock.patch.object(core.Uid, '__call__') as mock_uuid:
                 mock_uuid.return_value = uid
-                c = core.Channel('foo')
-                queue = c.io_queues.outgoing
+                queues = core.IoQueues()
+                c = queues.get_channel('foo')
+                queue = queues.outgoing
 
                 await c.send(data)
 
@@ -103,7 +104,7 @@ class TestChannel:
 
                     try:
                         # channel will receive its own messages
-                        c = core.Channel('foo', io_queues=io_queues)
+                        c = io_queues.get_channel('foo')
 
                         await c.send('bar')
                         msg = await c

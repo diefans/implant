@@ -181,7 +181,7 @@ async def feed_stdin_to_remotes(**options):
         io_queues = core.IoQueues()
         await core.Command.local_setup(io_queues)
 
-        remote_com = asyncio.ensure_future(core.Channel.communicate(io_queues, process.stdout, process.stdin))
+        remote_com = asyncio.ensure_future(io_queues.communicate(process.stdout, process.stdin))
         remote_err = asyncio.ensure_future(log_remote_stderr(process))
 
         async with core.Incomming(pipe=sys.stdin) as reader:
