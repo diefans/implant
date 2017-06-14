@@ -350,7 +350,7 @@ class Outgoing:
 
 
 def split_data(data, size=1024):
-    """A generator to yield splitted data."""
+    """Create a generator to split data into chunks."""
     data_view, data_len, start = memoryview(data), len(data), 0
     while start < data_len:
         end = min(start + size, data_len)
@@ -698,7 +698,10 @@ class _CommandMeta(type):
     """Holds references to all active Instances of Commands, to forward to their queue"""
 
     def __new__(mcs, name, bases, dct):
-        """Register command at plugin vice versa."""
+        """Create Command class.
+
+        Add command_name as __module__:__name__
+        """
         module_name = dct['__module__']
         command_name = ':'.join((module_name, name))
         dct['command_name'] = command_name
@@ -763,7 +766,7 @@ class Command(metaclass=_CommandMeta):
         self.__class__.create_reference(self.uid, self)
 
     def __getattr__(self, name):
-        """Forward attribute lookup to params dict, if not found"""
+        """Forward attribute lookup to params dict, if not found."""
         try:
             return super(Command, self).__getattr__(name)
 
@@ -809,11 +812,11 @@ class Command(metaclass=_CommandMeta):
         )
 
     async def remote(self):
-        """An empty remote part."""
+        pass
 
     @reify
     def fqin(self):
-        """The fully qualified instance name."""
+        """Get the fully qualified instance name."""
         return (self.command_name, self.uid)
 
     @reify
@@ -883,7 +886,7 @@ class ExecuteArgs(MsgpackEncoder):
         self.params = params
 
     async def __call__(self, io_queues):
-        command = Execute.create_command(io_queues, *self.fqin, **self.params)
+        command = Command.create_command(io_queues, *self.fqin, **self.params)
         execute = Execute(io_queues, command)
         asyncio.ensure_future(execute.remote())
 
@@ -916,7 +919,7 @@ class Execute(Command):
 
     @reify
     def channel_name(self):
-        """Execution is always run on the class channel."""
+        """Get the channel name for an execution, which is always run on the class channel."""
         return self.__class__.command_name
 
     @classmethod
