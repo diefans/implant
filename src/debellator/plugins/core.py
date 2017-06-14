@@ -85,4 +85,4 @@ class Copy(core.Command):
 
 # provide all control structures
 # sequence, choice, if, loop
-core.logger.info("loaded module: %s", __name__)
+core.log.info("loaded module: %s", __name__)

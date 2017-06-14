@@ -28,7 +28,7 @@ from collections import defaultdict
 
 import msgpack
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 class MsgpackEncoder(metaclass=abc.ABCMeta):
@@ -132,7 +132,7 @@ def encode_msgpack(data):
         return msgpack.packb(data, default=msgpack_default_encoder.encode, use_bin_type=True, encoding="utf-8")
 
     except:
-        logger.error("Error packing:\n%s", traceback.format_exc())
+        log.error("Error packing:\n%s", traceback.format_exc())
         raise
 
 
@@ -141,7 +141,7 @@ def decode_msgpack(data):
         return msgpack.unpackb(data, object_hook=msgpack_default_encoder.decode, encoding="utf-8")
 
     except:
-        logger.error("Error unpacking:\n%s", traceback.format_exc())
+        log.error("Error unpacking:\n%s", traceback.format_exc())
         raise
 
 
@@ -346,7 +346,7 @@ class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
         """Shutdown process."""
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
-        logger.warning("Connection lost! Shutting down...")
+        log.warning("Connection lost! Shutting down...")
         os.kill(os.getpid(), signal.SIGHUP)
 
 
@@ -370,16 +370,6 @@ class Outgoing:
 
     async def __aexit__(self, exc_type, value, tb):
         self.transport.close()
-
-
-async def send_outgoing_queue(queue, pipe=sys.stdout):
-    """Write data from queue to stdout."""
-    async with Outgoing(pipe=pipe, shutdown=True) as writer:
-        while True:
-            data = await queue.get()
-            writer.write(data)
-            await writer.drain()
-            queue.task_done()
 
 
 def split_data(data, size=1024):
@@ -542,7 +532,7 @@ class Channel:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             encoded_data = await loop.run_in_executor(executor, encode, data)
 
-        logger.debug("Channel %s sends: %s bytes", self.name, len(encoded_data))
+        log.debug("Channel %s sends: %s bytes", self.name, len(encoded_data))
 
         for part in split_data(encoded_data, self.chunk_size):
             if compress:
@@ -550,7 +540,7 @@ class Channel:
                 part = zlib.compress(part, compress)
                 comp_len = len(part)
 
-                logger.debug("Compression ratio of %s -> %s: %.2f%%", raw_len, comp_len, comp_len * 100 / raw_len)
+                log.debug("Compression ratio of %s -> %s: %.2f%%", raw_len, comp_len, comp_len * 100 / raw_len)
 
             header = self._encode_header(uid, self.name, part, flags={
                 'eom': False, 'send_ack': False, 'compression': bool(compress)
@@ -562,14 +552,15 @@ class Channel:
             'eom': True, 'send_ack': ack, 'compression': False
         })
 
-        await self.io_outgoing.put((header, name))
-
-        # if acknowledgement is asked for we await this future and return its result
+        # if acknowledgement is asked for, we await this future and return its result
         # see _receive_reader for resolution of future
         if ack:
             ack_future = asyncio.Future()
             self.acknowledgements[uid] = ack_future
 
+        await self.io_outgoing.put((header, name))
+
+        if ack:
             return await ack_future
 
     @classmethod
@@ -616,10 +607,10 @@ class Channel:
 
         except asyncio.CancelledError:
             if queue.qsize():
-                logger.warning("Send queue was not empty when canceled!")
+                log.warning("Send queue was not empty when canceled!")
 
         except:
-            logger.error("Error while sending:\n%s", traceback.format_exc())
+            log.error("Error while sending:\n%s", traceback.format_exc())
             raise
 
     @classmethod
@@ -642,9 +633,9 @@ class Channel:
             buffer[uid].extend(part)
 
         if channel_name_length:
-            logger.debug("Channel %s receives: %s bytes", channel_name, data_length)
+            log.debug("Channel %s receives: %s bytes", channel_name, data_length)
         else:
-            logger.debug("Message %s, received: %s", uid, flags)
+            log.debug("Message %s, received: %s", uid, flags)
 
         if flags.send_ack:
             # we have to acknowledge the reception
@@ -673,14 +664,14 @@ class Channel:
 
         except asyncio.IncompleteReadError:
             # incomplete is always a cancellation
-            logger.warning("While waiting for data, we received EOF!")
+            log.warning("While waiting for data, we received EOF!")
 
         except asyncio.CancelledError:
             if buffer:
-                logger.warning("Receive buffer was not empty when canceled!")
+                log.warning("Receive buffer was not empty when canceled!")
 
         except:
-            logger.error("Error while receiving:\n%s", traceback.format_exc())
+            log.error("Error while receiving:\n%s", traceback.format_exc())
             raise
 
 
@@ -692,7 +683,7 @@ def exclusive(fun):
 
     async def locked_fun(*args, **kwargs):
         async with lock:
-            logger.debug("Executing locked function: %s -> %s", lock, fun)
+            log.debug("Executing locked function: %s -> %s", lock, fun)
             return await fun(*args, **kwargs)
 
     return locked_fun
@@ -746,12 +737,14 @@ class _CommandMeta(type):
 
     @classmethod
     async def local_setup(mcs, *args, **kwargs):
-        for _, _, func in mcs._lookup_command_classmethods('local_setup'):
+        for command, name, func in mcs._lookup_command_classmethods('local_setup'):
+            log.info('Setup %s.%s.%s', command.__module__, command.__name__, name)
             await func(*args, **kwargs)
 
     @classmethod
     async def remote_setup(mcs, *args, **kwargs):
-        for _, _, func in mcs._lookup_command_classmethods('remote_setup'):
+        for command, name, func in mcs._lookup_command_classmethods('remote_setup'):
+            log.info('Setup %s.%s.%s', command.__module__, command.__name__, name)
             await func(*args, **kwargs)
 
     def create_reference(cls, uid, inst):
@@ -771,6 +764,7 @@ class Command(metaclass=_CommandMeta):
         self.__class__.create_reference(self.uid, self)
 
     def __getattr__(self, name):
+        """Forward attribute lookup to params dict, if not found"""
         try:
             return super(Command, self).__getattr__(name)
 
@@ -847,7 +841,7 @@ class ExecuteException(MsgpackEncoder):
 
     async def __call__(self, io_queues):
         future = Execute.pending_commands[self.fqin]
-        logger.error("Remote exception for %s:\n%s", self.fqin, self.tb)
+        log.error("Remote exception for %s:\n%s", self.fqin, self.tb)
         future.set_exception(self.exception)
 
     @classmethod
@@ -907,7 +901,7 @@ class Execute(Command):
 
     """The executor of all commands.
 
-    This class should not be invoked directly!
+    This class should not be called directly!
     """
 
     pending_commands = defaultdict(asyncio.Future)
@@ -933,7 +927,7 @@ class Execute(Command):
 
         try:
             async for message in channel:
-                logger.debug("*** Received execution message: %s", message)
+                log.debug("*** Received execution message: %s", message)
                 await message(io_queues)
 
         except asyncio.CancelledError:
@@ -941,7 +935,7 @@ class Execute(Command):
 
         # teardown here
         for fqin, fut in cls.pending_commands.items():
-            logger.warning("Teardown pending command: %s, %s", fqin, fut)
+            log.warning("Teardown pending command: %s, %s", fqin, fut)
             fut.cancel()
             del cls.pending_commands[fqin]
 
@@ -971,14 +965,14 @@ class Execute(Command):
     async def local(self):
         async with self.remote_future() as future:
             try:
-                logger.debug("Excute command: %s", self.command)
+                log.debug("Excute command: %s", self.command)
                 # execute local side of command
                 result = await self.command.local(remote_future=future)
                 future.result()
                 return result
 
             except:     # noqa
-                logger.error("Error while executing command: %s\n%s", self.command, traceback.format_exc())
+                log.error("Error while executing command: %s\n%s", self.command, traceback.format_exc())
                 raise
 
             finally:
@@ -996,7 +990,7 @@ class Execute(Command):
             return result
 
         except Exception as ex:
-            logger.error("traceback:\n%s", traceback.format_exc())
+            log.error("traceback:\n%s", traceback.format_exc())
             await self.channel.send(ExecuteException(fqin, exception=ex))
 
             raise
@@ -1038,7 +1032,7 @@ class InvokeImport(Command):
                 importlib.import_module(self.fullname)
 
             except ImportError:
-                logger.debug("Error when importing %s:\n%s", self.fullname, traceback.format_exc())
+                log.debug("Error when importing %s:\n%s", self.fullname, traceback.format_exc())
                 raise
 
             finally:
@@ -1096,7 +1090,7 @@ class FindModule(Command):
             is_namespace = self._is_namespace(module)
             is_package = self._is_package(module)
 
-            logger.debug("module found: %s", module)
+            log.debug("module found: %s", module)
             remote_module_data = {
                 'name': self.module_name,
                 'is_namespace': is_namespace,
@@ -1111,7 +1105,7 @@ class FindModule(Command):
 
             return remote_module_data
         else:
-            logger.error('Module not loaded: %s', self.module_name)
+            log.error('Module not loaded: %s', self.module_name)
             return None
 
 
@@ -1133,7 +1127,7 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
 
     def _find_remote_module(self, module_name):
         # ask master for this module
-        logger.debug("Module lookup: %s", module_name)
+        log.debug("Module lookup: %s", module_name)
 
         future = asyncio.run_coroutine_threadsafe(
             FindModule(self.io_queues, module_name=module_name).execute(),
@@ -1144,16 +1138,16 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         return module_data
 
     def find_spec(self, fullname, path, target=None):
-        logger.debug('Path for module %s: %s', fullname, path)
+        log.debug('Path for module %s: %s', fullname, path)
 
         remote_module_data = self._find_remote_module(fullname)
 
         if remote_module_data:
             # FIXME logging blocks
-            # logger.debug("Module found for %s: %s", fullname, remote_module_data)
+            # log.debug("Module found for %s: %s", fullname, remote_module_data)
 
             if remote_module_data['is_namespace']:
-                logger.debug("Namespace package found for %s", fullname)
+                log.debug("Namespace package found for %s", fullname)
                 spec = importlib.machinery.ModuleSpec(
                     name=fullname,
                     loader=None,
@@ -1162,7 +1156,7 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
                 )
 
             else:
-                logger.debug("Module found for %s", fullname)
+                log.debug("Module found for %s", fullname)
                 origin = 'remote://{}'.format(remote_module_data.get('source_filename', fullname))
                 is_package = remote_module_data['is_package']
 
@@ -1182,7 +1176,7 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
             return spec
 
         else:
-            logger.debug("No module found for %s", fullname)
+            log.debug("No module found for %s", fullname)
 
 
 class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0223
@@ -1218,13 +1212,6 @@ class RemoteNamespaceFinder(importlib.abc.MetaPathFinder):
         pass
 
 
-# TODO
-class RemoteNamespaceLoader:
-    @classmethod
-    def module_repr(cls, module):
-        return "<module '{}' (namespace)>".format(module.__name__)
-
-
 async def run(*tasks):
     """Schedule all tasks and wait for running is done or canceled."""
     # create indicator for running messenger
@@ -1239,7 +1226,7 @@ async def run(*tasks):
                 running.cancel()
 
             except asyncio.InvalidStateError:
-                logger.warning("running already done!")
+                log.warning("running already done!")
 
         asyncio.get_event_loop().add_signal_handler(sig, functools.partial(exit_with_signal, sig))
 
@@ -1272,10 +1259,10 @@ async def log_tcp_10001():
         while True:
             msg = await reader.readline()
 
-            logger.info("TCP: %s", msg)
+            log.info("TCP: %s", msg)
 
     except asyncio.CancelledError:
-        logger.info("close tcp logger")
+        log.info("close tcp log")
         writer.close()
 
 
@@ -1323,7 +1310,7 @@ def main(debug=False, log_config=None, **kwargs):
                     'stream': 'ext://sys.stderr'
                 }
             },
-            'loggers': {
+            'logs': {
                 'debellator': {
                     'handlers': ['console'],
                     'level': 'INFO',
@@ -1340,7 +1327,7 @@ def main(debug=False, log_config=None, **kwargs):
     loop = asyncio.get_event_loop()
 
     if debug:
-        logger.setLevel(logging.DEBUG)
+        log.setLevel(logging.DEBUG)
         loop.set_debug(debug)
 
     io_queues = IoQueues()
@@ -1352,8 +1339,8 @@ def main(debug=False, log_config=None, **kwargs):
     remote_module_finder = RemoteModuleFinder(io_queues, loop)
     sys.meta_path.append(remote_module_finder)
 
-    logger.debug("meta path: %s", sys.meta_path)
-    logger.debug("msgpack used: %s", msgpack)
+    log.debug("meta path: %s", sys.meta_path)
+    log.debug("msgpack used: %s", msgpack)
 
     try:
         loop.run_until_complete(
