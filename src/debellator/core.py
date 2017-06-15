@@ -753,65 +753,59 @@ class _CommandMeta(type):
         fqin = (cls.command_name, uid)
         cls.command_instances[fqin] = inst
 
-
-class Command(metaclass=_CommandMeta):
-
-    """Base command class, which has no other use than provide the common ancestor to all Commands."""
-
-    def __init__(self, io_queues, command_uid=None, **params):
-        super(Command, self).__init__()
-        self.uid = command_uid or Uid()
-        self.io_queues = io_queues
-        self.params = params
-        self.__class__.create_reference(self.uid, self)
-
-    def __getattr__(self, name):
-        """Forward attribute lookup to params dict, if not found."""
-        try:
-            return super(Command, self).__getattr__(name)
-
-        except AttributeError:
-            try:
-                return self.params[name]
-
-            except KeyError:
-                raise AttributeError(
-                    "'{}' has neither an attribute nor a parameter '{}'".format(self, name)
-                )
-
-    def __contains__(self, name):
-        return self.params.__contains__(name)
-
-    def __getitem__(self, name):
-        return self.params.__getitem__(name)
-
-    @classmethod
-    def create_command(cls, io_queues, command_name, command_uid=None, **params):
+    def create_command(cls, command_name, command_uid=None, params=None):
         """Create a new Command instance and assign a uid to it."""
         command_class = cls.commands.get(command_name)
 
-        if inspect.isclass(command_class) and issubclass(command_class, Command):
+        if inspect.isclass(command_class) and issubclass(command_class, cls.base):
             # do something and return result
-            command = command_class(io_queues, command_uid=command_uid, **params)
+            command = command_class(command_uid=command_uid, **params)
 
             return command
 
         raise KeyError('The command `{}` does not exist!'.format(command_name))
 
-    async def execute(self):
+
+class BaseCommand(metaclass=_CommandMeta):
+
+    """Base command class, which has no other use than provide the common ancestor to all Commands."""
+
+    # TODO XXX FIXME get rid of implicitelly attributes a.k.a. params
+
+
+class Command(dict, BaseCommand):
+
+    """Base command class, which has no other use than provide the common ancestor to all Commands."""
+
+    # TODO XXX FIXME get rid of implicitelly attributes a.k.a. params
+
+    def __init__(self, command_uid=None, **params):
+        super(Command, self).__init__()
+        self.__dict__ = self
+
+        self.uid = command_uid or Uid()
+        self.update(params)
+
+        self.__class__.create_reference(self.uid, self)
+
+    def get_channel(self, io_queues):
+        channel = io_queues.get_channel(self.channel_name)
+        return channel
+
+    async def execute(self, io_queues):
         """Execute the command by delegating to Execute command."""
-        execute = Execute(self.io_queues, self)
-        result = await execute.local()
+        execute = Execute(self)
+        result = await execute.local(io_queues)
 
         return result
 
-    async def local(self, remote_future):
+    async def local(self, channel, remote_future):
         raise NotImplementedError(
             'You have to implement a `local` method'
             'for your Command to work: {}'.format(self.__class__)
         )
 
-    async def remote(self):
+    async def remote(self, channel):
         pass
 
     @reify
@@ -823,10 +817,6 @@ class Command(metaclass=_CommandMeta):
     def channel_name(self):
         """Channel name is used in header."""
         return '/'.join(map(str, self.fqin))
-
-    @reify
-    def channel(self):
-        return self.io_queues.get_channel(self.channel_name)
 
     def __repr__(self):
         return self.channel_name
@@ -882,13 +872,15 @@ class ExecuteArgs(MsgpackEncoder):
     """Arguments for an execution."""
 
     def __init__(self, fqin, params=None):
+        # TODO XXX FIXME send Command instead of its params
+        # Command would know how to encode itself
         self.fqin = fqin
         self.params = params
 
     async def __call__(self, io_queues):
-        command = Command.create_command(io_queues, *self.fqin, **self.params)
-        execute = Execute(io_queues, command)
-        asyncio.ensure_future(execute.remote())
+        command = Command.create_command(*self.fqin, params=self.params)
+        execute = Execute(command)
+        asyncio.ensure_future(execute.remote(io_queues))
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -899,7 +891,7 @@ class ExecuteArgs(MsgpackEncoder):
         return cls(*encoded)
 
 
-class Execute(Command):
+class Execute(BaseCommand):
 
     """The executor of all commands.
 
@@ -908,8 +900,8 @@ class Execute(Command):
 
     pending_commands = defaultdict(asyncio.Future)
 
-    def __init__(self, io_queues, command):
-        super(Execute, self).__init__(io_queues)
+    def __init__(self, command):
+        super(Execute, self).__init__()
 
         self.command = command
 
@@ -950,11 +942,12 @@ class Execute(Command):
     async def remote_setup(cls, io_queues):
         asyncio.ensure_future(cls.execute_io_queues(io_queues))
 
-    def remote_future(self):        # noqa
+    def remote_future(self, io_queues):        # noqa
         """Create remote command and yield its future."""
+        channel = io_queues.get_channel(self.channel_name)
         class _context:
             async def __aenter__(ctx):      # noqa
-                await self.channel.send(ExecuteArgs(self.command.fqin, self.command.params), ack=True)
+                await channel.send(ExecuteArgs(self.command.fqin, self.command), ack=True)
                 future = self.pending_commands[self.command.channel_name]
 
                 return future
@@ -964,12 +957,12 @@ class Execute(Command):
 
         return _context()
 
-    async def local(self):
-        async with self.remote_future() as future:
+    async def local(self, io_queues):
+        async with self.remote_future(io_queues) as future:
             try:
                 log.debug("Excute command: %s", self.command)
                 # execute local side of command
-                result = await self.command.local(remote_future=future)
+                result = await self.command.local(io_queues, remote_future=future)
                 future.result()
                 return result
 
@@ -979,27 +972,28 @@ class Execute(Command):
 
             finally:
                 # cleanup channel
-                del self.io_queues[self.command.channel_name]
+                del io_queues[self.command.channel_name]
 
-    async def remote(self):
+    async def remote(self, io_queues):
         fqin = self.command.channel_name
+        channel = io_queues.get_channel(self.channel_name)
 
         try:
             # execute remote side of command
-            result = await self.command.remote()
-            await self.channel.send(ExecuteResult(fqin, result=result))
+            result = await self.command.remote(io_queues)
+            await channel.send(ExecuteResult(fqin, result=result))
 
             return result
 
         except Exception as ex:
             log.error("traceback:\n%s", traceback.format_exc())
-            await self.channel.send(ExecuteException(fqin, exception=ex))
+            await channel.send(ExecuteException(fqin, exception=ex))
 
             raise
 
         finally:
             # cleanup channel
-            del self.io_queues[self.command.channel_name]
+            del io_queues[self.command.channel_name]
 
 
 class InvokeImport(Command):
@@ -1015,15 +1009,15 @@ class InvokeImport(Command):
     """
 
     @exclusive
-    async def execute(self):
-        return await super(InvokeImport, self).execute()
+    async def execute(self, io_queues):
+        return await super(InvokeImport, self).execute(io_queues)
 
-    async def local(self, remote_future):
+    async def local(self, io_queues, remote_future):
         importlib.import_module(self.fullname)
         result = await remote_future
         return result
 
-    async def remote(self):
+    async def remote(self, io_queues):
         loop = asyncio.get_event_loop()
 
         def import_stuff():
@@ -1048,7 +1042,7 @@ class FindModule(Command):
 
     """Find a module on the remote side."""
 
-    async def local(self, remote_future):
+    async def local(self, io_queues, remote_future):
         module_loaded = await remote_future
 
         return module_loaded
@@ -1089,7 +1083,7 @@ class FindModule(Command):
 
         return filename
 
-    async def remote(self):
+    async def remote(self, io_queues):
         module = sys.modules.get(self.module_name)
 
         if module:
@@ -1136,7 +1130,7 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         log.debug("Module lookup: %s", module_name)
 
         future = asyncio.run_coroutine_threadsafe(
-            FindModule(self.io_queues, module_name=module_name).execute(),
+            FindModule(module_name=module_name).execute(self.io_queues),
             loop=self.main_loop
         )
         module_data = future.result()

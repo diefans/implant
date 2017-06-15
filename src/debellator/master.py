@@ -144,9 +144,9 @@ async def _execute_command(io_queues, line):
     print("sending:", command_name, params)
 
     try:
-        cmd = core.Command.create_command(io_queues, command_name, **params)
+        cmd = core.Command.create_command(command_name, params=params)
         logger.debug("execute loop: %s", id(asyncio.Task.current_task()._loop))
-        result = await cmd.execute()
+        result = await cmd.execute(io_queues)
 
     except Exception as ex:     # noqa
         logger.error("Error:\n%s", traceback.format_exc())

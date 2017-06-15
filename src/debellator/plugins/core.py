@@ -12,7 +12,7 @@ from zope import interface, component
 
 
 class Echo(core.Command):
-    async def local(self, remote_future):
+    async def local(self, io_queues, remote_future):
         incomming = []
 
         # # custom protocol
@@ -26,7 +26,7 @@ class Echo(core.Command):
         result = await remote_future
         return [result, incomming]
 
-    async def remote(self):
+    async def remote(self, io_queues):
 
         data = []
 
@@ -39,7 +39,7 @@ class Echo(core.Command):
 
         # raise Exception("foo")
         return {
-            'params': self.params,
+            'params': self,
             'data': data
         }
 
@@ -57,7 +57,7 @@ class Copy(core.Command):
     def __del__(self):
         self.executor.shutdown(wait=True)
 
-    async def local(self, remote_future):
+    async def local(self, io_queues, remote_future):
         with open(self.src, "rb") as f:
             async with self.channel.stop_iteration():
                 while True:
@@ -71,7 +71,7 @@ class Copy(core.Command):
 
         return result
 
-    async def remote(self):
+    async def remote(self, io_queues):
         with open(self.dest, "wb") as f:
             async for data in self.channel:
                 await self.loop.run_in_executor(self.executor, f.write, data)
