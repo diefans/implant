@@ -618,6 +618,10 @@ class IoQueues:
         )
         return channel
 
+    async def execute(self, command):
+        """Execute a command in the context of these io queues."""
+        return await command.execute(self)
+
 
 class Channel:
 
@@ -901,13 +905,12 @@ class Execute(BaseCommand):
     pending_commands = defaultdict(asyncio.Future)
 
     def __init__(self, command):
-        super(Execute, self).__init__()
-
+        super().__init__()
         self.command = command
 
-    async def execute(self):
-        # forbid using Execute directly
-        raise RuntimeError("Do not invoke `await Execute()` directly, instead use `await Command(**params)`)")
+    async def execute(self, io_queues):
+        result = await self.local(io_queues)
+        return result
 
     @reify
     def channel_name(self):
