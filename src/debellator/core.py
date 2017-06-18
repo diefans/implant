@@ -706,27 +706,15 @@ class _CommandMeta(type):
 
         Add command_name as __module__:__name__
         """
-        module_name = dct['__module__']
-        command_name = ':'.join((module_name, name))
-        dct['command_name'] = command_name
-
         cls = type.__new__(mcs, name, bases, dct)
 
         if mcs.base is None:
             mcs.base = cls
         else:
             # only register classes except base class
-            mcs.commands[command_name] = cls
+            mcs.commands[cls.command_name] = cls
 
         return cls
-
-    @classmethod
-    def _register_command(mcs, cls):
-        cls.plugin.commands[cls.__name__] = cls
-
-        for plugin_name in set((cls.plugin.module_name, cls.plugin.name)):
-            name = ':'.join((plugin_name, cls.__name__))
-            mcs.commands[name] = cls
 
     def __getitem__(cls, value):
         return cls.command_instances[value]
@@ -768,6 +756,10 @@ class _CommandMeta(type):
             return command
 
         raise KeyError('The command `{}` does not exist!'.format(command_name))
+
+    @property
+    def command_name(cls):
+        return ':'.join((cls.__module__, cls.__qualname__))
 
 
 class BaseCommand(metaclass=_CommandMeta):
@@ -815,7 +807,7 @@ class Command(dict, BaseCommand):
     @reify
     def fqin(self):
         """Get the fully qualified instance name."""
-        return (self.command_name, self.uid)
+        return (self.__class__.command_name, self.uid)
 
     @reify
     def channel_name(self):
