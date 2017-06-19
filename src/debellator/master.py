@@ -40,6 +40,10 @@ class Remote(metaclass=MetaRemote):
     def command_args(self, *, code=None, options=None, python_bin=sys.executable):
         """Generate the command arguments to execute a python process."""
 
+        # we default to our core
+        if code is None:
+            code = core
+
         bootstrap_code = str(bootstrap.Bootstrap(code, options))
 
         if self.hostname is not None:
@@ -173,7 +177,8 @@ async def feed_stdin_to_remotes(**options):
         # hostname='localhost'
     ).launch(
         code=core,
-        python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+        python_bin=pathlib.Path('~/.pyenv/versions/3.6.1/envs/dbltr-remote/bin/python').expanduser(),
+        # python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
         options=options
     )
 
@@ -236,7 +241,7 @@ def main(debug=False, log_config=None):
         'debug': debug,
         'log_config': log_config,
         # 'venv': False,
-        'venv': True,
+        # 'venv': True,
         # 'venv': '~/.debellator',
     }
 
@@ -252,7 +257,7 @@ def main(debug=False, log_config=None):
             )
         )
 
-        core.cancel_pending_tasks(loop)
+        loop.run_until_complete(core.cancel_pending_tasks(loop))
 
     finally:
         loop.close()

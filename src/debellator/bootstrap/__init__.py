@@ -7,7 +7,12 @@ import zlib
 import pkg_resources
 
 from .. import core
-from . import message_pack
+try:
+    # FIXME API seems different
+    import umsgpack_ as message_pack
+except ImportError:
+    core.log.warning("umsgpack not available")
+    from . import message_pack
 
 
 VENV_DEFAULT = '~/.debellator'

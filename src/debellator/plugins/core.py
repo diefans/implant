@@ -13,7 +13,7 @@ from zope import interface, component
 
 class Echo(core.Command):
     async def local(self, io_queues, remote_future):
-        incomming = []
+        data = []
 
         # # custom protocol
         # # first receive
@@ -23,8 +23,14 @@ class Echo(core.Command):
         # # second send
         # await core.JsonChannelIterator(channel_out).send({'i': i} for i in range(10))
 
-        result = await remote_future
-        return [result, incomming]
+        remote_result = await remote_future
+        result = {
+            'local_data': data,
+        }
+
+        result.update(remote_result)
+
+        return result
 
     async def remote(self, io_queues):
 
@@ -39,8 +45,8 @@ class Echo(core.Command):
 
         # raise Exception("foo")
         return {
-            'params': self,
-            'data': data
+            'remote_self': self,
+            'remote_data': data
         }
 
 

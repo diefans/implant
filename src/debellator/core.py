@@ -127,6 +127,9 @@ class MsgpackExceptionEncoder(MsgpackEncoder):
         return data_type(*encoded)
 
 
+# TODO FIXME XXX msgpack is not able to preserve tuple type and
+# is also not able to call default hook for tuple
+# so someone has to know in advance that this is a tuple and use use_list=False for that
 def encode_msgpack(data):
     try:
         return msgpack.packb(data, default=msgpack_default_encoder.encode, use_bin_type=True, encoding="utf-8")
@@ -443,8 +446,8 @@ class IoQueues:
     acknowledgements = weakref.WeakValueDictionary()
     """Global acknowledgment futures distinctive by uid."""
 
-    def __init__(self, send=None):
-        self.outgoing = asyncio.Queue() if send is None else send
+    def __init__(self):
+        self.outgoing = asyncio.Queue()
         self.incomming = defaultdict(asyncio.Queue)
 
     def __getitem__(self, channel_name):
@@ -464,6 +467,8 @@ class IoQueues:
         :param reader: the `StreamReader` instance
         :param writer: the `StreamWriter` instance
 
+        Incomming chunks are collected and stored in the appropriate channel queue.
+        Outgoing messages are taken from the outgoing queue and send via writer.
         """
         fut_send_recv = asyncio.gather(
             self._send_writer(writer),
@@ -527,8 +532,11 @@ class IoQueues:
             # put message into channel queue
             if uid in buffer and channel_name_length:
                 msg = decode(buffer[uid])
-                await self[channel_name].put(msg)
-                del buffer[uid]
+                try:
+                    # try to store message in channel
+                    await self[channel_name].put(msg)
+                finally:
+                    del buffer[uid]
 
             # acknowledge reception
             ack_future = self.acknowledgements.get(uid)
@@ -569,6 +577,8 @@ class IoQueues:
         :param data: the python object to send
         :param ack: request acknowledgement of the reception of that message
         :param compress: compress the data with zlib
+
+        Messages are split into chunks and put into the outgoing queue.
 
         """
         uid = Uid()
@@ -887,6 +897,81 @@ class ExecuteArgs(MsgpackEncoder):
         return cls(*encoded)
 
 
+class Dispatcher(IoQueues):
+    def __init__(self):
+        super().__init__()
+        self.channel = self.get_channel(b'')
+        self.pending_commands = defaultdict(asyncio.Future)
+
+    async def communicate(self, reader, writer):
+        fut_send_receive = super().communicate(reader, writer)
+        fut_io = asyncio.gather(fut_send_receive, self._execute_io_queues())
+
+        await fut_io
+
+    async def _execute_io_queues(self):
+        """Executes messages to be executed on remote side."""
+
+        try:
+            async for message in self.channel:
+                log.debug("*** Received execution message: %s", message)
+                await message(self)
+
+        except asyncio.CancelledError:
+            pass
+
+        # teardown here
+        for fqin, fut in self.pending_commands.items():
+            log.warning("Teardown pending command: %s, %s", fqin, fut)
+            fut.cancel()
+            del self.pending_commands[fqin]
+
+    def create_command_fqin(self, command):
+        uid = Uid()
+
+        fqin = b'/'.join(map(str, (command.__class__.command_name, uid)))
+        return fqin
+
+    async def execute(self, command):
+        fqin = self.create_command_fqin(command)
+
+        channel = self.get_channel(fqin)
+
+        async with self.remote_future(fqin, command) as future:
+            try:
+                log.debug("Excute command: %s", command)
+                # execute local side of command
+                result = await command.local(channel, remote_future=future)
+                future.result()
+                return result
+
+            except:     # noqa
+                log.error("Error while executing command: %s\n%s", self.command, traceback.format_exc())
+                raise
+
+            finally:
+                # cleanup channel
+                del self[fqin]
+
+    def remote_future(self, fqin, command):        # noqa
+        """Create remote command and yield its future."""
+        class _context:
+            async def __aenter__(ctx):      # noqa
+                # send execution request to remote
+                await self.channel.send(ExecuteArgs(fqin, command), ack=True)
+                future = self.pending_commands[fqin]
+
+                return future
+
+            async def __aexit__(ctx, *args):        # noqa
+                del self.pending_commands[fqin]
+
+        return _context()
+
+
+
+
+
 class Execute(BaseCommand):
 
     """The executor of all commands.
@@ -911,6 +996,7 @@ class Execute(BaseCommand):
 
     @classmethod
     async def execute_io_queues(cls, io_queues):
+        """Executes messages to be executed on remote side."""
         # listen to the global execute channel
         channel = io_queues.get_channel(cls.command_name)
 
@@ -1235,14 +1321,17 @@ async def run(*tasks):
         pass
 
 
-def cancel_pending_tasks(loop):
+async def cancel_pending_tasks(loop):
     for task in asyncio.Task.all_tasks():
         if task.done() or task.cancelled():
             continue
 
-        task.cancel()
         try:
-            loop.run_until_complete(task)
+            task.cancel()
+            await task
+
+        # try:
+        #     loop.run_until_complete(task)
 
         except asyncio.CancelledError:
             pass
@@ -1345,7 +1434,7 @@ def main(debug=False, log_config=None, **kwargs):
                 # log_tcp_10001()
             )
         )
-        cancel_pending_tasks(loop)
+        loop.run_until_complete(cancel_pending_tasks(loop))
 
     finally:
         loop.close()
