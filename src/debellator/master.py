@@ -148,14 +148,8 @@ async def _execute_command(io_queues, line, new=False, **kw):
     print("sending:", command_name, params)
 
     try:
-        if not new:
-            cmd = core.Command.create_command(command_name, params=params)
-            logger.debug("execute loop: %s", id(asyncio.Task.current_task()._loop))
-            result = await io_queues.execute(cmd)
-        else:
-            cmd = core.NewCommand.commands[command_name](**params)
-            result = await io_queues.execute_foo(cmd)
-        # result = await cmd.execute(io_queues)
+        cmd = core.Command.commands[command_name](**params)
+        result = await io_queues.execute(cmd)
 
     except Exception as ex:     # noqa
         logger.error("Error:\n%s", traceback.format_exc())
@@ -173,9 +167,9 @@ async def log_remote_stderr(remote):
 async def feed_stdin_to_remotes(**options):
 
     default_lines = {
-        b'\n': (b'debellator.plugins.core:Echo foo=bar bar=123\n', {}),
+        b'e\n': (b'debellator.plugins.core:Echo foo=bar bar=123\n', {}),
         b'i\n': (b'debellator.core:InvokeImport fullname=debellator.plugins.core\n', {}),
-        b'e\n': (b'debellator.core:Echo foo=bar bar=123\n', {'new': True}),
+        b'\n': (b'debellator.core:Echo foo=bar bar=123\n', {'new': True}),
     }
 
     process = await Remote(
@@ -189,10 +183,9 @@ async def feed_stdin_to_remotes(**options):
 
     try:
         # setup launch specific tasks
-        io_queues = core.Dispatcher()
-        await core.Command.local_setup(io_queues)
+        dispatcher = core.Dispatcher()
 
-        remote_com = asyncio.ensure_future(io_queues.communicate(process.stdout, process.stdin))
+        remote_com = asyncio.ensure_future(dispatcher.communicate(process.stdout, process.stdin))
         remote_err = asyncio.ensure_future(log_remote_stderr(process))
 
         async with core.Incomming(pipe=sys.stdin) as reader:
@@ -206,10 +199,10 @@ async def feed_stdin_to_remotes(**options):
                     line, kw = default_lines[line]
 
                 if process.returncode is None:
-                    result = await _execute_command(io_queues, line, **kw)
+                    result = await _execute_command(dispatcher, line, **kw)
                     # result = await asyncio.gather(
-                    #     _execute_command(io_queues, line),
-                    #     _execute_command(io_queues, line),
+                    #     _execute_command(dispatcher, line, **kw),
+                    #     _execute_command(dispatcher, line, **kw),
                     # )
 
                     print("< {}\n > ".format(result), end='')

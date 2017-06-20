@@ -11,45 +11,6 @@ from debellator import core
 from zope import interface, component
 
 
-class Echo(core.Command):
-    async def local(self, io_queues, remote_future):
-        data = []
-
-        # # custom protocol
-        # # first receive
-        # async for i, msg in core.aenumerate(core.JsonChannelIterator(channel_in)):
-        #     incomming.append(msg)
-
-        # # second send
-        # await core.JsonChannelIterator(channel_out).send({'i': i} for i in range(10))
-
-        remote_result = await remote_future
-        result = {
-            'local_data': data,
-        }
-
-        result.update(remote_result)
-
-        return result
-
-    async def remote(self, io_queues):
-
-        data = []
-
-        # # first send
-        # await core.JsonChannelIterator(channel_out).send({'i': str(i ** 2) for i in range(10)})
-
-        # # second receive
-        # async for msg in core.JsonChannelIterator(channel_in):
-        #     data.append(msg)
-
-        # raise Exception("foo")
-        return {
-            'remote_self': self,
-            'remote_data': data
-        }
-
-
 class Copy(core.Command):
     def __init__(self, *args, **kwargs):
         super(Copy, self).__init__(*args, **kwargs)
