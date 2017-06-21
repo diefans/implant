@@ -7,7 +7,7 @@ import shlex
 import sys
 import traceback
 
-from debellator import core, bootstrap
+from debellator import core, bootstrap, connect
 
 logger = logging.getLogger(__name__)
 PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
@@ -25,65 +25,15 @@ class Remote(metaclass=MetaRemote):
 
     """A unique representation of a Remote."""
 
-    def __init__(self, hostname=None, user=None, sudo=None):
-        self.hostname = hostname
-        self.user = user
-        self.sudo = sudo
+    def __init__(self, connector):
+        self.connector = connector
 
     def __hash__(self):
-        return hash((self.hostname, self.user, self.sudo))
+        return hash(self.connector)
 
     def __eq__(self, other):
         assert isinstance(other, Remote)
-        return hash(self) == hash(other)
-
-    def command_args(self, *, code=None, options=None, python_bin=sys.executable):
-        """Generate the command arguments to execute a python process."""
-
-        # we default to our core
-        if code is None:
-            code = core
-
-        bootstrap_code = str(bootstrap.Bootstrap(code, options))
-
-        if self.hostname is not None:
-            bootstrap_code = "'{}'".format(bootstrap_code)
-
-        # from pdb import set_trace; set_trace()       # XXX BREAKPOINT
-
-        def _gen():
-            # ssh
-            if self.hostname is not None:
-                yield 'ssh'
-                yield '-T'
-                # optionally with user
-                if self.user is not None:
-                    yield '-l'
-                    yield self.user
-
-                # remote port forwarding
-                yield '-R'
-                yield '10001:localhost:10000'
-
-                yield self.hostname
-
-            # sudo
-            if self.sudo:
-                yield 'sudo'
-                # optionally with user
-                if self.sudo is not True:
-                    yield '-u'
-                    yield self.sudo
-
-            yield str(python_bin)
-            yield '-c'
-            yield bootstrap_code
-
-            # yield ' 2> /tmp/core.log'
-
-        command_args = list(_gen())
-
-        return command_args
+        return self.connector == other.connector
 
     async def launch(self, *, code=None, options=None, python_bin=sys.executable, **kwargs):
         """Launch a remote process.
@@ -94,7 +44,7 @@ class Remote(metaclass=MetaRemote):
         :param kwargs: further arguments to create the process
 
         """
-        command_args = self.command_args(code=code, options=options, python_bin=python_bin)
+        command_args = self.connector.arguments(code=code, options=options, python_bin=python_bin)
 
         return await self._launch(*command_args, **kwargs)
 
@@ -172,10 +122,10 @@ async def feed_stdin_to_remotes(**options):
         b'\n': (b'debellator.core:Echo foo=bar bar=123\n', {'new': True}),
     }
 
-    process = await Remote(
-        # hostname='localhost'
-    ).launch(
-        code=core,
+    connector = connect.Ssh()
+
+    process = await Remote(connector).launch(
+        # code=core,
         python_bin=pathlib.Path('~/.pyenv/versions/3.6.1/envs/dbltr-remote/bin/python').expanduser(),
         # python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
         options=options

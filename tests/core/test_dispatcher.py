@@ -19,9 +19,11 @@ def event_loop():
 @pytest.mark.asyncio
 async def test_echo(event_loop):
     import asyncio
-    from debellator import core, master
+    from debellator import core, master, connect
 
-    process = await master.Remote().launch()
+    connector = connect.Ssh()
+
+    process = await master.Remote(connector).launch()
 
     # setup launch specific tasks
     dispatcher = core.Dispatcher()

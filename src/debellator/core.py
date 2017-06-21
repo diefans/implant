@@ -777,6 +777,9 @@ class _CommandMeta(type):
 
 
 class Command(dict, metaclass=_CommandMeta):
+
+    """Common ancestor of all Commands."""
+
     def __init__(self, *args, **kwargs):
         self.__dict__ = self
         super().__init__(*args, **kwargs)
