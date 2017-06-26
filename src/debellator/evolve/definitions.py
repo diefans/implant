@@ -22,7 +22,11 @@ class EvolvableMapping:
         self.mapping = mapping
 
     async def evolve(self, scope):
-        lst = [(key, await interfaces.IEvolvable(value).evolve(scope)) for key, value in self.mapping.items()]
+        # py 3.6
+        # lst = [(key, await interfaces.IEvolvable(value).evolve(scope)) for key, value in self.mapping.items()]
+        lst = []
+        for key, value in self.mapping.items():
+           lst.append((key, await interfaces.IEvolvable(value).evolve(scope)))
         odict = collections.OrderedDict(lst)
         return odict
 
@@ -37,7 +41,12 @@ class EvolvableSequence:
         self.sequence = sequence
 
     async def evolve(self, scope):
-        sequence = [await interfaces.IEvolvable(item).evolve(scope) for item in self.sequence]
+        # py 3.6
+        # sequence = [await interfaces.IEvolvable(item).evolve(scope) for item in self.sequence]
+
+        sequence = []
+        for item in self.sequence:
+            sequence.append(await interfaces.IEvolvable(item).evolve(scope))
         return sequence
 
 
@@ -66,7 +75,7 @@ class For(specs.Definition):
     @classmethod
     @component.adapter(dict)
     def adapt_dict(cls, dct):
-        return For(**{f'for_{key}': value for key, value in dct.items()})
+        return For(**{'for_{key}'.format(key=key): value for key, value in dct.items()})
 
     def __init__(self, *, for_in, for_do, for_item='item'):
         self.item_name = for_item

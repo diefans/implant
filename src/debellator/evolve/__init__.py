@@ -69,7 +69,7 @@ class Request:
         self.scope = scope
 
     def __repr__(self):
-        return f'<{self.__class__.__name__} at {self.time} by {self.source}>'
+        return '<{self.__class__.__name__} at {self.time} by {self.source}>'.format(**locals)
 
     async def process(self):
         log.info('Processing request: %s', self)

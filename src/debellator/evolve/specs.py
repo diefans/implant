@@ -79,7 +79,7 @@ class ComponentLoader(yaml.loader.Loader):
                     if isinstance(node, node_type):
                         return constructor(loader, node)
 
-                raise RuntimeError(f'Node is instance of `{type(node)}, which has no constructor!')
+                raise RuntimeError('Node is instance of `{type(node)}, which has no constructor!'.format(**locals()))
 
     @classmethod
     def construct_by_components(cls, loader, node):
@@ -294,7 +294,7 @@ class Spec(collections.OrderedDict):
             definitions = loader.get_single_data() or {}
             try:
                 assert isinstance(definitions, dict), \
-                    f'The top level data type of a spec file must be a mapping! Is {type(definitions)}.'
+                    'The top level data type of a spec file must be a mapping! Is {type(definitions)}.'.format(**locals())
                 return definitions
 
             finally:

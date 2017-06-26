@@ -356,16 +356,18 @@ class ChunkFlags(dict):
         return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
 
 
-HEADER_FMT = '!32sQHI'
+HEADER_FMT = '!BB32sQHI'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
+HEADER_ERROR = 0xff
+HEADER_OK = 0x00
 
 
-def _encode_header(uid, channel_name=None, data=None, *, flags=None):
+def _encode_header(uid, channel_name=None, data=None, *, flags=None, header_type=HEADER_OK, header_type_data=HEADER_OK):
     """Create chunk header.
 
     [header length = 30 bytes]
-    [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
-    {data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
+    [2 byte] [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
+    {type}{data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
 
     """
     assert isinstance(uid, Uid), "uid must be an Uid instance"
@@ -382,7 +384,11 @@ def _encode_header(uid, channel_name=None, data=None, *, flags=None):
     data_length = len(data) if data else 0
     chunk_flags = ChunkFlags(**flags)
 
-    header = struct.pack(HEADER_FMT, uid.bytes, chunk_flags.encode(), channel_name_length, data_length)
+    header = struct.pack(
+        HEADER_FMT,
+        header_type, header_type_data,
+        uid.bytes, chunk_flags.encode(), channel_name_length, data_length
+    )
     check = hashlib.md5(header).digest()
 
     return b''.join((header, check))
@@ -390,10 +396,22 @@ def _encode_header(uid, channel_name=None, data=None, *, flags=None):
 
 def _decode_header(header):
     assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
-    uid_bytes, flags_encoded, channel_name_length, data_length = struct.unpack(HEADER_FMT, header[:-16])
+    (
+        header_type,
+        header_type_data,
+        uid_bytes,
+        flags_encoded,
+        channel_name_length,
+        data_length
+    ) = struct.unpack(HEADER_FMT, header[:-16])
 
     uid = Uid(bytes=uid_bytes)
-    return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
+    return header_type, header_type_data, uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
+
+
+class HeaderTypeError(Exception):
+    def __init__(self, header_type, header_type_data):
+        super().__init__(header_type, header_type_data)
 
 
 class IoQueues:
@@ -436,6 +454,7 @@ class IoQueues:
         Incomming chunks are collected and stored in the appropriate channel queue.
         Outgoing messages are taken from the outgoing queue and send via writer.
         """
+        # XXX TODO FIXME find a way to gracefully shutdown
         fut_send_recv = asyncio.gather(
             self._send_writer(writer),
             self._receive_reader(reader)
@@ -451,6 +470,7 @@ class IoQueues:
         try:
             while True:
                 data = await queue.get()
+                log.debug("Writing data: %s", data)
                 if isinstance(data, tuple):
                     for part in data:
                         writer.write(part)
@@ -471,7 +491,19 @@ class IoQueues:
     async def _receive_single_message(self, reader, buffer):
         # read header
         raw_header = await reader.readexactly(HEADER_SIZE + 16)
-        uid, flags, channel_name_length, data_length = _decode_header(raw_header)
+        (
+            header_type,
+            header_type_data,
+            uid,
+            flags,
+            channel_name_length,
+            data_length
+        ) = _decode_header(raw_header)
+
+        # here we have our only means to recognize bad remote startup
+        # since we are expecting a successfull remote bootstrap the only message we can send is via echo or printf
+        if header_type != HEADER_OK:
+            raise HeaderTypeError(header_type, header_type_data)
 
         if channel_name_length:
             channel_name = (await reader.readexactly(channel_name_length)).decode()
@@ -520,9 +552,10 @@ class IoQueues:
             while True:
                 await self._receive_single_message(reader, buffer)
 
-        except asyncio.IncompleteReadError:
+        except EOFError:
             # incomplete is always a cancellation
-            log.warning("While waiting for data, we received EOF!")
+            log.error("While waiting for data, we received EOF!")
+            raise
 
         except asyncio.CancelledError:
             if buffer:
@@ -664,7 +697,7 @@ DispatchContext = collections.namedtuple('DispatchContext', ('channel', 'execute
 class Dispatcher(IoQueues):
     def __init__(self):
         super().__init__()
-        self.channel = self.get_channel('foo')
+        self.channel = self.get_channel('Dispatcher')
         self.pending_commands = defaultdict(asyncio.Future)
 
     async def communicate(self, reader, writer):
@@ -786,7 +819,7 @@ class Command(dict, metaclass=_CommandMeta):
 
     def __repr__(self):
         _repr = super().__repr__()
-        return f"<{self.__class__.command_name} {_repr}>"
+        return "<{self.__class__.command_name} {_repr}>".format(**locals())
 
 
 class DispatchMessage:
@@ -797,7 +830,7 @@ class DispatchMessage:
         self.fqin = fqin
 
     def __repr__(self):
-        return f"<{self.__class__.__name__} {self.fqin}>"
+        return "<{self.__class__.__name__} {self.fqin}>".format(**locals())
 
 
 class DispatchCommand(DispatchMessage, MsgpackEncoder):
@@ -882,20 +915,28 @@ class Echo(Command):
                 await context.channel.send(x)
 
         # second: send
-        from_remote = ''.join([x async for x in context.channel])
+        # py 3.6
+        # from_remote = ''.join([x async for x in context.channel])
+        from_remote = []
+        async for x in context.channel:
+            from_remote.append(x)
 
         # third: wait for remote to finish
         remote_result = await remote_future
 
         result = {
-            'from_remote': from_remote,
+            'from_remote': ''.join(from_remote),
         }
         result.update(remote_result)
         return result
 
     async def remote(self, context):
         # first: send
-        from_local = ''.join([x async for x in context.channel])
+        # py 3.6
+        # from_local = ''.join([x async for x in context.channel])
+        from_local = []
+        async for x in context.channel:
+            from_local.append(x)
 
         # second: receive
         async with context.channel.stop_iteration():
@@ -904,7 +945,7 @@ class Echo(Command):
 
         # third: return result
         return {
-            'from_local': from_local,
+            'from_local': ''.join(from_local),
             'remote_self': self,
         }
 
@@ -1126,6 +1167,7 @@ async def run(*tasks):
 
         def exit_with_signal(sig):
             try:
+                log.info("Aborting: %s", running)
                 running.cancel()
 
             except asyncio.InvalidStateError:
@@ -1139,6 +1181,7 @@ async def run(*tasks):
         return result
 
     except asyncio.CancelledError:
+        raise
         pass
 
 
@@ -1172,9 +1215,14 @@ async def log_tcp_10001():
         writer.close()
 
 
-async def communicate(dispatcher):
+async def communicate(dispatcher, *, echo=None):
     async with Incomming(pipe=sys.stdin) as reader:
         async with Outgoing(pipe=sys.stdout, shutdown=True) as writer:
+            # send echo to master to prove behavior
+            if echo is not None:
+                writer.write(echo)
+                await writer.drain()
+
             await dispatcher.communicate(reader, writer)
 
 
@@ -1199,7 +1247,14 @@ class ExecutorConsoleHandler(logging.StreamHandler):
         self.executor.shutdown(wait=True)
 
 
-def main(debug=False, log_config=None, **kwargs):
+def _setup_import_hook(loop, dispatcher):
+    remote_module_finder = RemoteModuleFinder(dispatcher, loop)
+    sys.meta_path.append(remote_module_finder)
+
+    log.debug("meta path: %s", sys.meta_path)
+
+
+def _setup_logging(loop, debug=False, log_config=None):
     if log_config is None:
         log_config = {
             'version': 1,
@@ -1219,13 +1274,13 @@ def main(debug=False, log_config=None, **kwargs):
             'logs': {
                 'debellator': {
                     'handlers': ['console'],
-                    'level': 'INFO',
+                    'level': 'DEBUG',
                     'propagate': False
                 }
             },
             'root': {
                 'handlers': ['console'],
-                'level': 'DEBUG'
+                'level': 'WARNING'
             },
         }
 
@@ -1236,19 +1291,20 @@ def main(debug=False, log_config=None, **kwargs):
         log.setLevel(logging.DEBUG)
         loop.set_debug(debug)
 
-    dispatcher = Dispatcher()
 
-    # install import hook
-    remote_module_finder = RemoteModuleFinder(dispatcher, loop)
-    sys.meta_path.append(remote_module_finder)
+def main(debug=False, log_config=None, echo=None, **kwargs):
+    loop = asyncio.get_event_loop()
 
-    log.debug("meta path: %s", sys.meta_path)
+    _setup_logging(loop, debug, log_config)
     log.debug("msgpack used: %s", msgpack)
+
+    dispatcher = Dispatcher()
+    _setup_import_hook(loop, dispatcher)
 
     try:
         loop.run_until_complete(
             run(
-                communicate(dispatcher)
+                communicate(dispatcher, echo=echo)
                 # log_tcp_10001()
             )
         )

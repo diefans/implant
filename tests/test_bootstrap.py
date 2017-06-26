@@ -37,8 +37,8 @@ def test_bootstrap_iter(with_venv, venv_lines, options):
         '    import msgpack\n',
         'except ImportError:\n',
         '    sys.modules["msgpack"] = msgpack = imp.new_module("msgpack")\n',
-        f'    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")),'
-        ' "remote:///home/code/da/dbltr/src/debellator/bootstrap/message_pack.py", "exec")\n',
+        '    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")),'
+        ' "remote:///home/code/da/dbltr/src/debellator/bootstrap/message_pack.py", "exec")\n'.format(**locals()),
         '    exec(c, msgpack.__dict__)\n',
         'sys.modules["debellator"] = debellator = imp.new_module("debellator")\n',
         'setattr(debellator, "__path__", [])\n',
@@ -47,7 +47,7 @@ def test_bootstrap_iter(with_venv, venv_lines, options):
         'c = compile(zlib.decompress(base64.b64decode(b"(\'eNpLLC5OLSpRCCkqTQUAGlIEUw==\',)")),'
         ' "remote-string://", "exec", dont_inherit=True)\n',
         'exec(c, core.__dict__)\n',
-        f'core.main(**core.decode(base64.b64decode(b"{options}")))\n'
+        'core.main(**core.decode(base64.b64decode(b"{options}")))\n'.format(**locals())
     ]
 
     bs = bootstrap.Bootstrap(b'assert True', options={'venv': with_venv})

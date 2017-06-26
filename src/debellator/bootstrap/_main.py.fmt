@@ -1,5 +1,5 @@
+# coding: utf-8
 # this is part of the core bootstrap
-# use only double quotes!
 import sys, imp, base64, zlib
 # just a msgpack fallback if no venv is used or msgpack somehow failed to install
 try:

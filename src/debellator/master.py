@@ -13,69 +13,6 @@ logger = logging.getLogger(__name__)
 PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
 
 
-class ProcessNotLaunchError(Exception):
-    pass
-
-
-class MetaRemote(type):
-    processes = {}
-
-
-class Remote(metaclass=MetaRemote):
-
-    """A unique representation of a Remote."""
-
-    def __init__(self, connector):
-        self.connector = connector
-
-    def __hash__(self):
-        return hash(self.connector)
-
-    def __eq__(self, other):
-        assert isinstance(other, Remote)
-        return self.connector == other.connector
-
-    async def launch(self, *, code=None, options=None, python_bin=sys.executable, **kwargs):
-        """Launch a remote process.
-
-        :param code: the python module to bootstrap
-        :param options: options to send to remote
-        :param python_bin: the path to the python binary to execute
-        :param kwargs: further arguments to create the process
-
-        """
-        command_args = self.connector.arguments(code=code, options=options, python_bin=python_bin)
-
-        return await self._launch(*command_args, **kwargs)
-
-    async def _launch(self, *args, **kwargs):
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **kwargs
-        )
-
-        # cache process
-        self.__class__.processes[self] = process
-
-        return process
-
-    async def relaunch(self):
-        """Wait until terminated and start a new process with the same args."""
-        process = self.__class__.processes.get(self)
-        if not process:
-            raise ProcessNotLaunchedError()
-
-        command_args = process._transport._proc.args
-
-        process.terminate()
-        await process.wait()
-
-        return await self._launch(*command_args, **kwargs)
-
-
 def parse_command(line):
     """Parse a command from line."""
     args = []
@@ -122,19 +59,27 @@ async def feed_stdin_to_remotes(**options):
         b'\n': (b'debellator.core:Echo foo=bar bar=123\n', {'new': True}),
     }
 
-    connector = connect.Ssh()
-
-    process = await Remote(connector).launch(
-        # code=core,
-        python_bin=pathlib.Path('~/.pyenv/versions/3.6.1/envs/dbltr-remote/bin/python').expanduser(),
-        # python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-        options=options
+    # connector = connect.Ssh(
+    #     hostname='localhost'
+    # )
+    connector = connect.Lxd(
+        container='zesty',
+        hostname='localhost'
     )
 
     try:
+        process = await connect.Remote(connector).launch(
+            # code=core,
+            python_bin=pathlib.Path('/usr/bin/python3').expanduser(),
+            # python_bin=pathlib.Path('~/.pyenv/versions/3.6.1/envs/dbltr-remote/bin/python').expanduser(),
+            # python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+            options=options
+        )
+
         # setup launch specific tasks
         dispatcher = core.Dispatcher()
 
+        # XXX FIXME TODO remote_com is a background task, so we have to await
         remote_com = asyncio.ensure_future(dispatcher.communicate(process.stdout, process.stdin))
         remote_err = asyncio.ensure_future(log_remote_stderr(process))
 
@@ -158,9 +103,14 @@ async def feed_stdin_to_remotes(**options):
                     print("< {}\n > ".format(result), end='')
 
     except asyncio.CancelledError:
+        core.log.info("Terminating process: %s", process)
+
         pass
 
     if process.returncode is None:
+        core.log.info("Terminating process: %s", process)
+        # TODO implement gracefull remote shutdown
+        # via Command
         process.terminate()
         await process.wait()
 
@@ -206,6 +156,8 @@ def main(debug=False, log_config=None):
         )
 
         loop.run_until_complete(core.cancel_pending_tasks(loop))
+    except Exception as ex:
+        core.log.error("Error %s:\n%s", type(ex), traceback.format_exc())
 
     finally:
         loop.close()

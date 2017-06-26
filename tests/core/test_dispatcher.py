@@ -23,13 +23,13 @@ async def test_echo(event_loop):
 
     connector = connect.Ssh()
 
-    process = await master.Remote(connector).launch()
-
     # setup launch specific tasks
     dispatcher = core.Dispatcher()
 
-    com_remote = asyncio.ensure_future(dispatcher.communicate(process.stdout, process.stdin))
+    from pdb import set_trace; set_trace()       # XXX BREAKPOINT
     try:
+        process = await connect.Remote(connector).launch()
+        com_remote = asyncio.ensure_future(dispatcher.communicate(process.stdout, process.stdin))
         # remote_err = asyncio.ensure_future(log_remote_stderr(process))
 
         com_import = core.InvokeImport(fullname='debellator.plugins.core')
@@ -40,6 +40,7 @@ async def test_echo(event_loop):
 
         assert result['remote_self']['foo'] == 'bar'
 
+        # raises exception
         process.terminate()
         await process.wait()
     finally:

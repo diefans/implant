@@ -46,7 +46,7 @@ def cli(ctx, use_uvloop, debug, log_config):
 
         if debug:
             log.info("Enable asyncio debug")
-            master.core.logger.setLevel(logging.DEBUG)
+            master.core.log.setLevel(logging.DEBUG)
             asyncio.get_event_loop().set_debug(debug)
 
         master.main(log_config=log_config, debug=debug)
@@ -100,6 +100,6 @@ def evolve_definitions(cfg):
     evolve.config.bootstrap(cfg.root)
     for def_tuple, definition in evolve.config.find_definitions().items():
         def_name = ':'.join(map(str, def_tuple))
-        click.echo(f'{def_name} - {type(definition)}')
+        click.echo('{def_name} - {type(definition)}'.format(locals()))
 
 
