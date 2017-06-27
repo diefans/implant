@@ -1,3 +1,7 @@
+%YAML 1.2
+---
+
+disable_existing_loggers: true
 version: 1
 formatters:
     simple:
@@ -13,10 +17,16 @@ handlers:
         formatter: simple
         stream: ext://sys.stderr
 
+    logfile:
+      class: logging.FileHandler
+      filename: /tmp/debellator.log
+      formatter: simple
+      level: !!python/name:logging.NOTSET
+
 loggers:
     debellator:
         level: DEBUG
-        handlers: [console]
+        handlers: [console, logfile]
         propagate: no
 
     root:

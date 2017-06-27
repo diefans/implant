@@ -26,7 +26,6 @@ async def test_echo(event_loop):
     # setup launch specific tasks
     dispatcher = core.Dispatcher()
 
-    from pdb import set_trace; set_trace()       # XXX BREAKPOINT
     try:
         process = await connect.Remote(connector).launch()
         com_remote = asyncio.ensure_future(dispatcher.communicate(process.stdout, process.stdin))

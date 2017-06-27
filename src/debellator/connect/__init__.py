@@ -55,11 +55,15 @@ class Remote(metaclass=MetaRemote):
         return await self._launch(*command_args, bootstrap_code, echo=echo, **kwargs)
 
     async def _launch(self, *args, echo, **kwargs):
+        def preexec_detach_from_parent():
+            os.setpgrp()
+
         process = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            preexec_fn=preexec_detach_from_parent,
             **kwargs
         )
         core.log.info("Started process: %s", process)

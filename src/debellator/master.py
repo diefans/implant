@@ -4,6 +4,7 @@ import asyncio
 import logging
 import pathlib
 import shlex
+import signal
 import sys
 import traceback
 
@@ -67,15 +68,15 @@ async def feed_stdin_to_remotes(**options):
         hostname='localhost'
     )
 
-    try:
-        process = await connect.Remote(connector).launch(
-            # code=core,
-            python_bin=pathlib.Path('/usr/bin/python3').expanduser(),
-            # python_bin=pathlib.Path('~/.pyenv/versions/3.6.1/envs/dbltr-remote/bin/python').expanduser(),
-            # python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-            options=options
-        )
+    process = await connect.Remote(connector).launch(
+        # code=core,
+        python_bin=pathlib.Path('/usr/bin/python3').expanduser(),
+        # python_bin=pathlib.Path('~/.pyenv/versions/3.6.1/envs/dbltr-remote/bin/python').expanduser(),
+        # python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+        options=options
+    )
 
+    try:
         # setup launch specific tasks
         dispatcher = core.Dispatcher()
 
@@ -103,9 +104,18 @@ async def feed_stdin_to_remotes(**options):
                     print("< {}\n > ".format(result), end='')
 
     except asyncio.CancelledError:
+        remote_com.cancel()
+        await remote_com
+    
+        shutdown_event = core.ShutdownRemoteEvent()
+        event = dispatcher.execute(core.NotifyEvent(shutdown_event))
+        await event
         core.log.info("Terminating process: %s", process)
 
-        pass
+        process.send_signal(signal.SIGKILL)
+
+        remote_err.cancel()
+        await remote_err
 
     if process.returncode is None:
         core.log.info("Terminating process: %s", process)

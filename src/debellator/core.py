@@ -356,13 +356,11 @@ class ChunkFlags(dict):
         return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
 
 
-HEADER_FMT = '!BB32sQHI'
+HEADER_FMT = '!32sQHI'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
-HEADER_ERROR = 0xff
-HEADER_OK = 0x00
 
 
-def _encode_header(uid, channel_name=None, data=None, *, flags=None, header_type=HEADER_OK, header_type_data=HEADER_OK):
+def _encode_header(uid, channel_name=None, data=None, *, flags=None):
     """Create chunk header.
 
     [header length = 30 bytes]
@@ -386,7 +384,6 @@ def _encode_header(uid, channel_name=None, data=None, *, flags=None, header_type
 
     header = struct.pack(
         HEADER_FMT,
-        header_type, header_type_data,
         uid.bytes, chunk_flags.encode(), channel_name_length, data_length
     )
     check = hashlib.md5(header).digest()
@@ -397,8 +394,6 @@ def _encode_header(uid, channel_name=None, data=None, *, flags=None, header_type
 def _decode_header(header):
     assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
     (
-        header_type,
-        header_type_data,
         uid_bytes,
         flags_encoded,
         channel_name_length,
@@ -406,12 +401,7 @@ def _decode_header(header):
     ) = struct.unpack(HEADER_FMT, header[:-16])
 
     uid = Uid(bytes=uid_bytes)
-    return header_type, header_type_data, uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
-
-
-class HeaderTypeError(Exception):
-    def __init__(self, header_type, header_type_data):
-        super().__init__(header_type, header_type_data)
+    return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
 
 
 class IoQueues:
@@ -426,6 +416,11 @@ class IoQueues:
     def __init__(self):
         self.outgoing = asyncio.Queue()
         self.incomming = weakref.WeakValueDictionary()
+
+        self._is_shutting_down = False
+        self._lock_communicate = asyncio.Lock()
+        self._fut_communicate = None
+        self._evt_communicate = asyncio.Event()
 
     def get_channel(self, channel_name):
         """Create a channel and weakly register its queue.
@@ -454,23 +449,34 @@ class IoQueues:
         Incomming chunks are collected and stored in the appropriate channel queue.
         Outgoing messages are taken from the outgoing queue and send via writer.
         """
-        # XXX TODO FIXME find a way to gracefully shutdown
-        fut_send_recv = asyncio.gather(
-            self._send_writer(writer),
-            self._receive_reader(reader)
-        )
+        async with self._lock_communicate:
+            self._is_shutting_down = False
+            self._fut_communicate = asyncio.gather(
+                self._send_writer(writer),
+                self._receive_reader(reader)
+            )
+            self._evt_communicate.set()
+            await self._fut_communicate
 
-        await fut_send_recv
+    async def shutdown(self):
+        if self._lock_communicate.locked():
+            await self._evt_communicate()
+            self._is_shutting_down = True
+            try:
+                await self._fut_communicate
+            finally:
+                # after finishing send and receive, we completelly shut down
+                self._fut_communicate = None
 
     async def _send_writer(self, writer):
         log.info("Start sending via %s...", writer)
         # send outgoing queue to writer
         queue = self.outgoing
 
-        try:
-            while True:
+        while not self._is_shutting_down:
+            try:
                 data = await queue.get()
-                log.debug("Writing data: %s", data)
+                # log.debug("Writing data: %s", data)
                 if isinstance(data, tuple):
                     for part in data:
                         writer.write(part)
@@ -480,30 +486,24 @@ class IoQueues:
                 queue.task_done()
                 await writer.drain()
 
-        except asyncio.CancelledError:
-            if queue.qsize():
-                log.warning("Send queue was not empty when canceled!")
+            except asyncio.CancelledError:
+                log.warning("Writing canceled")
+                if queue.qsize():
+                    log.warning("Send queue was not empty when canceled!")
 
-        except:     # noqa
-            log.error("Error while sending:\n%s", traceback.format_exc())
-            raise
+            except:     # noqa
+                log.error("Error while sending:\n%s", traceback.format_exc())
+                raise
 
     async def _receive_single_message(self, reader, buffer):
         # read header
         raw_header = await reader.readexactly(HEADER_SIZE + 16)
         (
-            header_type,
-            header_type_data,
             uid,
             flags,
             channel_name_length,
             data_length
         ) = _decode_header(raw_header)
-
-        # here we have our only means to recognize bad remote startup
-        # since we are expecting a successfull remote bootstrap the only message we can send is via echo or printf
-        if header_type != HEADER_OK:
-            raise HeaderTypeError(header_type, header_type_data)
 
         if channel_name_length:
             channel_name = (await reader.readexactly(channel_name_length)).decode()
@@ -548,22 +548,24 @@ class IoQueues:
         # receive incomming data into queues
         log.info("Start receiving from %s...", reader)
         buffer = {}
-        try:
-            while True:
+        while not self._is_shutting_down:
+            try:
                 await self._receive_single_message(reader, buffer)
+            except asyncio.CancelledError:
+                if buffer:
+                    log.warning("Receive buffer was not empty when canceled!")
 
-        except EOFError:
-            # incomplete is always a cancellation
-            log.error("While waiting for data, we received EOF!")
-            raise
+                log.warning("Receiving canceled")
+                raise
 
-        except asyncio.CancelledError:
-            if buffer:
-                log.warning("Receive buffer was not empty when canceled!")
+            except EOFError:
+                # incomplete is always a cancellation
+                log.error("While waiting for data, we received EOF!")
+                raise
 
-        except:     # noqa
-            log.error("Error while receiving:\n%s", traceback.format_exc())
-            raise
+            except:     # noqa
+                log.error("Error while receiving:\n%s", traceback.format_exc())
+                raise
 
     async def _send_ack(self, uid):
         # no channel_name, no data
@@ -701,10 +703,15 @@ class Dispatcher(IoQueues):
         self.pending_commands = defaultdict(asyncio.Future)
 
     async def communicate(self, reader, writer):
-        fut_send_receive = super().communicate(reader, writer)
-        fut_io = asyncio.gather(fut_send_receive, self._execute_io_queues())
-
-        await fut_io
+        async with self._lock_communicate:
+            self._is_shutting_down = False
+            self._fut_communicate = asyncio.gather(
+                self._send_writer(writer),
+                self._receive_reader(reader),
+                self._execute_io_queues()
+            )
+            self._evt_communicate.set()
+            await self._fut_communicate
 
     @contextlib.contextmanager
     def context(self, fqin):
@@ -853,7 +860,8 @@ class DispatchCommand(DispatchMessage, MsgpackEncoder):
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
         fqin, command_name, params = encoded
-        command = Command[command_name](**params)
+        command = Command[command_name]()
+        command.update(params)
         return cls(fqin, command)
 
 
@@ -901,6 +909,64 @@ class DispatchResult(DispatchMessage, MsgpackEncoder):
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
         return cls(*encoded)
+
+
+# events are taken from https://github.com/zopefoundation/zope.event
+# function names are modified and adopted to asyncio
+event_subscribers = []
+event_registry = {}
+
+
+async def notify_event(event):
+    """ Notify all subscribers of ``event``.
+    """
+    for subscriber in event_subscribers:
+        await subscriber(event)
+
+
+def event_handler(event_class, handler_=None, decorator=False):
+    """Define an event handler for a (new-style) class.
+    This can be called with a class and a handler, or with just a
+    class and the result used as a handler decorator.
+    """
+    if handler_ is None:
+        return lambda func: event_handler(event_class, func, True)
+
+    if not event_registry:
+        event_subscribers.append(event_dispatch)
+
+    if event_class not in event_registry:
+        event_registry[event_class] = [handler_]
+    else:
+        event_registry[event_class].append(handler_)
+
+    if decorator:
+        return event_handler
+
+
+async def event_dispatch(event):
+    for event_class in event.__class__.__mro__:
+        for handler in event_registry.get(event_class, ()):
+            await handler(event)
+
+
+class NotifyEvent(Command):
+    def __init__(self, event=None, local=False):
+        super().__init__()
+        self.dispatch_local = local
+        self.event = event
+
+    async def local(self, context, remote_future):
+        # we wait for remote events to be dispatched first
+        await remote_future
+
+        if self.dispatch_local:
+            # local event submission
+            await notify_event(self.event)
+
+    async def remote(self, context):
+        # local event submission
+        await notify_event(self.event)
 
 
 class Echo(Command):
@@ -1167,7 +1233,7 @@ async def run(*tasks):
 
         def exit_with_signal(sig):
             try:
-                log.info("Aborting: %s", running)
+                log.info("\n\n\nAborting: %s", running)
                 running.cancel()
 
             except asyncio.InvalidStateError:
@@ -1216,6 +1282,11 @@ async def log_tcp_10001():
 
 
 async def communicate(dispatcher, *, echo=None):
+
+    @event_handler(ShutdownRemoteEvent)
+    async def _shutdown_dispatcher(event):
+        await dispatcher.shutdown()
+
     async with Incomming(pipe=sys.stdin) as reader:
         async with Outgoing(pipe=sys.stdout, shutdown=True) as writer:
             # send echo to master to prove behavior
@@ -1223,7 +1294,8 @@ async def communicate(dispatcher, *, echo=None):
                 writer.write(echo)
                 await writer.drain()
 
-            await dispatcher.communicate(reader, writer)
+            com = asyncio.ensure_future(dispatcher.communicate(reader, writer))
+            await com
 
 
 class ExecutorConsoleHandler(logging.StreamHandler):
@@ -1290,6 +1362,22 @@ def _setup_logging(loop, debug=False, log_config=None):
     if debug:
         log.setLevel(logging.DEBUG)
         loop.set_debug(debug)
+
+
+class ShutdownRemoteEvent(MsgpackEncoder):
+
+    """Encode and decode Exception arguments.
+
+    Traceback and other internals will be lost.
+    """
+
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return None
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded, data_type):
+        return data_type()
 
 
 def main(debug=False, log_config=None, echo=None, **kwargs):
