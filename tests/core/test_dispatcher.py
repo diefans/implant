@@ -44,4 +44,3 @@ async def test_echo(event_loop):
         await process.wait()
     finally:
         com_remote.cancel()
-        await com_remote

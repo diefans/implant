@@ -146,4 +146,3 @@ class TestChannel:
                     finally:
                         # shutdown channel communications
                         com_future.cancel()
-                        await com_future
