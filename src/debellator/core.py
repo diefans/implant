@@ -1311,8 +1311,22 @@ class ExecutorConsoleHandler(logging.StreamHandler):
 
     def emit(self, record):
         # FIXME is not really working on sys.stdout
+        # logging in thread breaks weakref in IoQueues
+
+        def _emit():
+            thread_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(thread_loop)
+
+            try:
+                super(ExecutorConsoleHandler, self).emit(record)
+            finally:
+                thread_loop.close()
+
+        # with concurrent.futures.ThreadPoolExecutor() as executor:
+        #     await loop.run_in_executor(executor, import_stuff)
+
         asyncio.get_event_loop().run_in_executor(
-            self.executor, functools.partial(super(ExecutorConsoleHandler, self).emit, record)
+            self.executor, _emit
         )
 
     def __del__(self):

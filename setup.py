@@ -114,7 +114,7 @@ setup(
         'click',
         'pyyaml',
         'msgpack-python',
-        'zope.component'
+        'zope.component',
     ],
 
     tests_require=['tox'],

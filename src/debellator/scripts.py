@@ -42,14 +42,16 @@ def cli(ctx, use_uvloop, debug, log_config):
         # we need to import master lazy because master imports core,
         # which may use exclusive decorator, which tries to get the actual loop,
         # which is only set after running set_event_loop_policy
-        from debellator import master
+        from debellator import master, console
 
         if debug:
             log.info("Enable asyncio debug")
             master.core.log.setLevel(logging.DEBUG)
             asyncio.get_event_loop().set_debug(debug)
 
-        master.main(log_config=log_config, debug=debug)
+        # master.main(log_config=log_config, debug=debug)
+        console.main(log_config=log_config, debug=debug)
+
 
     else:
         if debug:
@@ -72,8 +74,7 @@ class EvolveCfg:
 @click.option('--settings', '-s',
               default=None,
               type=click.File(),
-              envvar='SETTINGS'
-)
+              envvar='SETTINGS')
 @click.pass_context
 def evolve(ctx, root, settings):
     ctx.obj = EvolveCfg(root, settings)

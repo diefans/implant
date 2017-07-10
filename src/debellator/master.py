@@ -106,7 +106,7 @@ async def feed_stdin_to_remotes(**options):
     except asyncio.CancelledError:
         remote_com.cancel()
         await remote_com
-    
+
         shutdown_event = core.ShutdownRemoteEvent()
         event = dispatcher.execute(core.NotifyEvent(shutdown_event))
         await event
@@ -142,7 +142,39 @@ async def print_debug(loop):
         await asyncio.sleep(0.5, loop=loop)
 
 
+async def get_console_stream(queue):
+    import tty, termios
+
+    history = bytearray()
+
+    def stdin_reader(*args, **kwargs):
+        pass
+        # from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+
+    loop = asyncio.get_event_loop()
+
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        async with core.Outgoing(pipe=sys.stdout) as writer:
+            async with core.Incomming(pipe=sys.stdin) as reader:
+                # loop.add_reader(sys.stdin.fileno(), stdin_reader)
+
+
+                while True:
+                    char = await reader.read(1)
+                    history.extend(char)
+
+                    writer.write("{}".format(char).encode())
+                    await writer.drain()
+
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+
+
 def main(debug=False, log_config=None):
+
     loop = asyncio.get_event_loop()
 
     options = {
@@ -157,6 +189,8 @@ def main(debug=False, log_config=None):
         logger.setLevel(logging.DEBUG)
 
     try:
+        loop.run_until_complete(get_console_stream(asyncio.Queue()))
+
         loop.run_until_complete(
             core.run(
                 # print_debug(loop),
