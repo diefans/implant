@@ -34,24 +34,27 @@ re_ansi = re.compile(r'''
     (?:
         (?: (?P<c0>[\x00-\x1f])?
             (?:
-                (?P<c1>(?:[x80-\x9f])|(?<=\x1b)[\x40-\x5f]?)
                 (?:
-                    # see chapter 5.4 Control sequences
-                    (?P<cseq>(?<=[\x5b\x9b])
-                        (?P<cseq_params>[\x30-\x3f]+)?
-                        (?P<cseq_inter>(?<=[\x30-\x3f])[\x20-\x2f]+)?
-                        (?P<cseq_final>[\x40-\x7e])?
-                    )
-                    |
-                    # see chapter 5.6 Control strings
-                    (?P<cstr>(?<=[\x5d\x9d]|[\x5f\x9f]|[\x50\x90]|[\x58\x98]|[\x5e\x9e])
-                        (?P<cstr_chars>[\x08-\x0d\x20-\x7e]+)?
-                        (?P<cstr_final>[\x07\x5c\x9c])?
-                    )
-                )? # optional makes c1 an empty string if only \x1b matches
+                    (?P<c1>(?:[x80-\x9f])|(?<=\x1b)[\x40-\x5f]?)
+                    (?:
+                        # see chapter 5.4 Control sequences
+                        (?P<cseq>(?<=[\x5b\x9b])
+                            (?P<cseq_params>[\x30-\x3f]+)?
+                            (?P<cseq_inter>(?<=[\x30-\x3f])[\x20-\x2f]+)?
+                            (?P<cseq_final>[\x40-\x7e])?
+                        )
+                        |
+                        # see chapter 5.6 Control strings
+                        (?P<cstr>(?<=[\x5d\x9d]|[\x5f\x9f]|[\x50\x90]|[\x58\x98]|[\x5e\x9e])
+                            (?P<cstr_chars>[\x08-\x0d\x20-\x7e]+)?
+                            (?P<cstr_final>[\x07\x5c\x9c])?
+                        )
+                    )? # optional makes c1 an empty string if only \x1b matches
+                )
+                |
+                # see chapter 5.5 Independent control functions
+                (?P<indep>(?<=\x1b)[\x60-\x7e])
             )?
-            # see chapter 5.5 Independent control functions
-            (?P<indep>(?<=\x1b)[\x60-\x7e])?
         )
     )?
     (?P<tail>.*)
@@ -64,21 +67,45 @@ class AnsiMatch(dict):
         if self.match:
             super().__init__(self.match.groupdict())
 
-    @property
+    @core.reify
+    def has_tail(self):
+        return self['tail'] is not ''
+
+    @core.reify
+    def is_c0(self):
+        return self.match is not None and self['c0'] is not None
+
+    @core.reify
+    def is_c1(self):
+        return self.match is not None and self['c1'] is not None
+
+    @core.reify
     def is_control_sequence(self):
-        return self.match and self['cseq']
+        return self.is_c1 or self['cseq_final'] or self['cseq'] is not None and not self.has_tail
 
-    @property
+    @core.reify
     def is_control_string(self):
-        return self.match and self['cstr']
+        return self.is_c1 and self['cstr'] is not None
 
-    @property
+    @core.reify
+    def is_independent(self):
+        return self.match is not None and self['indep'] is not None
+
+    @core.reify
+    def is_control_function(self):
+        return bool(
+            sum(
+                (self.is_c0,
+                 self.is_c1,
+                 self.is_independent,
+                 self.is_control_sequence,
+                 self.is_control_string)
+            )
+        )
+
+    @core.reify
     def is_complete(self):
         return self.match and (self['cseq_final'] or self['cstr_final'])
-
-    @property
-    def is_bad(self):
-        return bool(self['tail']) and not self.is_complete
 
 
 class Key(namedtuple('KeyPress', ['key', 'shift', 'ctrl', 'alt'])):
@@ -145,23 +172,25 @@ class Console:
             encoded_char = char.encode()
             self.history.extend(encoded_char)
             self.buffer.extend(encoded_char)
-            log.debug('buffer: %s', self.buffer)
-
 
             # # check for ansi escape sequence
             seq = self.buffer.decode()
-            m = re_ansi.match(seq)
-            if m:
-                g = m.groupdict()
-                complete = not g['tail'] and (g['cs_final'] or g['osc_final'])
-                if not complete:
+            m = AnsiMatch(seq)
+            if m.is_c0:
+                if m.has_tail:
+                    log.warning('Cleanup broken control function: %s', self.buffer)
+                    self.buffer.clear()
                     continue
+
+                if (m.is_control_sequence or m.is_control_string) and not m.is_complete:
+                    continue
+
                 # log.debug("sequence match: %s", seq)
                 key = ansi_map.get(seq, Key(seq))
                 asyncio.ensure_future(self.queue.put(key))
                 self.buffer.clear()
             else:
-                log.debug("sequence does not match")
+                # no control function
                 key = ansi_map.get(seq, Key(seq))
                 asyncio.ensure_future(self.queue.put(key))
                 self.buffer.clear()
@@ -169,7 +198,6 @@ class Console:
 
     async def __await__(self):
         """Wait for the next console event."""
-
 
         char = await self.queue.get()
         # self.history.extend(char)
@@ -188,7 +216,8 @@ async def echo_console():
     async with core.Outgoing(pipe=sys.stdout) as writer:
         async with Console() as console:
             async for event in console:
-                writer.write("  {}".format(event).encode())
+                if event == Key('left'):
+                    writer.write(b'\x1b[C')
                 await writer.drain()
 
 
