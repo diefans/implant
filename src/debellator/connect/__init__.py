@@ -1,10 +1,14 @@
 import abc
 import asyncio
+import logging
 import os
 import shlex
 import sys
 
 from debellator import core, bootstrap
+
+
+log = logging.getLogger(__name__)
 
 
 class ProcessNotLaunchedError(Exception):
@@ -19,12 +23,15 @@ class MetaRemote(type):
     processes = {}
 
 
-class Remote(metaclass=MetaRemote):
+class Remote(core.Dispatcher, metaclass=MetaRemote):
 
     """A unique representation of a Remote."""
 
     def __init__(self, connector):
+        super().__init__()
         self.connector = connector
+        self.process = None
+        self._launch_lock = asyncio.Lock()
 
     def __hash__(self):
         return hash(self.connector)
@@ -43,19 +50,44 @@ class Remote(metaclass=MetaRemote):
 
         """
 
-        if options is None:
-            options = {}
+        async with self._launch_lock:
+            if options is None:
+                options = {}
 
-        options['echo'] = echo = b''.join((b'Debellator', os.urandom(64)))
+            options['echo'] = echo = b''.join((b'Debellator', os.urandom(64)))
 
-        *command_args, bootstrap_code = self.connector.arguments(code=code, options=options, python_bin=python_bin)
+            *command_args, bootstrap_code = self.connector.arguments(
+                code=code, options=options, python_bin=python_bin
+            )
+            log.debug("Connector arguments: %s", ' '.join(command_args))
 
-        core.log.debug("Connector arguments: %s", ' '.join(command_args))
+            process = await self._launch(*command_args, bootstrap_code, **kwargs)
 
-        return await self._launch(*command_args, bootstrap_code, echo=echo, **kwargs)
+            log.info("Started process: %s", process)
 
-    async def _launch(self, *args, echo, **kwargs):
+            # TODO protocol needs improvement
+            # some kind of a handshake, which is independent of sending echo via process options
+            try:
+                # wait for remote behavior to echo
+                remote_echo = await process.stdout.readexactly(len(echo))
+                assert echo == remote_echo, "Remote process misbehaves!"
+
+            except AssertionError:
+                raise RemoteMisbehavesError("Remote does not echo `{}`!".format(echo))
+
+            except EOFError:
+                raise RemoteMisbehavesError("Remote closed stdout!")
+
+            self.process = process
+            try:
+                await self.communicate(reader=process.stdout, writer=process.stdin)
+            finally:
+                process.terminate()
+                await process.wait()
+
+    async def _launch(self, *args, **kwargs):
         def preexec_detach_from_parent():
+            # prevents zombie processes via ssh
             os.setpgrp()
 
         process = await asyncio.create_subprocess_exec(
@@ -66,38 +98,42 @@ class Remote(metaclass=MetaRemote):
             preexec_fn=preexec_detach_from_parent,
             **kwargs
         )
-        core.log.info("Started process: %s", process)
-
-        try:
-            remote_echo = await process.stdout.readexactly(len(echo))
-            assert echo == remote_echo, "Remote process misbehaves!"
-
-        except AssertionError:
-            raise RemoteMisbehavesError("Remote does not echo `{}`!".format(echo))
-
-        except EOFError:
-            raise RemoteMisbehavesError("Remote closed stdout!")
-
-        # cache process
-        self.__class__.processes[self] = process
 
         return process
 
+    def cancel(self):
+        self._fut_communicate.cancel()
+
+    async def __await__(self):
+        if self._fut_communicate is not None:
+            await self._fut_communicate
+
     async def relaunch(self):
         """Wait until terminated and start a new process with the same args."""
-        process = self.__class__.processes.get(self)
+        # process = self.__class__.processes.get(self)
+        process = self.process
         if not process:
             raise ProcessNotLaunchedError()
 
         command_args = process._transport._proc.args
+        command_kwargs = process._transport._proc.kwargs
 
         process.terminate()
         await process.wait()
 
-        return await self._launch(*command_args, **kwargs)
+        self.process = await self._launch(*command_args, **command_kwargs)
+        return self.process
 
 
 class Connector(metaclass=abc.ABCMeta):
+
+    __slots__ = ()
+
+    def __hash__(self):
+        return hash(frozenset(map(lambda k: (k, getattr(self, k)), self.__slots__)))
+
+    def __eq__(self, other):
+        return hash(self) == hash(other)
 
     @staticmethod
     def bootstrap_code(code=None, options=None):

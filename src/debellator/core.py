@@ -23,10 +23,8 @@ import sys
 import threading
 import time
 import traceback
-import types
 import weakref
 import zlib
-from collections import defaultdict
 
 import msgpack
 
@@ -417,10 +415,8 @@ class IoQueues:
         self.outgoing = asyncio.Queue()
         self.incomming = weakref.WeakValueDictionary()
 
-        self._is_shutting_down = False
         self._lock_communicate = asyncio.Lock()
         self._fut_communicate = None
-        self._evt_communicate = asyncio.Event()
 
     def get_channel(self, channel_name):
         """Create a channel and weakly register its queue.
@@ -450,31 +446,23 @@ class IoQueues:
         Outgoing messages are taken from the outgoing queue and send via writer.
         """
         async with self._lock_communicate:
-            self._is_shutting_down = False
             self._fut_communicate = asyncio.gather(
                 self._send_writer(writer),
-                self._receive_reader(reader)
+                self._receive_reader(reader),
             )
-            self._evt_communicate.set()
             await self._fut_communicate
 
     async def shutdown(self):
-        if self._lock_communicate.locked():
-            await self._evt_communicate()
-            self._is_shutting_down = True
-            try:
-                await self._fut_communicate
-            finally:
-                # after finishing send and receive, we completelly shut down
-                self._fut_communicate = None
+        self._fut_communicate.cancel()
+        await self._fut_communicate
 
     async def _send_writer(self, writer):
         log.info("Start sending via %s...", writer)
         # send outgoing queue to writer
         queue = self.outgoing
 
-        while not self._is_shutting_down:
-            try:
+        try:
+            while True:
                 data = await queue.get()
                 # log.debug("Writing data: %s", data)
                 if isinstance(data, tuple):
@@ -486,14 +474,15 @@ class IoQueues:
                 queue.task_done()
                 await writer.drain()
 
-            except asyncio.CancelledError:
-                log.warning("Writing canceled")
-                if queue.qsize():
-                    log.warning("Send queue was not empty when canceled!")
+        except asyncio.CancelledError:
+            if queue.qsize():
+                log.warning("Send queue was not empty when canceled!")
 
-            except:     # noqa
-                log.error("Error while sending:\n%s", traceback.format_exc())
-                raise
+        except:     # noqa
+            log.error("Error while sending:\n%s", traceback.format_exc())
+            raise
+
+        log.warning("Writing canceled")
 
     async def _receive_single_message(self, reader, buffer):
         # read header
@@ -548,24 +537,27 @@ class IoQueues:
         # receive incomming data into queues
         log.info("Start receiving from %s...", reader)
         buffer = {}
-        while not self._is_shutting_down:
-            try:
-                await self._receive_single_message(reader, buffer)
-            except asyncio.CancelledError:
-                if buffer:
-                    log.warning("Receive buffer was not empty when canceled!")
+        try:
+            while True:
+                try:
+                    await self._receive_single_message(reader, buffer)
+                except asyncio.CancelledError:
+                    break
 
-                log.warning("Receiving canceled")
-                raise
+        except asyncio.CancelledError:
+            if buffer:
+                log.warning("Receive buffer was not empty when canceled!")
 
-            except EOFError:
-                # incomplete is always a cancellation
-                log.error("While waiting for data, we received EOF!")
-                raise
+            log.warning("Receiving canceled")
 
-            except:     # noqa
-                log.error("Error while receiving:\n%s", traceback.format_exc())
-                raise
+        except EOFError:
+            # incomplete is always a cancellation
+            log.error("While waiting for data, we received EOF!")
+            raise
+
+        except:     # noqa
+            log.error("Error while receiving:\n%s", traceback.format_exc())
+            raise
 
     async def _send_ack(self, uid):
         # no channel_name, no data
@@ -700,17 +692,15 @@ class Dispatcher(IoQueues):
     def __init__(self):
         super().__init__()
         self.channel = self.get_channel('Dispatcher')
-        self.pending_commands = defaultdict(asyncio.Future)
+        self.pending_commands = collections.defaultdict(asyncio.Future)
 
-    async def communicate(self, reader, writer):
+    async def communicate(self, *, reader, writer):
         async with self._lock_communicate:
-            self._is_shutting_down = False
             self._fut_communicate = asyncio.gather(
                 self._send_writer(writer),
                 self._receive_reader(reader),
                 self._execute_io_queues()
             )
-            self._evt_communicate.set()
             await self._fut_communicate
 
     @contextlib.contextmanager
@@ -1222,35 +1212,6 @@ class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0
         return "<module '{}' (namespace)>".format(module.__name__)
 
 
-async def run(*tasks):
-    """Schedule all tasks and wait for running is done or canceled."""
-    # create indicator for running messenger
-    running = asyncio.ensure_future(asyncio.gather(*tasks))
-
-    # exit on sigterm or sigint
-    for signame in ('SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'):
-        sig = getattr(signal, signame)
-
-        def exit_with_signal(sig):
-            try:
-                log.info("\n\n\nAborting: %s", running)
-                running.cancel()
-
-            except asyncio.InvalidStateError:
-                log.warning("running already done!")
-
-        asyncio.get_event_loop().add_signal_handler(sig, functools.partial(exit_with_signal, sig))
-
-    # wait for running completed
-    try:
-        result = await running
-        return result
-
-    except asyncio.CancelledError:
-        raise
-        pass
-
-
 async def cancel_pending_tasks(loop):
     for task in asyncio.Task.all_tasks():
         if task.done() or task.cancelled():
@@ -1281,21 +1242,23 @@ async def log_tcp_10001():
         writer.close()
 
 
-async def communicate(dispatcher, *, echo=None):
+async def communicate(dispatcher, *, stdin=sys.stdin, stdout=sys.stdout, echo=None):
 
     @event_handler(ShutdownRemoteEvent)
     async def _shutdown_dispatcher(event):
+        log.info("Shutdown...")
         await dispatcher.shutdown()
 
-    async with Incomming(pipe=sys.stdin) as reader:
-        async with Outgoing(pipe=sys.stdout, shutdown=True) as writer:
+    async with Incomming(pipe=stdin) as reader:
+        async with Outgoing(pipe=stdout, shutdown=True) as writer:
             # send echo to master to prove behavior
             if echo is not None:
                 writer.write(echo)
                 await writer.drain()
 
-            com = asyncio.ensure_future(dispatcher.communicate(reader, writer))
-            await com
+            await dispatcher.communicate(reader=reader, writer=writer)
+
+    log.info('Communication end.')
 
 
 class ExecutorConsoleHandler(logging.StreamHandler):
@@ -1405,12 +1368,12 @@ def main(debug=False, log_config=None, echo=None, **kwargs):
 
     try:
         loop.run_until_complete(
-            run(
+            # run(
                 communicate(dispatcher, echo=echo)
                 # log_tcp_10001()
-            )
+            # )
         )
-        loop.run_until_complete(cancel_pending_tasks(loop))
+        # loop.run_until_complete(cancel_pending_tasks(loop))
 
     finally:
         loop.close()

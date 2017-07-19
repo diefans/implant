@@ -49,8 +49,8 @@ def cli(ctx, use_uvloop, debug, log_config):
             master.core.log.setLevel(logging.DEBUG)
             asyncio.get_event_loop().set_debug(debug)
 
-        # master.main(log_config=log_config, debug=debug)
-        console.main(log_config=log_config, debug=debug)
+        master.main(log_config=log_config, debug=debug)
+        # console.main(log_config=log_config, debug=debug)
 
 
     else:
