@@ -1,5 +1,6 @@
 import asyncio
 from collections import namedtuple
+import itertools
 import logging
 import os
 import re
@@ -35,7 +36,7 @@ re_ansi = re.compile(r'''
         (?: (?P<c0>[\x00-\x1f])?
             (?:
                 (?:
-                    (?P<c1>(?:[x80-\x9f])|(?<=\x1b)[\x40-\x5f]?)
+                    (?P<c1>(?:[\x80-\x9f])|(?<=\x1b)[\x40-\x5f]?)
                     (?:
                         # see chapter 5.4 Control sequences
                         (?P<cseq>(?<=[\x5b\x9b])
@@ -62,14 +63,15 @@ re_ansi = re.compile(r'''
 
 
 class AnsiMatch(dict):
-    def __init__(self, seq):
-        self.match = re_ansi.match(seq)
+    def __init__(self, sequence):
+        self.sequence = sequence
+        self.match = re_ansi.match(sequence)
         if self.match:
             super().__init__(self.match.groupdict())
 
     @core.reify
     def has_tail(self):
-        return self['tail'] is not ''
+        return self['tail'] != ''
 
     @core.reify
     def is_c0(self):
@@ -78,6 +80,10 @@ class AnsiMatch(dict):
     @core.reify
     def is_c1(self):
         return self.match is not None and self['c1'] is not None
+
+    @core.reify
+    def is_ansi(self):
+        return self.is_c0 or self.is_c1 or self.is_independent
 
     @core.reify
     def is_control_sequence(self):
@@ -106,6 +112,12 @@ class AnsiMatch(dict):
     @core.reify
     def is_complete(self):
         return self.match and (self['cseq_final'] or self['cstr_final'])
+
+
+class KeySequence(str):
+    @core.reify
+    def ansi(self):
+        return AnsiMatch(self)
 
 
 class Key(namedtuple('KeyPress', ['key', 'shift', 'ctrl', 'alt'])):
@@ -140,9 +152,8 @@ class Console:
         self._tty_settings = None
         self._is_blocking = None
 
-        self.history = bytearray()
-        self.buffer = bytearray()
         self.queue = asyncio.Queue()
+        self.buffer = []
 
     async def __aenter__(self):
         loop = asyncio.get_event_loop()
@@ -169,32 +180,23 @@ class Console:
             char = self.stream.read(1)
             if char == '':
                 break
-            encoded_char = char.encode()
-            self.history.extend(encoded_char)
-            self.buffer.extend(encoded_char)
+            self.buffer.append(char)
 
-            # # check for ansi escape sequence
-            seq = self.buffer.decode()
-            m = AnsiMatch(seq)
+            # check for ansi escape sequence
+            sequence = KeySequence(''.join(self.buffer))
+            m = sequence.ansi
             if m.is_c0:
                 if m.has_tail:
-                    log.warning('Cleanup broken control function: %s', self.buffer)
+                    # log.warning('Broken control function: %s', sequence.encode())
                     self.buffer.clear()
                     continue
 
                 if (m.is_control_sequence or m.is_control_string) and not m.is_complete:
+                    # log.warning('Incomplete control function: %s', sequence.encode())
                     continue
 
-                # log.debug("sequence match: %s", seq)
-                key = ansi_map.get(seq, Key(seq))
-                asyncio.ensure_future(self.queue.put(key))
-                self.buffer.clear()
-            else:
-                # no control function
-                key = ansi_map.get(seq, Key(seq))
-                asyncio.ensure_future(self.queue.put(key))
-                self.buffer.clear()
-        # log.debug('history: %s', self.history)
+            asyncio.ensure_future(self.queue.put(sequence))
+            self.buffer.clear()
 
     async def __await__(self):
         """Wait for the next console event."""
@@ -212,13 +214,87 @@ class Console:
         return await self
 
 
+class KeyMap(dict):
+    def add(self, sequence, *more_sequences):
+        def decorator(fun):
+            for seq in itertools.chain((sequence,), more_sequences):
+                if seq in self:
+                    log.warning('Sequence %s already mapped: %s', seq, self[seq])
+                self[seq] = fun
+            return fun
+
+        return decorator
+
+    def default(self, fun):
+        if None in self:
+            log.warning('Default already mapped: %s', self[None])
+
+        self[None] = fun
+
+        return fun
+
+
+class Readline:
+
+    """Read a meaningful command from stdin."""
+
+    def __init__(self, console, writer):
+        self.console = console
+        self.writer = writer
+        self.buffer = []
+
+    key_map = KeyMap()
+
+    @key_map.default
+    async def default(self, sequence):
+        if sequence.ansi.is_ansi:
+            return
+        self.writer.write(sequence.encode())
+        await self.writer.drain()
+
+    @key_map.add('\x7f')
+    async def backspace(self, sequence):
+        # send delete left
+        pass
+
+    @key_map.add('\n')
+    async def enter(self, sequence):
+        self.writer.write(b'\r\n')
+        await self.writer.drain()
+
+    @key_map.add('\x1b[3~')
+    async def delete(self, sequence):
+        self.writer.write(b'\b')
+        await self.writer.drain()
+
+    @key_map.add('\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D')
+    async def left(self, sequence):
+        self.writer.write(sequence.encode())
+        await self.writer.drain()
+
+    async def __await__(self):
+        while True:
+            sequence = await self.console
+            event_handler = self.key_map.get(sequence, self.key_map.get(None, None))
+
+            if event_handler is not None:
+                line = await event_handler(self, sequence)
+
+                if line:
+                    return line
+
+    async def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self
+
+
 async def echo_console():
     async with core.Outgoing(pipe=sys.stdout) as writer:
         async with Console() as console:
-            async for event in console:
-                if event == Key('left'):
-                    writer.write(b'\x1b[C')
-                await writer.drain()
+            async for cmd in Readline(console, writer):
+                log.debug('Input: %s', cmd)
 
 
 def main(debug=False, log_config=None):

@@ -102,17 +102,16 @@ def console():
         'cstr': None, 'cstr_final': None, 'cstr_chars': None,
         'indep': None,
     }),
+    # no ansi
+    ('a', {
+        'c0': None,
+        'c1': None,
+        'tail': 'a',
+        'cseq': None, 'cseq_final': None, 'cseq_params': None, 'cseq_inter': None,
+        'cstr': None, 'cstr_final': None, 'cstr_chars': None,
+        'indep': None,
+    }),
 ])
 def test_re_ansi(seq, groups, console):
     m = console.AnsiMatch(seq)
     assert m == groups
-
-
-@pytest.mark.parametrize('seq, bad', [
-    ('\x1bOH', True),
-    ('\x1b[D', False),
-])
-def test_ansi_match(seq, bad, console):
-    m = console.AnsiMatch(seq)
-
-    assert m.is_bad is bad
