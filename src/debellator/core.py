@@ -251,7 +251,7 @@ class Incomming(asyncio.StreamReader):
     async def readexactly(self, n):
         """Read exactly n bytes from the stream.
 
-        This is a short and faster implementation the original one
+        This is a short and faster implementation then the original one
         (see of https://github.com/python/asyncio/issues/394).
 
         """
@@ -284,6 +284,7 @@ class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
         log.warning("Connection lost! Shutting down...")
+        log.info("Pending tasks: %s", [task for task in asyncio.Task.all_tasks()])
         os.kill(os.getpid(), signal.SIGHUP)
 
 
@@ -452,10 +453,6 @@ class IoQueues:
             )
             await self._fut_communicate
 
-    async def shutdown(self):
-        self._fut_communicate.cancel()
-        await self._fut_communicate
-
     async def _send_writer(self, writer):
         log.info("Start sending via %s...", writer)
         # send outgoing queue to writer
@@ -539,10 +536,7 @@ class IoQueues:
         buffer = {}
         try:
             while True:
-                try:
-                    await self._receive_single_message(reader, buffer)
-                except asyncio.CancelledError:
-                    break
+                await self._receive_single_message(reader, buffer)
 
         except asyncio.CancelledError:
             if buffer:
@@ -553,7 +547,8 @@ class IoQueues:
         except EOFError:
             # incomplete is always a cancellation
             log.error("While waiting for data, we received EOF!")
-            raise
+            for task in asyncio.Task.all_tasks():
+                log.debug("task: %s", task)
 
         except:     # noqa
             log.error("Error while receiving:\n%s", traceback.format_exc())
@@ -565,7 +560,25 @@ class IoQueues:
             'eom': True, 'recv_ack': True
         })
 
-        await self.outgoing.put(header)
+        await self._send_raw(header)
+
+    async def _send_raw(self, *data):
+        await self.outgoing.put(data)
+
+    async def _send_raw_(self, *data):
+        try:
+            # log.debug("Writing data: %s", data)
+            for part in data:
+                writer.write(part)
+
+            await writer.drain()
+
+        except asyncio.CancelledError:
+            log.warning("Cancellation while sending data!")
+
+        except:     # noqa
+            log.error("Error while sending:\n%s", traceback.format_exc())
+            raise
 
     async def send(self, channel_name, data, ack=False, compress=6):
         """Send data in a encoded form to the channel.
@@ -598,7 +611,7 @@ class IoQueues:
                 'eom': False, 'send_ack': False, 'compression': bool(compress)
             })
 
-            await self.outgoing.put((header, encoded_channel_name, part))
+            await self._send_raw(header, encoded_channel_name, part)
 
         header = _encode_header(uid, channel_name, None, flags={
             'eom': True, 'send_ack': ack, 'compression': False
@@ -610,7 +623,7 @@ class IoQueues:
             ack_future = asyncio.Future()
             self.acknowledgements[uid] = ack_future
 
-        await self.outgoing.put((header, encoded_channel_name))
+        await self._send_raw(header, encoded_channel_name)
 
         if ack:
             return await ack_future
@@ -689,28 +702,59 @@ DispatchContext = collections.namedtuple('DispatchContext', ('channel', 'execute
 
 
 class Dispatcher(IoQueues):
+
+    """Enables execution of `Command`s.
+
+    A `Command` is split into local and remote part, where a context with
+    a dedicated `Channel` is provided to enable streaming of arbitrary data.
+    The local part also gets a remote future passed, which resolves to the
+    result of the remote part of the `Command`.
+
+    """
+
     def __init__(self):
         super().__init__()
         self.channel = self.get_channel('Dispatcher')
         self.pending_commands = collections.defaultdict(asyncio.Future)
+        self.pending_remote_tasks = weakref.WeakSet()
 
     async def communicate(self, *, reader, writer):
-        async with self._lock_communicate:
-            self._fut_communicate = asyncio.gather(
-                self._send_writer(writer),
-                self._receive_reader(reader),
-                self._execute_io_queues()
-            )
-            await self._fut_communicate
+        """Starts sending and receiving messages and executing them.
+
+        :param reader: the `StreamReader` instance
+        :param writer: the `StreamWriter` instance
+
+        """
+        try:
+            async with self._lock_communicate:
+                self._fut_communicate = asyncio.gather(
+                    self._send_writer(writer),
+                    self._receive_reader(reader),
+                    self._execute_io_queues()
+                )
+                await self._fut_communicate
+
+        except asyncio.CancelledError:
+            pass
+
+        for task in self.pending_remote_tasks:
+            log.info("Cancelling pending remote task: %s", task)
+            task.cancel()
+            await task
 
     @contextlib.contextmanager
     def context(self, fqin):
+        """Create a context to pass to a `Command`s local and remote part.
+
+        The `Channel` is built via a fully qualified instance name (fqin).
+
+        """
         channel = self.get_channel(fqin)
         context = DispatchContext(channel=channel, execute=self.execute)
         yield context
 
     async def _execute_io_queues(self):
-        """Executes messages to be executed on remote side."""
+        """Executes messages sent via our `Dispatcher.channel`."""
         log.info("Listening on channel %s for command dispatch...", self.channel)
 
         try:
@@ -719,6 +763,7 @@ class Dispatcher(IoQueues):
                 await message(self)
 
         except asyncio.CancelledError:
+            log.info("Command execution stopped.")
             pass
 
         # teardown here
@@ -729,6 +774,10 @@ class Dispatcher(IoQueues):
             del self.pending_commands[fqin]
 
     async def execute(self, command):
+        """Execute a command by first creating the remote side ad its future
+        and second by executing its local part.
+
+        """
         fqin = command.__class__.create_fqin()
 
         with self.context(fqin) as context:
@@ -745,7 +794,10 @@ class Dispatcher(IoQueues):
                     raise
 
     def remote_future(self, fqin, command):        # noqa
-        """Create remote command and yield its future."""
+        """Create a context for remote command future by sending
+        `DispatchCommand` and returning its pending future.
+
+        """
         class _context:
             async def __aenter__(ctx):      # noqa
                 # send execution request to remote
@@ -760,6 +812,17 @@ class Dispatcher(IoQueues):
         return _context()
 
     async def execute_remote(self, fqin, command):
+        """Execute the remote part of a `Command`.
+
+        This method is called by a `DispatchCommand` message.
+
+        The result is send via `Dispatcher.channel` to resolve the pending command future.
+
+        """
+
+        current_task = asyncio.Task.current_task()
+        self.pending_remote_tasks.add(current_task)
+
         with self.context(fqin) as context:
             try:
                 # execute remote side of command
@@ -767,6 +830,9 @@ class Dispatcher(IoQueues):
                 await self.channel.send(DispatchResult(fqin, result=result))
 
                 return result
+
+            except asyncio.CancelledError:
+                log.info("Remote execution canceled")
 
             except Exception as ex:
                 tb = traceback.format_exc()
@@ -1244,19 +1310,31 @@ async def log_tcp_10001():
 
 async def communicate(dispatcher, *, stdin=sys.stdin, stdout=sys.stdout, echo=None):
 
-    @event_handler(ShutdownRemoteEvent)
-    async def _shutdown_dispatcher(event):
-        log.info("Shutdown...")
-        await dispatcher.shutdown()
+    current_task = asyncio.Task.current_task()
 
-    async with Incomming(pipe=stdin) as reader:
-        async with Outgoing(pipe=stdout, shutdown=True) as writer:
-            # send echo to master to prove behavior
-            if echo is not None:
-                writer.write(echo)
-                await writer.drain()
+    try:
+        async with Incomming(pipe=stdin) as reader:
+            async with Outgoing(pipe=stdout, shutdown=True) as writer:
+                # send echo to master to prove behavior
+                if echo is not None:
+                    writer.write(echo)
+                    await writer.drain()
 
-            await dispatcher.communicate(reader=reader, writer=writer)
+                communicate = asyncio.ensure_future(dispatcher.communicate(reader=reader, writer=writer))
+
+                @event_handler(ShutdownRemoteEvent)
+                async def _shutdown_dispatcher(event):
+                    log.info("Shutdown: %s", communicate)
+                    dispatcher._fut_communicate.cancel()
+                    await dispatcher._fut_communicate
+                    # communicate.cancel()
+                    # await communicate
+                    log.info("...end")
+
+                await communicate
+
+    except asyncio.CancelledError:
+        pass
 
     log.info('Communication end.')
 
@@ -1374,6 +1452,9 @@ def main(debug=False, log_config=None, echo=None, **kwargs):
             # )
         )
         # loop.run_until_complete(cancel_pending_tasks(loop))
+        log.info("Finally.")
+    except asyncio.CancelledError as ex:
+        log.info("Canceled: %s", ex)
 
     finally:
         loop.close()
