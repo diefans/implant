@@ -13,19 +13,20 @@ handlers:
         # FIXME Executor disturbes uvloop
         #class: debellator.core.ExecutorConsoleHandler
         class: logging.StreamHandler
-        level: DEBUG
+        level: !!python/name:logging.NOTSET
+        #level: DEBUG
         formatter: simple
         stream: ext://sys.stderr
 
     logfile:
-      class: logging.FileHandler
-      filename: /tmp/debellator.log
-      formatter: simple
-      level: !!python/name:logging.NOTSET
+        class: logging.FileHandler
+        filename: /tmp/debellator.log
+        formatter: simple
+        level: !!python/name:logging.NOTSET
 
 loggers:
     debellator:
-        level: DEBUG
+        level: ERROR
         handlers: [console, logfile]
         propagate: no
 

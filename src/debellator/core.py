@@ -217,6 +217,9 @@ class Uid:
     def __str__(self):
         return '-'.join(map(str, (self.time, self.id, self.tid, self.seq)))
 
+    def __repr__(self):
+        return str(self)
+
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
         return data.bytes
@@ -283,18 +286,20 @@ class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
         """Shutdown process."""
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
-        log.warning("Connection lost! Shutting down...")
-        log.info("Pending tasks: %s", [task for task in asyncio.Task.all_tasks()])
-        os.kill(os.getpid(), signal.SIGHUP)
+        if exc is not None:
+            log.warning("Connection lost by %s", exc)
+        # log.info("Pending tasks: %s", [task for task in asyncio.Task.all_tasks()])
+        # os.kill(os.getpid(), signal.SIGHUP)
 
 
 class Outgoing:
 
     """A context for an outgoing pipe."""
 
-    def __init__(self, *, pipe=sys.stdout, shutdown=False):
+    def __init__(self, *, pipe=sys.stdout, reader=None, shutdown=False):
         self.pipe = os.fdopen(pipe) if isinstance(pipe, int) else pipe
         self.transport = None
+        self.reader = reader
         self.shutdown = shutdown
 
     async def __aenter__(self):
@@ -303,11 +308,17 @@ class Outgoing:
             self.pipe
         )
 
-        writer = asyncio.streams.StreamWriter(self.transport, protocol, None, asyncio.get_event_loop())
+        writer = asyncio.streams.StreamWriter(
+            self.transport,
+            protocol,
+            self.reader,
+            asyncio.get_event_loop()
+        )
         return writer
 
     async def __aexit__(self, exc_type, value, tb):
-        self.transport.close()
+        pass
+        # self.transport.close()
 
 
 def split_data(data, size=1024):
@@ -409,15 +420,18 @@ class IoQueues:
 
     chunk_size = 0x8000
 
-    acknowledgements = weakref.WeakValueDictionary()
+    acknowledgements = {}   #weakref.WeakValueDictionary()
     """Global acknowledgment futures distinctive by uid."""
 
     def __init__(self):
         self.outgoing = asyncio.Queue()
         self.incomming = weakref.WeakValueDictionary()
 
-        self._lock_communicate = asyncio.Lock()
         self._fut_communicate = None
+        self._fut_send_writer = None
+        self._fut_receive_reader = None
+        self._lock_communicate = asyncio.Lock()
+        self._evt_shutdown = asyncio.Event()
 
     def get_channel(self, channel_name):
         """Create a channel and weakly register its queue.
@@ -437,6 +451,9 @@ class IoQueues:
         finally:
             self.incomming[channel_name] = queue
 
+    def shutdown(self):
+        self._evt_shutdown.set()
+
     async def communicate(self, reader, writer):
         """Schedule send and receive tasks.
 
@@ -447,11 +464,22 @@ class IoQueues:
         Outgoing messages are taken from the outgoing queue and send via writer.
         """
         async with self._lock_communicate:
-            self._fut_communicate = asyncio.gather(
-                self._send_writer(writer),
-                self._receive_reader(reader),
-            )
-            await self._fut_communicate
+            self._evt_shutdown.clear()
+
+            self._fut_send_writer = asyncio.ensure_future(self._send_writer(writer))
+            self._fut_receive_reader = asyncio.ensure_future(self._receive_reader(reader))
+
+            await self._evt_shutdown.wait()
+
+            # stop receiving new messages
+            self._fut_receive_reader.cancel()
+            await self._fut_receive_reader
+
+            # wait for pending tasks to finalize
+
+            # stop writer
+            self._fut_send_writer.cancel()
+            await self._fut_send_writer
 
     async def _send_writer(self, writer):
         log.info("Start sending via %s...", writer)
@@ -459,8 +487,15 @@ class IoQueues:
         queue = self.outgoing
 
         try:
-            while True:
-                data = await queue.get()
+            while not self._evt_shutdown.is_set() or queue.qsize():
+                try:
+                    data = await queue.get()
+                except asyncio.CancelledError:
+                    if self._evt_shutdown.is_set() and queue.qsize():
+                        log.info("Continue for clean shutdown")
+                        continue
+                    else:
+                        raise
                 # log.debug("Writing data: %s", data)
                 if isinstance(data, tuple):
                     for part in data:
@@ -469,6 +504,7 @@ class IoQueues:
                     writer.write(data)
 
                 queue.task_done()
+
                 await writer.drain()
 
         except asyncio.CancelledError:
@@ -484,12 +520,15 @@ class IoQueues:
     async def _receive_single_message(self, reader, buffer):
         # read header
         raw_header = await reader.readexactly(HEADER_SIZE + 16)
+
         (
             uid,
             flags,
             channel_name_length,
             data_length
         ) = _decode_header(raw_header)
+
+        log.debug("%s: flags %s", uid, flags)
 
         if channel_name_length:
             channel_name = (await reader.readexactly(channel_name_length)).decode()
@@ -505,9 +544,9 @@ class IoQueues:
             buffer[uid].extend(part)
 
         if channel_name_length:
-            log.debug("Channel `%s` receives: %s bytes", channel_name, data_length)
+            log.debug("%s: channel `%s` receives: %s bytes", uid, channel_name, data_length)
         else:
-            log.debug("Message %s, received: %s", uid, flags)
+            log.debug("%s: no channel received: %s", uid, flags)
 
         if flags.send_ack:
             # we have to acknowledge the reception
@@ -526,9 +565,12 @@ class IoQueues:
             # acknowledge reception
             ack_future = self.acknowledgements.get(uid)
             if ack_future and flags.recv_ack:
-                log.debug("Acknowledge %s", uid)
-                duration = time.time() - uid.time
-                ack_future.set_result((uid, duration))
+                try:
+                    log.debug("%s: acknowledge", uid)
+                    duration = time.time() - uid.time
+                    ack_future.set_result((uid, duration))
+                finally:
+                    del self.acknowledgements[uid]
 
     async def _receive_reader(self, reader):
         # receive incomming data into queues
@@ -545,10 +587,11 @@ class IoQueues:
             log.warning("Receiving canceled")
 
         except EOFError:
+            # peer has stopped sending messages
+            # this is not bad per se
             # incomplete is always a cancellation
-            log.error("While waiting for data, we received EOF!")
-            for task in asyncio.Task.all_tasks():
-                log.debug("task: %s", task)
+            # TODO check for clean EOF
+            log.info("While waiting for data, we received EOF.")
 
         except:     # noqa
             log.error("Error while receiving:\n%s", traceback.format_exc())
@@ -560,25 +603,11 @@ class IoQueues:
             'eom': True, 'recv_ack': True
         })
 
+        log.debug("%s: send acknowledgement", uid)
         await self._send_raw(header)
 
     async def _send_raw(self, *data):
         await self.outgoing.put(data)
-
-    async def _send_raw_(self, *data):
-        try:
-            # log.debug("Writing data: %s", data)
-            for part in data:
-                writer.write(part)
-
-            await writer.drain()
-
-        except asyncio.CancelledError:
-            log.warning("Cancellation while sending data!")
-
-        except:     # noqa
-            log.error("Error while sending:\n%s", traceback.format_exc())
-            raise
 
     async def send(self, channel_name, data, ack=False, compress=6):
         """Send data in a encoded form to the channel.
@@ -597,7 +626,7 @@ class IoQueues:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             encoded_data = await loop.run_in_executor(executor, encode, data)
 
-        log.debug("Channel `%s` sends: %s bytes", channel_name, len(encoded_data))
+        log.debug("%s: channel `%s` sends: %s bytes", uid, channel_name, len(encoded_data))
 
         for part in split_data(encoded_data, self.chunk_size):
             if compress:
@@ -605,7 +634,7 @@ class IoQueues:
                 part = zlib.compress(part, compress)
                 comp_len = len(part)
 
-                log.debug("Compression ratio of %s -> %s: %.2f%%", raw_len, comp_len, comp_len * 100 / raw_len)
+                log.debug("%s: compression ratio of %s -> %s: %.2f%%", uid, raw_len, comp_len, comp_len * 100 / raw_len)
 
             header = _encode_header(uid, channel_name, part, flags={
                 'eom': False, 'send_ack': False, 'compression': bool(compress)
@@ -626,7 +655,11 @@ class IoQueues:
         await self._send_raw(header, encoded_channel_name)
 
         if ack:
-            return await ack_future
+            log.debug("%s: wait for acknowledgement...", uid)
+            acknowledgement = await ack_future
+            log.debug("%s: acknowldeged: %s", uid, acknowledgement)
+
+            return acknowledgement
 
 
 class Channel:
@@ -699,6 +732,7 @@ def exclusive(fun):
 
 
 DispatchContext = collections.namedtuple('DispatchContext', ('channel', 'execute'))
+DISPATCHER_CHANNEL_NAME = 'Dispatcher'
 
 
 class Dispatcher(IoQueues):
@@ -714,9 +748,11 @@ class Dispatcher(IoQueues):
 
     def __init__(self):
         super().__init__()
-        self.channel = self.get_channel('Dispatcher')
+        self.channel = self.get_channel(DISPATCHER_CHANNEL_NAME)
         self.pending_commands = collections.defaultdict(asyncio.Future)
-        self.pending_remote_tasks = weakref.WeakSet()
+        self.pending_remote_tasks = set()#weakref.WeakSet()
+
+        self._fut_execute_io_queues = None
 
     async def communicate(self, *, reader, writer):
         """Starts sending and receiving messages and executing them.
@@ -725,22 +761,31 @@ class Dispatcher(IoQueues):
         :param writer: the `StreamWriter` instance
 
         """
-        try:
-            async with self._lock_communicate:
-                self._fut_communicate = asyncio.gather(
-                    self._send_writer(writer),
-                    self._receive_reader(reader),
-                    self._execute_io_queues()
-                )
-                await self._fut_communicate
+        async with self._lock_communicate:
+            self._evt_shutdown.clear()
 
-        except asyncio.CancelledError:
-            pass
+            self._fut_send_writer = asyncio.ensure_future(self._send_writer(writer))
+            self._fut_receive_reader = asyncio.ensure_future(self._receive_reader(reader))
+            self._fut_execute_io_queues = asyncio.ensure_future(self._execute_io_queues())
 
-        for task in self.pending_remote_tasks:
-            log.info("Cancelling pending remote task: %s", task)
-            task.cancel()
-            await task
+            await self._evt_shutdown.wait()
+
+            # stop receiving new messages
+            self._fut_receive_reader.cancel()
+            await self._fut_receive_reader
+
+            self._fut_execute_io_queues.cancel()
+            await self._fut_execute_io_queues
+
+            # wait for pending tasks to finalize
+            for task in self.pending_remote_tasks:
+                log.info("Cancelling pending remote task: %s", task)
+                task.cancel()
+                await task
+
+            # stop writer
+            self._fut_send_writer.cancel()
+            await self._fut_send_writer
 
     @contextlib.contextmanager
     def context(self, fqin):
@@ -754,7 +799,7 @@ class Dispatcher(IoQueues):
         yield context
 
     async def _execute_io_queues(self):
-        """Executes messages sent via our `Dispatcher.channel`."""
+        """Execute messages sent via our `Dispatcher.channel`."""
         log.info("Listening on channel %s for command dispatch...", self.channel)
 
         try:
@@ -766,12 +811,13 @@ class Dispatcher(IoQueues):
             log.info("Command execution stopped.")
             pass
 
-        # teardown here
-        for fqin, fut in self.pending_commands.items():
-            log.warning("Teardown pending command: %s, %s", fqin, fut)
-            fut.cancel()
-            await fut
-            del self.pending_commands[fqin]
+        finally:
+            # teardown here
+            for fqin, fut in self.pending_commands.items():
+                log.warning("Teardown pending command: %s, %s", fqin, fut)
+                fut.cancel()
+                await fut
+                del self.pending_commands[fqin]
 
     async def execute(self, command):
         """Execute a command by first creating the remote side ad its future
@@ -822,24 +868,27 @@ class Dispatcher(IoQueues):
 
         current_task = asyncio.Task.current_task()
         self.pending_remote_tasks.add(current_task)
+        try:
+            with self.context(fqin) as context:
+                try:
+                    # execute remote side of command
+                    result = await command.remote(context)
+                    await self.channel.send(DispatchResult(fqin, result=result))
 
-        with self.context(fqin) as context:
-            try:
-                # execute remote side of command
-                result = await command.remote(context)
-                await self.channel.send(DispatchResult(fqin, result=result))
+                    return result
 
-                return result
+                except asyncio.CancelledError:
+                    log.info("Remote execution canceled")
 
-            except asyncio.CancelledError:
-                log.info("Remote execution canceled")
+                except Exception as ex:
+                    tb = traceback.format_exc()
+                    log.error("traceback:\n%s", tb)
+                    await self.channel.send(DispatchException(fqin, exception=ex, tb=tb))
 
-            except Exception as ex:
-                tb = traceback.format_exc()
-                log.error("traceback:\n%s", tb)
-                await self.channel.send(DispatchException(fqin, exception=ex, tb=tb))
+                    raise
+        finally:
+            self.pending_remote_tasks.remove(current_task)
 
-                raise
 
 class _CommandMeta(type):
     base = None
@@ -1007,7 +1056,19 @@ async def event_dispatch(event):
 
 
 class NotifyEvent(Command):
+
+    """Notify about an event.
+
+    If the remote side registers for this event, it gets notified.
+
+    """
+
     def __init__(self, event=None, local=False):
+        """Initialize NotifyEvent command.
+
+        :param event: the event instance, which has to be de/encodable via message pack
+        :param local: if True, the local side will also be notified
+        """
         super().__init__()
         self.dispatch_local = local
         self.event = event
@@ -1018,10 +1079,12 @@ class NotifyEvent(Command):
 
         if self.dispatch_local:
             # local event submission
+            log.info("Notify local %s", self.event)
             await notify_event(self.event)
 
     async def remote(self, context):
         # local event submission
+        log.info("Notify remote %s", self.event)
         await notify_event(self.event)
 
 
@@ -1069,6 +1132,7 @@ class Echo(Command):
         return {
             'from_local': ''.join(from_local),
             'remote_self': self,
+            'pid': os.getpid()
         }
 
 
@@ -1178,7 +1242,7 @@ class FindModule(Command):
 
             return remote_module_data
         else:
-            log.error('Module not loaded: %s', self.module_name)
+            log.warning('Module not loaded: %s', self.module_name)
             return None
 
 
@@ -1308,33 +1372,39 @@ async def log_tcp_10001():
         writer.close()
 
 
-async def communicate(dispatcher, *, stdin=sys.stdin, stdout=sys.stdout, echo=None):
+class ShutdownRemoteEvent(MsgpackEncoder):
 
-    current_task = asyncio.Task.current_task()
+    """A Shutdown event."""
+
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return None
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded, data_type):
+        return data_type()
+
+
+async def communicate(dispatcher, *, stdin=sys.stdin, stdout=sys.stdout, echo=None):
+    @event_handler(ShutdownRemoteEvent)
+    async def _shutdown_dispatcher(event):
+        dispatcher.shutdown()
 
     try:
         async with Incomming(pipe=stdin) as reader:
             async with Outgoing(pipe=stdout, shutdown=True) as writer:
+                # TODO think about generic handshake
                 # send echo to master to prove behavior
                 if echo is not None:
                     writer.write(echo)
                     await writer.drain()
 
-                communicate = asyncio.ensure_future(dispatcher.communicate(reader=reader, writer=writer))
+                fut_communicate = asyncio.ensure_future(dispatcher.communicate(reader=reader, writer=writer))
 
-                @event_handler(ShutdownRemoteEvent)
-                async def _shutdown_dispatcher(event):
-                    log.info("Shutdown: %s", communicate)
-                    dispatcher._fut_communicate.cancel()
-                    await dispatcher._fut_communicate
-                    # communicate.cancel()
-                    # await communicate
-                    log.info("...end")
-
-                await communicate
+                await fut_communicate
 
     except asyncio.CancelledError:
-        pass
+        log.info("Cancelled communicate??")
 
     log.info('Communication end.')
 
@@ -1419,26 +1489,12 @@ def _setup_logging(loop, debug=False, log_config=None):
         loop.set_debug(debug)
 
 
-class ShutdownRemoteEvent(MsgpackEncoder):
-
-    """Encode and decode Exception arguments.
-
-    Traceback and other internals will be lost.
-    """
-
-    @classmethod
-    def __msgpack_encode__(cls, data, data_type):
-        return None
-
-    @classmethod
-    def __msgpack_decode__(cls, encoded, data_type):
-        return data_type()
-
-
 def main(debug=False, log_config=None, echo=None, **kwargs):
     loop = asyncio.get_event_loop()
 
     _setup_logging(loop, debug, log_config)
+    log.info(' *** ' * 5)
+    log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
     log.debug("msgpack used: %s", msgpack)
 
     dispatcher = Dispatcher()
@@ -1453,8 +1509,14 @@ def main(debug=False, log_config=None, echo=None, **kwargs):
         )
         # loop.run_until_complete(cancel_pending_tasks(loop))
         log.info("Finally.")
+
     except asyncio.CancelledError as ex:
         log.info("Canceled: %s", ex)
 
+    except Exception as ex:
+        log.info("Error: %s", ex)
+
     finally:
         loop.close()
+
+    log.info("foobar")

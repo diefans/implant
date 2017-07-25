@@ -31,9 +31,18 @@ def parse_command(line):
     return command, args, kwargs
 
 
-async def _execute_command(io_queues, line, **kw):
+async def _execute_command(io_queues, line):
+    default_lines = {
+        b'e\n': (b'debellator.plugins.core:Echo foo=bar bar=123\n', {}),
+        b'i\n': (b'debellator.core:InvokeImport fullname=debellator.plugins.core\n', {}),
+        b'\n': (b'debellator.core:Echo foo=bar bar=123\n', {}),
+    }
+
+    if line in default_lines:
+        line, _ = default_lines[line]
+
     command_name, _, params = parse_command(line[:-1].decode())
-    print("sending:", command_name, params)
+    log.info("sending: %s %s", command_name, params)
 
     try:
         cmd = core.Command.commands[command_name](**params)
@@ -41,18 +50,21 @@ async def _execute_command(io_queues, line, **kw):
 
     except Exception as ex:     # noqa
         log.error("Error:\n%s", traceback.format_exc())
-        print("Error: {}\n > ".format(ex))
-
     else:
         return result
 
 
 async def log_remote_stderr(remote):
-    async for line in remote.stderr:
-        log.debug("\tRemote #%s: %s", remote.pid, line[:-1].decode())
+    await remote.launched()
+    log.info("Logging remote stderr: %s", remote.process)
+    async for line in remote.process.stderr:
+        log.debug("\tRemote #%s: %s", remote.process.pid, line[:-1].decode())
 
 
 async def feed_stdin_to_remotes(**options):
+    current_task = asyncio.Task.current_task()
+    asyncio.get_event_loop().add_signal_handler(signal.SIGINT, current_task.cancel)
+
     connectors = {
         connect.Local(): {
             'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
@@ -68,42 +80,20 @@ async def feed_stdin_to_remotes(**options):
         },
     }
 
-    remote_futures = {}
+    remotes = {}
+    remote_error_logs = set()
 
     for connector, default_args in connectors.items():
-        if remote_futures.get(connector, None) is not None:
+        if remotes.get(connector, None) is not None:
             log.warning('Process for %s already launched! Skipping...', connector)
             continue
-        remote_futures[connector] = asyncio.ensure_future(connect.Remote(connector).launch(
-            options=options, **default_args
-        ))
-
-    default_lines = {
-        b'e\n': (b'debellator.plugins.core:Echo foo=bar bar=123\n', {}),
-        b'i\n': (b'debellator.core:InvokeImport fullname=debellator.plugins.core\n', {}),
-        b'\n': (b'debellator.core:Echo foo=bar bar=123\n', {}),
-    }
-
-    # connector = connect.Ssh(
-    #     hostname='localhost'
-    # )
-    connector = connect.Lxd(
-        container='zesty',
-        hostname='localhost'
-    )
-    remote = connect.Remote(connector)
-    fut_remote = asyncio.ensure_future(
-        remote.launch(
-            # code=core,
-            python_bin=pathlib.Path('/usr/bin/python3').expanduser(),
-            # python_bin=pathlib.Path('~/.pyenv/versions/3.6.1/envs/dbltr-remote/bin/python').expanduser(),
-            # python_bin=pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-            options=options
+        remote = remotes[connector] = connect.Remote(connector)
+        asyncio.ensure_future(
+            remote.launch(
+                options=options, **default_args
+            )
         )
-    )
-
-    # XXX FIXME TODO remote_com is a background task, so we have to await
-    remote_err = asyncio.ensure_future(log_remote_stderr(remote.process))
+        remote_error_logs.add(asyncio.ensure_future(log_remote_stderr(remote)))
 
     try:
         async with core.Incomming(pipe=sys.stdin) as reader:
@@ -113,35 +103,22 @@ async def feed_stdin_to_remotes(**options):
                 if line == b'':
                     break
 
-                if line in default_lines:
-                    line, kw = default_lines[line]
+                result = await asyncio.gather(
+                    *(_execute_command(remote, line) for remote in remotes.values())
+                )
 
-                if remote.process.returncode is None:
-                    result = await _execute_command(remote, line, **kw)
-                    # result = await asyncio.gather(
-                    #     _execute_command(dispatcher, line, **kw),
-                    #     _execute_command(dispatcher, line, **kw),
-                    # )
-
-                    print("< {}\n > ".format(result), end='')
+                print("< {}\n >".format(result), end="")
 
     except asyncio.CancelledError:
-        shutdown_event = core.ShutdownRemoteEvent()
-        event = remote.execute(core.NotifyEvent(shutdown_event))
-        await event
-        core.log.info("Terminating process: %s", process)
+        log.info("Terminating...")
 
-        process.send_signal(signal.SIGKILL)
+        await asyncio.gather(
+            *(remote.send_shutdown() for remote in remotes.values())
+        )
 
-        remote_err.cancel()
-        await remote_err
-
-    if process.returncode is None:
-        core.log.info("Terminating process: %s", process)
-        # TODO implement gracefull remote shutdown
-        # via Command
-        process.terminate()
-        await process.wait()
+        for remote_error_log in remote_error_logs:
+            remote_error_log.cancel()
+            await remote_error_log
 
 
 async def serve_tcp_10000(reader, writer):
@@ -161,34 +138,6 @@ async def print_debug(loop):
         await asyncio.sleep(0.5, loop=loop)
 
 
-async def run(*tasks):
-    """Schedule all tasks and wait for running is done or canceled."""
-    # create indicator for running messenger
-    running = asyncio.ensure_future(asyncio.gather(*tasks))
-
-    # exit on sigterm or sigint
-    for signame in ('SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'):
-        sig = getattr(signal, signame)
-
-        def exit_with_signal(sig):
-            try:
-                log.info("\n\n\nAborting: %s", running)
-                running.cancel()
-
-            except asyncio.InvalidStateError:
-                log.warning("running already done!")
-
-        asyncio.get_event_loop().add_signal_handler(sig, functools.partial(exit_with_signal, sig))
-
-    # wait for running completed
-    try:
-        result = await running
-        return result
-
-    except asyncio.CancelledError:
-        raise
-
-
 def main(debug=False, log_config=None):
 
     loop = asyncio.get_event_loop()
@@ -206,14 +155,9 @@ def main(debug=False, log_config=None):
 
     try:
         loop.run_until_complete(
-            run(
-                # print_debug(loop),
-                # asyncio.start_server(serve_tcp_10000, 'localhost', 10000),
-                feed_stdin_to_remotes(**options),
-            )
+            feed_stdin_to_remotes(**options),
         )
 
-        loop.run_until_complete(core.cancel_pending_tasks(loop))
     except Exception as ex:
         core.log.error("Error %s:\n%s", type(ex), traceback.format_exc())
 

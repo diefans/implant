@@ -11,19 +11,12 @@ from debellator import core, bootstrap
 log = logging.getLogger(__name__)
 
 
-class ProcessNotLaunchedError(Exception):
-    pass
-
-
 class RemoteMisbehavesError(Exception):
-    pass
+
+    """Exception is raised, when a remote process seems to be not what we expect."""
 
 
-class MetaRemote(type):
-    processes = {}
-
-
-class Remote(core.Dispatcher, metaclass=MetaRemote):
+class Remote(core.Dispatcher):
 
     """A unique representation of a Remote."""
 
@@ -32,6 +25,7 @@ class Remote(core.Dispatcher, metaclass=MetaRemote):
         self.connector = connector
         self.process = None
         self._launch_lock = asyncio.Lock()
+        self._evt_launched = asyncio.Event()
 
     def __hash__(self):
         return hash(self.connector)
@@ -49,7 +43,6 @@ class Remote(core.Dispatcher, metaclass=MetaRemote):
         :param kwargs: further arguments to create the process
 
         """
-
         async with self._launch_lock:
             if options is None:
                 options = {}
@@ -62,8 +55,6 @@ class Remote(core.Dispatcher, metaclass=MetaRemote):
             log.debug("Connector arguments: %s", ' '.join(command_args))
 
             process = await self._launch(*command_args, bootstrap_code, **kwargs)
-
-            log.info("Started process: %s", process)
 
             # TODO protocol needs improvement
             # some kind of a handshake, which is independent of sending echo via process options
@@ -78,12 +69,27 @@ class Remote(core.Dispatcher, metaclass=MetaRemote):
             except EOFError:
                 raise RemoteMisbehavesError("Remote closed stdout!")
 
+            log.info("Started process: %s", process)
+            self._evt_launched.set()
+
             self.process = process
             try:
                 await self.communicate(reader=process.stdout, writer=process.stdin)
             finally:
-                process.terminate()
-                await process.wait()
+                # terminate if process is still running
+                if process.returncode is None:
+                    await self.send_shutdown()
+
+                if process.returncode is None:
+                    log.warning("Terminating process: %s", process.pid)
+                    process.terminate()
+                    await process.wait()
+
+                self._evt_launched.clear()
+
+    async def launched(self):
+        """Just wat for the launch event."""
+        await self._evt_launched.wait()
 
     async def _launch(self, *args, **kwargs):
         def preexec_detach_from_parent():
@@ -101,31 +107,22 @@ class Remote(core.Dispatcher, metaclass=MetaRemote):
 
         return process
 
-    def cancel(self):
-        self._fut_communicate.cancel()
+    async def send_shutdown(self):
+        """Send a `ShutdownRemoteEvent` to shutdown the remote process.
 
-    async def __await__(self):
-        if self._fut_communicate is not None:
-            await self._fut_communicate
+        It also waits for the process to finish.
 
-    async def relaunch(self):
-        """Wait until terminated and start a new process with the same args."""
-        # process = self.__class__.processes.get(self)
-        process = self.process
-        if not process:
-            raise ProcessNotLaunchedError()
-
-        command_args = process._transport._proc.args
-        command_kwargs = process._transport._proc.kwargs
-
-        process.terminate()
-        await process.wait()
-
-        self.process = await self._launch(*command_args, **command_kwargs)
-        return self.process
+        """
+        shutdown_event = core.ShutdownRemoteEvent()
+        event = self.execute(core.NotifyEvent(shutdown_event))
+        await event
+        self.shutdown()
+        await self.process.wait()
 
 
 class Connector(metaclass=abc.ABCMeta):
+
+    """A `Connector` uniquely defines a remote target."""
 
     __slots__ = ()
 
@@ -156,6 +153,8 @@ class Connector(metaclass=abc.ABCMeta):
 
 class Local(Connector):
 
+    """A `Connector` to a local python process."""
+
     __slots__ = ('sudo',)
 
     def __init__(self, *, sudo=None):
@@ -175,6 +174,11 @@ class Local(Connector):
 
 
 class Ssh(Local):
+
+    """A `Connector` for remote hosts reachable via SSH.
+
+    If a hostname is omitted, this connector acts like `Local`.
+    """
 
     __slots__ = ('sudo', 'hostname', 'user')
 
@@ -207,6 +211,12 @@ class Ssh(Local):
 
 
 class Lxd(Ssh):
+
+    """A `Connector` for accessing a lxd container.
+
+    If the hostname is omitted, the lxd container is local.
+    """
+
     __slots__ = ('sudo', 'hostname', 'user', 'container')
 
     def __init__(self, *, container, hostname=None, user=None, sudo=None):
