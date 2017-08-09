@@ -318,6 +318,7 @@ class Outgoing:
 
     async def __aexit__(self, exc_type, value, tb):
         pass
+        # XXX why is this commented?
         # self.transport.close()
 
 
@@ -490,7 +491,7 @@ class IoQueues:
             while not self._evt_shutdown.is_set() or queue.qsize():
                 try:
                     data = await queue.get()
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, GeneratorExit):
                     if self._evt_shutdown.is_set() and queue.qsize():
                         log.info("Continue for clean shutdown")
                         continue
@@ -507,7 +508,7 @@ class IoQueues:
 
                 await writer.drain()
 
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             if queue.qsize():
                 log.warning("Send queue was not empty when canceled!")
 

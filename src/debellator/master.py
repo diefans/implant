@@ -162,4 +162,8 @@ def main(debug=False, log_config=None):
         core.log.error("Error %s:\n%s", type(ex), traceback.format_exc())
 
     finally:
+        for task in asyncio.Task.all_tasks():
+            if not task.done():
+                log.info("pending: %s", task)
+        log.info(" close " * 10)
         loop.close()

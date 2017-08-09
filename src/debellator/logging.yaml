@@ -26,6 +26,11 @@ handlers:
 
 loggers:
     debellator:
+        level: DEBUG
+        handlers: [console, logfile]
+        propagate: no
+
+    debellator.core:
         level: ERROR
         handlers: [console, logfile]
         propagate: no

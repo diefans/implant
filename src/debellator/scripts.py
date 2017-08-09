@@ -14,7 +14,9 @@ def run():
 
 
 @click.group(invoke_without_command=True)
-@click.option('use_uvloop', '--uvloop/--no-uvloop', default=False, help='Use uvloop policy.')
+@click.option('event_loop', '--loop', default='asyncio',
+              type=click.Choice(('asyncio', 'uvloop', 'tokio')),
+              help='Use uvloop policy.')
 @click.option('--debug/--no-debug', default=False, help='Enable or disable debug.')
 @click.option('--log-config',
               type=click.File('r'),
@@ -22,21 +24,30 @@ def run():
               help='Logging configuration in yaml format.')
 # @click.option('--config', '-c', default=None, help='General configuration.')
 @click.pass_context
-def cli(ctx, use_uvloop, debug, log_config):
+def cli(ctx, event_loop, debug, log_config):
     if log_config is None:
         log_config = pkg_resources.resource_string('debellator', 'logging.yaml')
 
     log_config = yaml.load(log_config)
     logging.config.dictConfig(log_config)
 
-    if use_uvloop:
+    if event_loop == 'uvloop':
         try:
             import uvloop
             asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-            log.info("Using uvloop policy")
+            log.info("Using uvloop event loop policy")
 
         except ImportError:
-            log.warning("uvloop policy is not available.")
+            log.warning("uvloop is not available.")
+
+    elif event_loop == 'tokio':
+        try:
+            import tokio
+            asyncio.set_event_loop_policy(tokio.EventLoopPolicy())
+            log.info("Using tokio event loop policy")
+
+        except ImportError:
+            log.warning("tokio is not available.")
 
     if ctx.invoked_subcommand is None:
         # we need to import master lazy because master imports core,
@@ -51,7 +62,6 @@ def cli(ctx, use_uvloop, debug, log_config):
 
         master.main(log_config=log_config, debug=debug)
         # console.main(log_config=log_config, debug=debug)
-
 
     else:
         if debug:

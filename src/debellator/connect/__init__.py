@@ -75,6 +75,8 @@ class Remote(core.Dispatcher):
             self.process = process
             try:
                 await self.communicate(reader=process.stdout, writer=process.stdin)
+            except asyncio.CancelledError:
+                log.info("Remote communication cancelled.")
             finally:
                 # terminate if process is still running
                 if process.returncode is None:
