@@ -23,9 +23,10 @@ async def test_echo(event_loop):
 
     connector = connect.Ssh()
 
+    remote = await connector.launch()
+
     # setup launch specific tasks
-    remote = connect.Remote(connector)
-    com_remote = asyncio.ensure_future(remote.launch())
+    com_remote = asyncio.ensure_future(remote.communicate())
     try:
         com_import = core.InvokeImport(fullname='debellator.plugins.core')
         result = await remote.execute(com_import)
@@ -38,3 +39,5 @@ async def test_echo(event_loop):
     finally:
         com_remote.cancel()
         await com_remote
+        await remote.send_shutdown()
+        await remote.wait()

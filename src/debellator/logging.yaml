@@ -31,7 +31,7 @@ loggers:
         propagate: no
 
     debellator.core:
-        level: ERROR
+        level: INFO
         handlers: [console, logfile]
         propagate: no
 

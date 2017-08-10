@@ -1,9 +1,11 @@
+"""Remote connection is established by a `Connector`."""
 import abc
 import asyncio
 import logging
 import os
 import shlex
 import sys
+import traceback
 
 from debellator import core, bootstrap
 
@@ -16,98 +18,42 @@ class RemoteMisbehavesError(Exception):
     """Exception is raised, when a remote process seems to be not what we expect."""
 
 
-class Remote(core.Dispatcher):
+class Remote:
 
-    """A unique representation of a Remote."""
+    """A remote process."""
 
-    def __init__(self, connector):
-        super().__init__()
-        self.connector = connector
-        self.process = None
-        self._launch_lock = asyncio.Lock()
-        self._evt_launched = asyncio.Event()
+    def __init__(self, transport, protocol):
+        self._transport = transport
+        self._protocol = protocol
+        self.stdin = protocol.stdin
+        self.stdout = protocol.stdout
+        self.stderr = protocol.stderr
+        self.pid = transport.get_pid()
 
-    def __hash__(self):
-        return hash(self.connector)
+        self.io_queues = core.Channels(reader=protocol.stdout, writer=protocol.stdin)
+        self.dispatcher = core.Dispatcher(self.io_queues)
 
-    def __eq__(self, other):
-        assert isinstance(other, Remote)
-        return self.connector == other.connector
+        self._lck_communicate = asyncio.Lock()
 
-    async def launch(self, *, code=None, options=None, python_bin=sys.executable, **kwargs):
-        """Launch a remote process.
+    def __repr__(self):
+        return '<%s %s>' % (self.__class__.__name__, self.pid)
 
-        :param code: the python module to bootstrap
-        :param options: options to send to remote
-        :param python_bin: the path to the python binary to execute
-        :param kwargs: further arguments to create the process
+    @property
+    def returncode(self):
+        return self._transport.get_returncode()
 
-        """
-        async with self._launch_lock:
-            if options is None:
-                options = {}
+    async def wait(self):
+        """Wait until the process exit and return the process return code."""
+        return await self._transport._wait()    # pylint: disable=W0212
 
-            options['echo'] = echo = b''.join((b'Debellator', os.urandom(64)))
+    def send_signal(self, signal):
+        self._transport.send_signal(signal)
 
-            *command_args, bootstrap_code = self.connector.arguments(
-                code=code, options=options, python_bin=python_bin
-            )
-            log.debug("Connector arguments: %s", ' '.join(command_args))
+    def terminate(self):
+        self._transport.terminate()
 
-            process = await self._launch(*command_args, bootstrap_code, **kwargs)
-
-            # TODO protocol needs improvement
-            # some kind of a handshake, which is independent of sending echo via process options
-            try:
-                # wait for remote behavior to echo
-                remote_echo = await process.stdout.readexactly(len(echo))
-                assert echo == remote_echo, "Remote process misbehaves!"
-
-            except AssertionError:
-                raise RemoteMisbehavesError("Remote does not echo `{}`!".format(echo))
-
-            except EOFError:
-                raise RemoteMisbehavesError("Remote closed stdout!")
-
-            log.info("Started process: %s", process)
-            self._evt_launched.set()
-
-            self.process = process
-            try:
-                await self.communicate(reader=process.stdout, writer=process.stdin)
-            except asyncio.CancelledError:
-                log.info("Remote communication cancelled.")
-            finally:
-                # terminate if process is still running
-                if process.returncode is None:
-                    await self.send_shutdown()
-
-                if process.returncode is None:
-                    log.warning("Terminating process: %s", process.pid)
-                    process.terminate()
-                    await process.wait()
-
-                self._evt_launched.clear()
-
-    async def launched(self):
-        """Just wat for the launch event."""
-        await self._evt_launched.wait()
-
-    async def _launch(self, *args, **kwargs):
-        def preexec_detach_from_parent():
-            # prevents zombie processes via ssh
-            os.setpgrp()
-
-        process = await asyncio.create_subprocess_exec(
-            *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            preexec_fn=preexec_detach_from_parent,
-            **kwargs
-        )
-
-        return process
+    def kill(self):
+        self._transport.kill()
 
     async def send_shutdown(self):
         """Send a `ShutdownRemoteEvent` to shutdown the remote process.
@@ -115,11 +61,45 @@ class Remote(core.Dispatcher):
         It also waits for the process to finish.
 
         """
-        shutdown_event = core.ShutdownRemoteEvent()
-        event = self.execute(core.NotifyEvent(shutdown_event))
-        await event
-        self.shutdown()
-        await self.process.wait()
+        if self.returncode is None:
+            log.info("Send shutdown: %s", self)
+            shutdown_event = core.ShutdownRemoteEvent()
+            event = self.execute(core.NotifyEvent(shutdown_event))
+            await event
+            self.dispatcher.shutdown()
+            self.io_queues.shutdown()
+            await self.wait()
+            log.info("Shutdown end.")
+
+    async def execute(self, command):
+        return await self.dispatcher.execute(command)
+
+    async def communicate(self):
+        async with self._lck_communicate:
+            try:
+                fut_communicate = asyncio.ensure_future(self.io_queues.enqueue())
+
+                await self.dispatcher.dispatch()
+
+            except asyncio.CancelledError:
+                log.info("Remote communication cancelled.")
+
+                fut_communicate.cancel()
+                await fut_communicate
+
+            except Exception:
+                log.error("Error while processing:\n%s", traceback.format_exc())
+                raise
+
+            finally:
+                log.info("Remote process terminated")
+                # terminate if process is still running
+                await self.send_shutdown()
+
+                if self.returncode is None:
+                    log.warning("Terminating remote process: %s", self.pid)
+                    self.terminate()
+                    await self.wait()
 
 
 class Connector(metaclass=abc.ABCMeta):
@@ -151,6 +131,70 @@ class Connector(metaclass=abc.ABCMeta):
         :param options: options for the remote process
 
         """
+
+    async def launch(self, *, code=None, options=None, python_bin=sys.executable, **kwargs):
+        """Launch a remote process.
+
+        :param code: the python module to bootstrap
+        :param options: options to send to remote
+        :param python_bin: the path to the python binary to execute
+        :param kwargs: further arguments to create the process
+
+        """
+        if options is None:
+            options = {}
+
+        # TODO handshake
+        options['echo'] = echo = b''.join((b'Debellator', os.urandom(64)))
+
+        *command_args, bootstrap_code = self.arguments(
+            code=code, options=options, python_bin=python_bin
+        )
+        log.debug("Connector arguments: %s", ' '.join(command_args))
+
+        remote = await create_remote(*command_args, bootstrap_code, **kwargs)
+
+        # TODO protocol needs improvement
+        # some kind of a handshake, which is independent of sending echo via process options
+        try:
+            # wait for remote behavior to echo
+            remote_echo = await remote.stdout.readexactly(len(echo))
+            assert echo == remote_echo, "Remote process misbehaves!"
+
+        except AssertionError:
+            raise RemoteMisbehavesError("Remote does not echo `{}`!".format(echo))
+
+        except EOFError:
+            raise RemoteMisbehavesError("Remote closed stdout!")
+
+        log.info("Started remote process: %s", remote)
+        return remote
+
+
+_DEFAULT_LIMIT = 2 ** 16
+
+
+async def create_remote(program, *args, loop=None, limit=_DEFAULT_LIMIT, **kwds):
+    if loop is None:
+        loop = asyncio.events.get_event_loop()
+
+    def preexec_detach_from_parent():
+        # prevents zombie processes via ssh
+        os.setpgrp()
+
+    def protocol_factory():
+        return asyncio.subprocess.SubprocessStreamProtocol(limit=limit, loop=loop)
+
+    transport, protocol = await loop.subprocess_exec(
+        protocol_factory,
+        program, *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        preexec_fn=preexec_detach_from_parent,
+        **kwds
+    )
+    return Remote(transport, protocol)
 
 
 class Local(Connector):

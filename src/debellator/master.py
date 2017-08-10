@@ -1,7 +1,6 @@
 """Controlles a bunch of remotes."""
 
 import asyncio
-import functools
 import logging
 import pathlib
 import signal
@@ -55,10 +54,10 @@ async def _execute_command(io_queues, line):
 
 
 async def log_remote_stderr(remote):
-    await remote.launched()
-    log.info("Logging remote stderr: %s", remote.process)
-    async for line in remote.process.stderr:
-        log.debug("\tRemote #%s: %s", remote.process.pid, line[:-1].decode())
+    # await remote.launched()
+    log.info("Logging remote stderr: %s", remote)
+    async for line in remote.stderr:
+        log.debug("\tRemote #%s: %s", remote.pid, line[:-1].decode())
 
 
 async def feed_stdin_to_remotes(**options):
@@ -87,11 +86,11 @@ async def feed_stdin_to_remotes(**options):
         if remotes.get(connector, None) is not None:
             log.warning('Process for %s already launched! Skipping...', connector)
             continue
-        remote = remotes[connector] = connect.Remote(connector)
+        remote = remotes[connector] = await connector.launch(
+            options=options, **default_args
+        )
         asyncio.ensure_future(
-            remote.launch(
-                options=options, **default_args
-            )
+            remote.communicate()
         )
         remote_error_logs.add(asyncio.ensure_future(log_remote_stderr(remote)))
 
