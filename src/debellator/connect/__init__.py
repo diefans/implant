@@ -66,26 +66,44 @@ class Remote:
             shutdown_event = core.ShutdownRemoteEvent()
             event = self.execute(core.NotifyEvent(shutdown_event))
             await event
-            self.dispatcher.shutdown()
-            self.io_queues.shutdown()
-            await self.wait()
-            log.info("Shutdown end.")
 
     async def execute(self, command):
         return await self.dispatcher.execute(command)
 
     async def communicate(self):
         async with self._lck_communicate:
-            try:
-                fut_communicate = asyncio.ensure_future(self.io_queues.enqueue())
+            never_ending = asyncio.Future()
 
-                await self.dispatcher.dispatch()
+            async def enqueue():
+                try:
+                    await self.io_queues.enqueue()
+                except Exception as ex:
+                    never_ending.set_exception(ex)
+
+            async def dispatch():
+                try:
+                    await self.dispatcher.dispatch()
+                except Exception as ex:
+                    never_ending.set_exception(ex)
+
+            fut_enqueue = asyncio.ensure_future(enqueue())
+            fut_dispatch = asyncio.ensure_future(dispatch())
+
+            try:
+                result = await never_ending
 
             except asyncio.CancelledError:
                 log.info("Remote communication cancelled.")
+                log.info("Send shutdown: %s", self)
+                shutdown_event = core.ShutdownRemoteEvent()
+                event = self.execute(core.NotifyEvent(shutdown_event))
+                await event
+                # await self.send_shutdown()
 
-                fut_communicate.cancel()
-                await fut_communicate
+                self.dispatcher.shutdown()
+                self.io_queues.shutdown()
+                await self.wait()
+                log.info("Shutdown end.")
 
             except Exception:
                 log.error("Error while processing:\n%s", traceback.format_exc())
@@ -94,12 +112,12 @@ class Remote:
             finally:
                 log.info("Remote process terminated")
                 # terminate if process is still running
-                await self.send_shutdown()
 
                 if self.returncode is None:
                     log.warning("Terminating remote process: %s", self.pid)
                     self.terminate()
                     await self.wait()
+                return self.returncode
 
 
 class Connector(metaclass=abc.ABCMeta):

@@ -86,12 +86,14 @@ async def feed_stdin_to_remotes(**options):
         if remotes.get(connector, None) is not None:
             log.warning('Process for %s already launched! Skipping...', connector)
             continue
-        remote = remotes[connector] = await connector.launch(
+        remote = await connector.launch(
             options=options, **default_args
         )
-        asyncio.ensure_future(
+        fut_remote = asyncio.ensure_future(
             remote.communicate()
         )
+        remotes[connector] = (remote, fut_remote)
+
         remote_error_logs.add(asyncio.ensure_future(log_remote_stderr(remote)))
 
     try:
@@ -103,7 +105,7 @@ async def feed_stdin_to_remotes(**options):
                     break
 
                 result = await asyncio.gather(
-                    *(_execute_command(remote, line) for remote in remotes.values())
+                    *(_execute_command(remote, line) for remote, _ in remotes.values())
                 )
 
                 print("< {}\n >".format(result), end="")
@@ -111,9 +113,10 @@ async def feed_stdin_to_remotes(**options):
     except asyncio.CancelledError:
         log.info("Terminating...")
 
-        await asyncio.gather(
-            *(remote.send_shutdown() for remote in remotes.values())
-        )
+        for remote, fut_remote in remotes.values():
+            fut_remote.cancel()
+            returncode = await fut_remote
+            log.info("Remote %s exited with: %s", remote, returncode)
 
         for remote_error_log in remote_error_logs:
             remote_error_log.cancel()
