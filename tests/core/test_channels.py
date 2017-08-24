@@ -19,8 +19,9 @@ def event_loop():
 
 
 @pytest.mark.asyncio
-async def test_send():
-    import pickle
+async def test_send(event_loop):
+    import asyncio
+    import os
 
     from debellator import core
 
@@ -28,25 +29,32 @@ async def test_send():
 
     # set chunksize
     data = b'1234567890' * 10
-    chunk_size, rest = divmod(len(pickle.dumps(data)), 10)
+    chunk_size, rest = divmod(len(data), 10)
+
+    r_pipe, w_pipe = os.pipe()
 
     with mock.patch.object(core.Channels, 'chunk_size', chunk_size):
         with mock.patch.object(core.Uid, '__call__') as mock_uuid:
-            mock_uuid.return_value = uid
-            queues = core.Channels(reader=None, writer=None)
-            c = queues.get_channel('foo')
-            queue = queues.outgoing
+            async with core.Incomming(pipe=r_pipe) as reader:
+                async with core.Outgoing(pipe=w_pipe) as writer:
+                    mock_uuid.return_value = uid
+                    channels = core.Channels(reader=reader, writer=writer)
+                    fut_enqueue = asyncio.ensure_future(channels.enqueue())
 
-            await c.send(data)
+                    c = channels.get_channel('foo')
 
-            chunks = []
+                    try:
+                        await c.send(data)
 
-            while not queue.empty():
-                chunks.append(await queue.get())
-                queue.task_done()
+                        chunks = []
 
-            chunk_count = (chunk_size + (1 if rest else 0)) + 1
-            assert len(chunks) == chunk_count
+                        returned_data = await c
+
+                        assert returned_data == data
+                    finally:
+                        channels.shutdown()
+                        # fut_enqueue.cancel()
+                        await fut_enqueue
 
 
 @pytest.mark.asyncio
@@ -64,12 +72,12 @@ async def test_communicate(event_loop):
     with mock.patch.object(core.Channels, 'chunk_size', 0x800):
         async with core.Incomming(pipe=r_pipe) as reader:
             async with core.Outgoing(pipe=w_pipe) as writer:
-                io_queues = core.Channels(reader=reader, writer=writer)
-                com_future = asyncio.ensure_future(io_queues.enqueue())
+                channels = core.Channels(reader=reader, writer=writer)
+                com_future = asyncio.ensure_future(channels.enqueue())
 
                 try:
                     # channel will receive its own messages
-                    c = io_queues.get_channel('foo')
+                    c = channels.get_channel('foo')
 
                     await c.send('bar')
                     msg = await c
@@ -110,4 +118,6 @@ async def test_communicate(event_loop):
 
                 finally:
                     # shutdown channel communications
-                    com_future.cancel()
+                    channels.shutdown()
+                    # com_future.cancel()
+                    await com_future
