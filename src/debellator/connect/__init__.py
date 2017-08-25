@@ -100,8 +100,13 @@ class Remote:
                 await event
                 # await self.send_shutdown()
 
-                self.dispatcher.shutdown()
-                self.io_queues.shutdown()
+                fut_dispatch.cancel()
+                await fut_dispatch
+                # self.dispatcher.shutdown()
+
+                fut_enqueue.cancel()
+                await fut_enqueue
+                # self.io_queues.shutdown()
                 await self.wait()
                 log.info("Shutdown end.")
 

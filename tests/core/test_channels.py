@@ -52,8 +52,7 @@ async def test_send(event_loop):
 
                         assert returned_data == data
                     finally:
-                        channels.shutdown()
-                        # fut_enqueue.cancel()
+                        fut_enqueue.cancel()
                         await fut_enqueue
 
 
@@ -118,6 +117,5 @@ async def test_communicate(event_loop):
 
                 finally:
                     # shutdown channel communications
-                    channels.shutdown()
-                    # com_future.cancel()
+                    com_future.cancel()
                     await com_future

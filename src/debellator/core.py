@@ -434,7 +434,6 @@ class Channels:
         self.writer = writer
 
         self._lock_communicate = asyncio.Lock()
-        self._evt_shutdown = asyncio.Event()
 
     def get_channel(self, channel_name):
         """Create a channel and weakly register its queue.
@@ -454,10 +453,6 @@ class Channels:
         finally:
             self.incomming[channel_name] = queue
 
-    def shutdown(self):
-        """Shutdown enqueueing of messages."""
-        self._evt_shutdown.set()
-
     async def enqueue(self):
         """Schedule receive tasks.
 
@@ -465,14 +460,16 @@ class Channels:
         """
         async with self._lock_communicate:
             # start receiving
-            self._evt_shutdown.clear()
-            _fut_receive_reader = asyncio.ensure_future(self._receive_reader())
-
-            await self._evt_shutdown.wait()
+            fut_receive_reader = asyncio.ensure_future(self._receive_reader())
+            try:
+                # never ending
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                log.info("Shutdown of message enqueueing")
 
             # stop receiving new messages
-            _fut_receive_reader.cancel()
-            await _fut_receive_reader
+            fut_receive_reader.cancel()
+            await fut_receive_reader
 
     async def _read_chunk(self):
         # read header
@@ -700,7 +697,8 @@ def exclusive(fun):
     return locked_fun
 
 
-DispatchContext = collections.namedtuple('DispatchContext', ('channel', 'execute'))
+DispatchContext = collections.namedtuple('DispatchContext',
+                                         ('channel', 'execute', 'fqin', 'pending_remote_task'))
 DISPATCHER_CHANNEL_NAME = 'Dispatcher'
 
 
@@ -721,41 +719,25 @@ class Dispatcher:
         self.pending_commands = collections.defaultdict(asyncio.Future)
         self.pending_remote_tasks = set()
 
-        self._fut_execute_io_queues = None
         self._lock_dispatch = asyncio.Lock()
-        self._evt_shutdown = asyncio.Event()
-
-    def shutdown(self):
-        self._evt_shutdown.set()
 
     async def dispatch(self):
         """Start sending and receiving messages and executing them."""
         async with self._lock_dispatch:
-            self._evt_shutdown.clear()
+            fut_execute_io_queues = asyncio.ensure_future(self._execute_io_queues())
+            try:
+                # never ending
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                log.info("Shutdown of dispatcher")
 
-            self._fut_execute_io_queues = asyncio.ensure_future(self._execute_io_queues())
-
-            await self._evt_shutdown.wait()
-
-            self._fut_execute_io_queues.cancel()
-            await self._fut_execute_io_queues
-
-            # wait for pending tasks to finalize
             for task in self.pending_remote_tasks:
-                log.info("Cancelling pending remote task: %s", task)
-                task.cancel()
+                log.info("Waiting for task to finalize: %s", task)
                 await task
 
-    @contextlib.contextmanager
-    def context(self, fqin):
-        """Create a context to pass to a `Command`s local and remote part.
+            fut_execute_io_queues.cancel()
+            await fut_execute_io_queues
 
-        The `Channel` is built via a fully qualified instance name (fqin).
-
-        """
-        channel = self.io_queues.get_channel(fqin)
-        context = DispatchContext(channel=channel, execute=self.execute)
-        yield context
 
     async def _execute_io_queues(self):
         """Execute messages sent via our `Dispatcher.channel`."""
@@ -773,7 +755,8 @@ class Dispatcher:
             # teardown here
             for fqin, fut in self.pending_commands.items():
                 log.warning("Teardown pending command: %s, %s", fqin, fut)
-                fut.cancel()
+                # XXX maybe do not cancel, just wait
+                # fut.cancel()
                 await fut
                 del self.pending_commands[fqin]
 
@@ -817,6 +800,22 @@ class Dispatcher:
 
         return _context()
 
+    @contextlib.contextmanager
+    def context(self, fqin, pending_remote_task=None):
+        """Create a context to pass to a `Command`s local and remote part.
+
+        The `Channel` is built via a fully qualified instance name (fqin).
+
+        """
+        channel = self.io_queues.get_channel(fqin)
+        context = DispatchContext(
+            channel=channel,
+            execute=self.execute,
+            fqin=fqin,
+            pending_remote_task=pending_remote_task
+        )
+        yield context
+
     async def execute_remote(self, fqin, command):
         """Execute the remote part of a `Command`.
 
@@ -827,8 +826,9 @@ class Dispatcher:
         """
         current_task = asyncio.Task.current_task()
         self.pending_remote_tasks.add(current_task)
+        log.debug("Starting remote task: %s", fqin)
         try:
-            with self.context(fqin) as context:
+            with self.context(fqin, current_task) as context:
                 try:
                     # execute remote side of command
                     result = await command.remote(context)
@@ -846,6 +846,7 @@ class Dispatcher:
 
                     raise
         finally:
+            log.debug("Finalizing remote task: %s", fqin)
             self.pending_remote_tasks.remove(current_task)
 
 
@@ -1037,14 +1038,17 @@ class NotifyEvent(Command):
         await remote_future
 
         if self.dispatch_local:
-            # local event submission
             log.info("Notify local %s", self.event)
             await notify_event(self.event)
 
     async def remote(self, context):
-        # local event submission
-        log.info("Notify remote %s", self.event)
-        await notify_event(self.event)
+        async def notify_after_pending_command_finalized():
+            # we notify after aknowledgement was sent
+            log.debug("Waiting for finalization of remote task: %s", context.fqin)
+            await context.pending_remote_task
+            log.debug("Notify remote %s", self.event)
+            await notify_event(self.event)
+        asyncio.ensure_future(notify_after_pending_command_finalized())
 
 
 class Echo(Command):
@@ -1348,13 +1352,19 @@ async def communicate(loop, *, stdin=sys.stdin, stdout=sys.stdout, echo=None):
     try:
         async with Incomming(pipe=stdin) as reader:
             async with Outgoing(pipe=stdout, shutdown=True) as writer:
-                io_queues = Channels(reader=reader, writer=writer)
-                dispatcher = Dispatcher(io_queues)
+                channels = Channels(reader=reader, writer=writer)
+                dispatcher = Dispatcher(channels)
+
+                fut_enqueue = asyncio.ensure_future(channels.enqueue())
+                fut_dispatch = asyncio.ensure_future(dispatcher.dispatch())
 
                 @event_handler(ShutdownRemoteEvent)
                 async def _shutdown(event):
-                    dispatcher.shutdown()
-                    io_queues.shutdown()
+                    fut_dispatch.cancel()
+                    await fut_dispatch
+
+                    fut_enqueue.cancel()
+                    await fut_enqueue
 
                 _setup_import_hook(dispatcher, loop)
                 # TODO think about generic handshake
@@ -1363,10 +1373,7 @@ async def communicate(loop, *, stdin=sys.stdin, stdout=sys.stdout, echo=None):
                     writer.write(echo)
                     await writer.drain()
 
-                fut_communicate = asyncio.ensure_future(io_queues.enqueue())
-                fut_dispatch = asyncio.ensure_future(dispatcher.dispatch())
-
-                await asyncio.gather(fut_communicate, fut_dispatch)
+                await asyncio.gather(fut_enqueue, fut_dispatch)
 
     except asyncio.CancelledError:
         log.info("Cancelled communicate??")

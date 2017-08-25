@@ -5,7 +5,7 @@ disable_existing_loggers: true
 version: 1
 formatters:
     simple:
-        format: '{asctime} - {name} - {levelname} - {message}'
+        format: '{asctime} - {process}/{thread} - {name} - {levelname} - {message}'
         style: '{'
 
 handlers:
@@ -31,7 +31,7 @@ loggers:
         propagate: no
 
     debellator.core:
-        level: INFO
+        level: DEBUG
         handlers: [console, logfile]
         propagate: no
 
@@ -41,4 +41,3 @@ loggers:
 
     debellator.evolve.specs:
         level: INFO
-
