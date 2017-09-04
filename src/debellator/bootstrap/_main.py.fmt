@@ -3,11 +3,11 @@
 import sys, imp, base64, zlib
 # just a msgpack fallback if no venv is used or msgpack somehow failed to install
 try:
-    import msgpack
+    import umsgpack
 except ImportError:
-    sys.modules["msgpack"] = msgpack = imp.new_module("msgpack")
+    sys.modules["umsgpack"] = umsgpack = imp.new_module("umsgpack")
     c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec")
-    exec(c, msgpack.__dict__)
+    exec(c, umsgpack.__dict__)
 
 sys.modules["debellator"] = debellator = imp.new_module("debellator")
 setattr(debellator, "__path__", [])

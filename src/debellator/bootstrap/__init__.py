@@ -5,14 +5,9 @@ import types
 import zlib
 
 import pkg_resources
+import umsgpack
 
 from .. import core
-try:
-    # FIXME API seems different
-    import umsgpack_ as message_pack
-except ImportError:
-    core.log.warning("umsgpack not available")
-    from . import message_pack
 
 
 VENV_DEFAULT = '~/.debellator'
@@ -43,8 +38,8 @@ class Bootstrap(dict):
 
         self.code = base64.b64encode(zlib.compress(code_source, 9)).decode(),
 
-        msgpack_code_source = inspect.getsource(message_pack).encode()
-        self.msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(message_pack))
+        msgpack_code_source = inspect.getsource(umsgpack).encode()
+        self.msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(umsgpack))
         self.msgpack_code = base64.b64encode(zlib.compress(msgpack_code_source, 9)).decode(),
 
     def formatsourcelines(self, lines):

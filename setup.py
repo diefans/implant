@@ -113,7 +113,7 @@ setup(
     install_requires=[
         'click',
         'pyyaml',
-        'msgpack-python',
+        'u-msgpack-python',
         'zope.component',
     ],
 

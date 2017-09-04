@@ -19,7 +19,7 @@ def event_loop():
 @pytest.mark.asyncio
 async def test_echo(event_loop):
     import asyncio
-    from debellator import core, master, connect
+    from debellator import core, connect
 
     connector = connect.Ssh()
 
@@ -28,10 +28,10 @@ async def test_echo(event_loop):
     # setup launch specific tasks
     com_remote = asyncio.ensure_future(remote.communicate())
     try:
-        com_import = core.InvokeImport(fullname='debellator.plugins.core')
+        com_import = core.InvokeImport(fullname='debellator.commands')
         result = await remote.execute(com_import)
 
-        com_echo = core.Command['debellator.core:Echo'](foo='bar')
+        com_echo = core.Command['debellator.commands:Echo'](foo='bar')
         result = await remote.execute(com_echo)
 
         assert result['remote_self']['foo'] == 'bar'
@@ -39,5 +39,3 @@ async def test_echo(event_loop):
     finally:
         com_remote.cancel()
         await com_remote
-        await remote.send_shutdown()
-        await remote.wait()

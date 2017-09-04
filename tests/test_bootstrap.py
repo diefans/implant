@@ -1,3 +1,4 @@
+from unittest import mock
 import pytest
 
 
@@ -16,30 +17,31 @@ import pytest
         'site.addsitedir(entry)\n',
         'pkg_resources.working_set.add_entry(entry)\n',
         'try:\n',
-        '    import msgpack\n',
+        '    import umsgpack\n',
         'except ImportError:\n',
         '    import pip\n',
-        '    pip.main(["install", "--prefix", venv_path, "-q", "msgpack-python"])\n'
+        '    pip.main(["install", "--prefix", venv_path, "-q", "u-msgpack-python"])\n'
     ], '(\'gaR2ZW52ww==\',)')
 ])
-def test_bootstrap_iter(with_venv, venv_lines, options):
+@mock.patch('debellator.bootstrap.inspect')
+def test_bootstrap_iter(inspect, with_venv, venv_lines, options):
     from debellator import bootstrap
     import zlib
     import base64
-    import inspect
 
-    msgpack_code_source = inspect.getsource(bootstrap.message_pack).encode()
-    msgpack_code = base64.b64encode(zlib.compress(msgpack_code_source, 9)).decode(),
+    inspect.getsource.return_value = 'umsgpack-code'
+    inspect.getsourcefile.return_value = 'umsgpack-source-file'
+    msgpack_code = base64.b64encode(zlib.compress(b'umsgpack-code', 9)).decode(),
 
     lines = [
         'import sys, imp, base64, zlib\n',
         'try:\n',
-        '    import msgpack\n',
+        '    import umsgpack\n',
         'except ImportError:\n',
-        '    sys.modules["msgpack"] = msgpack = imp.new_module("msgpack")\n',
+        '    sys.modules["umsgpack"] = umsgpack = imp.new_module("umsgpack")\n',
         '    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")),'
-        ' "remote:///home/code/da/dbltr/src/debellator/bootstrap/message_pack.py", "exec")\n'.format(**locals()),
-        '    exec(c, msgpack.__dict__)\n',
+        ' "remote://umsgpack-source-file", "exec")\n'.format(**locals()),
+        '    exec(c, umsgpack.__dict__)\n',
         'sys.modules["debellator"] = debellator = imp.new_module("debellator")\n',
         'setattr(debellator, "__path__", [])\n',
         'sys.modules["debellator.core"] = core = imp.new_module("debellator.core")\n',
@@ -47,7 +49,8 @@ def test_bootstrap_iter(with_venv, venv_lines, options):
         'c = compile(zlib.decompress(base64.b64decode(b"(\'eNpLLC5OLSpRCCkqTQUAGlIEUw==\',)")),'
         ' "remote-string://", "exec", dont_inherit=True)\n',
         'exec(c, core.__dict__)\n',
-        'core.main(**core.decode(base64.b64decode(b"{options}")))\n'.format(**locals())
+        'core.main(**core.decode(base64.b64decode(b"{options}")))\n'.format(
+            msgpack_code=msgpack_code, options=options)
     ]
 
     bs = bootstrap.Bootstrap(b'assert True', options={'venv': with_venv})

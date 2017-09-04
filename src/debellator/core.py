@@ -1,6 +1,6 @@
 """The core module is transfered to the remote process and will bootstrap pipe communication.
 
-It creates default io queues and dispatches commands accordingly.
+It creates default channels and dispatches commands accordingly.
 
 """  # pylint: disable=C0302
 import abc
@@ -14,10 +14,10 @@ import importlib.abc
 import importlib.machinery
 import importlib._bootstrap_external
 import inspect
+import io
 import logging
 import logging.config
 import os
-import signal
 import struct
 import sys
 import threading
@@ -26,130 +26,206 @@ import traceback
 import weakref
 import zlib
 
-import msgpack
+import umsgpack
 
 log = logging.getLogger(__name__)
 
 
-class MsgpackEncoder(metaclass=abc.ABCMeta):
+class MsgpackMeta(abc.ABCMeta):
+    ext_handlers_encode = {}
+    ext_handlers_decode = {}
+    custom_encoders = {}
+
+    def register(cls, data_type=None, ext_code=None):
+        def decorator(handler):
+            if not issubclass(handler, Msgpack):
+                raise TypeError("Msgpack handler must be a subclass"
+                                " of abstract `Msgpack` class: {}".format(handler))
+            if data_type is None:
+                _data_type = handler
+            else:
+                _data_type = data_type
+
+            if ext_code is not None:
+                cls.ext_handlers_encode[_data_type] = \
+                    lambda data: umsgpack.Ext(ext_code, handler.__msgpack_encode__(data, _data_type))
+                cls.ext_handlers_decode[ext_code] = \
+                    lambda ext: handler.__msgpack_decode__(ext.data, _data_type)
+            else:
+                cls.custom_encoders[_data_type] = handler
+            return handler
+        return decorator
+
+    def _pack(cls, obj, fp, **options):
+        # pylint: disable=W0212
+        global umsgpack
+
+        ext_handlers = options.get("ext_handlers")
+        # lookup mro except object for matching handler
+        ext_handler_match = next((
+            obj_cls for obj_cls in obj.__class__.__mro__[:-1]
+            if obj_cls in ext_handlers
+        ), None) if ext_handlers else None
+
+        if obj is None:
+            umsgpack._pack_nil(obj, fp, options)
+        elif ext_handler_match:
+            umsgpack._pack_ext(ext_handlers[ext_handler_match](obj), fp, options)
+        elif isinstance(obj, bool):
+            umsgpack._pack_boolean(obj, fp, options)
+        elif isinstance(obj, int):
+            umsgpack._pack_integer(obj, fp, options)
+        elif isinstance(obj, float):
+            umsgpack._pack_float(obj, fp, options)
+        elif umsgpack.compatibility and isinstance(obj, str):
+            umsgpack._pack_oldspec_raw(obj.encode('utf-8'), fp, options)
+        elif umsgpack.compatibility and isinstance(obj, bytes):
+            umsgpack._pack_oldspec_raw(obj, fp, options)
+        elif isinstance(obj, str):
+            umsgpack._pack_string(obj, fp, options)
+        elif isinstance(obj, bytes):
+            umsgpack._pack_binary(obj, fp, options)
+        elif isinstance(obj, (tuple, list)):
+            umsgpack._pack_array(obj, fp, options)
+        elif isinstance(obj, dict):
+            umsgpack._pack_map(obj, fp, options)
+        elif isinstance(obj, umsgpack.Ext):
+            umsgpack._pack_ext(obj, fp, options)
+        # default fallback
+        elif ext_handlers and object in ext_handlers:
+            umsgpack._pack_ext(ext_handlers[object](obj), fp, options)
+        else:
+            raise umsgpack.UnsupportedTypeException(
+                "unsupported type: %s" % str(type(obj)))
+
+    def _packb(cls, obj, **options):
+        fp = io.BytesIO()
+        cls._pack(obj, fp, **options)
+        return fp.getvalue()
+
+    def encode(cls, data):
+        encoded_data = cls._packb(data, ext_handlers=cls.ext_handlers_encode)
+        return encoded_data
+
+    def decode(cls, encoded_data):
+        data = umsgpack.unpackb(encoded_data, ext_handlers=cls.ext_handlers_decode)
+        return data
+
+    def get_custom_encoder(cls, data_type):
+        if issubclass(data_type, Msgpack):
+            return data_type
+
+        # lookup data types for registered encoders
+        for subclass in data_type.__mro__:
+            try:
+                return cls.custom_encoders[subclass]
+            except KeyError:
+                continue
+        return None
+
+
+class Msgpack(metaclass=MsgpackMeta):
 
     """Add msgpack en/decoding to a type."""
 
     @abc.abstractclassmethod
-    def __msgpack_encode__(cls, data, data_type):   # noqa
+    def __msgpack_encode__(cls, data, data_type):
         return None
 
     @abc.abstractclassmethod
-    def __msgpack_decode__(cls, data, data_type):
+    def __msgpack_decode__(cls, encoded_data, data_type):
         return None
 
     @classmethod
     def __subclasshook__(cls, C):
-        if cls is MsgpackEncoder:
+        if cls is Msgpack:
             if any("__msgpack_encode__" in B.__dict__ for B in C.__mro__) \
                     and any("__msgpack_decode__" in B.__dict__ for B in C.__mro__):
                 return True
         return NotImplemented
 
 
-class MsgpackDefaultEncoder(dict):
-
-    """Encode or decode custom objects."""
-
-    def encode(self, data):
-        data_type = type(data)
-        data_module = data_type.__module__
-
-        encoder = data if isinstance(data, MsgpackEncoder) else self._get_encoder(data_type)
-        if encoder:
-            return {
-                '__custom_object__': True,
-                '__module__': data_module,
-                '__type__': data_type.__name__,
-                '__data__': encoder.__msgpack_encode__(data, data_type=data_type)
-            }
-
-        return data
-
-    def decode(self, encoded):
-        if encoded.get('__custom_object__', False):
-            # we have to search the class
-            module = sys.modules.get(encoded['__module__'])
-
-            if not module:
-                # TODO import missing module
-                raise TypeError("The module of the encoded data type is not loaded: {}".format(encoded))
-
-            data_type = getattr(module, encoded['__type__'])
-
-            decoder = data_type if issubclass(data_type, MsgpackEncoder) else self._get_encoder(data_type)
-            decoded = decoder.__msgpack_decode__(encoded['__data__'], data_type=data_type)
-
-            return decoded
-
-        return encoded
-
-    def _get_encoder(self, data_type):
-        # lookup data types for registered encoders
-        for cls in data_type.__mro__:
-            if cls in self:
-                encoder = self[cls]
-                return encoder
-
-        return None
-
-    def register_encoder(self, data_type):
-        def decorator(func):
-            self[data_type] = func
-
-            return func
-
-        return decorator
+encode = Msgpack.encode
+decode = Msgpack.decode
 
 
-msgpack_default_encoder = MsgpackDefaultEncoder()
-
-
-@msgpack_default_encoder.register_encoder(Exception)
-class MsgpackExceptionEncoder(MsgpackEncoder):
-
-    """Encode and decode Exception arguments.
-
-    Traceback and other internals will be lost.
-    """
-
+@Msgpack.register(object, 0x01)
+class CustomEncoder:
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return data.args
+        data_type = type(data)
+        encoder = Msgpack.get_custom_encoder(data_type)
+        if encoder is None:
+            raise TypeError("There is no custom encoder for this type registered: {}".format(data_type))
+
+        wrapped = {
+            'type': data_type.__name__,
+            'module': data_type.__module__,
+            'data': encoder.__msgpack_encode__(data, data_type)
+        }
+        return encode(wrapped)
 
     @classmethod
-    def __msgpack_decode__(cls, encoded, data_type):
-        return data_type(*encoded)
+    def __msgpack_decode__(cls, encoded_data, data_type):
+        wrapped = decode(encoded_data)
+
+        try:
+            module = sys.modules[wrapped['module']]
+        except KeyError:
+            # XXX should we import the module?
+            pass
+
+        data_type = getattr(module, wrapped['type'])
+        encoder = Msgpack.get_custom_encoder(data_type)
+        if encoder is None:
+            raise TypeError("There is no custom encoder for this type registered: {}".format(data_type))
+
+        data = encoder.__msgpack_decode__(wrapped['data'], data_type)
+        return data
 
 
-# TODO FIXME XXX msgpack is not able to preserve tuple type and
-# is also not able to call default hook for tuple
-# so someone has to know in advance that this is a tuple and use use_list=False for that
-def encode_msgpack(data):
-    try:
-        return msgpack.packb(data, default=msgpack_default_encoder.encode, use_bin_type=True, encoding="utf-8")
+@Msgpack.register(tuple, 0x02)
+class TupleEncoder:
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return encode(list(data))
 
-    except:     # noqa
-        log.error("Error packing:\n%s", traceback.format_exc())
-        raise
-
-
-def decode_msgpack(data):
-    try:
-        return msgpack.unpackb(data, object_hook=msgpack_default_encoder.decode, encoding="utf-8")
-
-    except:     # noqa
-        log.error("Error unpacking:\n%s", traceback.format_exc())
-        raise
+    @classmethod
+    def __msgpack_decode__(cls, encoded_data, data_type):
+        return tuple(decode(encoded_data))
 
 
-encode = encode_msgpack
-decode = decode_msgpack
+@Msgpack.register(set, 0x03)
+class SetEncoder:
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return encode(list(data))
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded_data, data_type):
+        return set(decode(encoded_data))
+
+
+@Msgpack.register(Exception, 0x04)
+class ExceptionEncoder:
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return encode(data.args)
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded_data, data_type):
+        return data_type(*decode(encoded_data))
+
+
+@Msgpack.register(StopAsyncIteration, 0x05)
+class StopAsyncIterationEncoder:
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return encode(data.args)
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded_data, data_type):
+        return StopAsyncIteration(*decode(encoded_data))
 
 
 class reify:
@@ -551,8 +627,6 @@ class Channels:
             if buffer:
                 log.warning("Receive buffer was not empty when canceled!")
 
-            log.warning("Receiving canceled")
-
         except EOFError:
             log.info("While waiting for data, we received EOF.")
 
@@ -587,10 +661,7 @@ class Channels:
         """
         uid = Uid()
         encoded_channel_name = channel_name.encode()
-        loop = asyncio.get_event_loop()
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            encoded_data = await loop.run_in_executor(executor, encode, data)
+        encoded_data = encode(data)
 
         log.debug("%s: channel `%s` sends: %s bytes", uid, channel_name, len(encoded_data))
 
@@ -672,15 +743,16 @@ class Channel:
 
         return data
 
-    def stop_iteration(self):       # noqa
-        class context:
-            async def __aenter__(ctx):      # noqa
-                return self
-
-            async def __aexit__(ctx, *args):        # noqa
-                await self.send(StopAsyncIteration())
-
-        return context()
+    async def send_iteration(self, iterable):
+        if isinstance(iterable, collections.abc.AsyncIterable):
+            log.debug("Channel %s sends async iterable: %s", self, iterable)
+            async for value in iterable:
+                await self.send(value)
+        else:
+            log.debug("Channel %s sends iterable: %s", self, iterable)
+            for value in iterable:
+                await self.send(value)
+        await self.send(StopAsyncIteration())
 
 
 def exclusive(fun):
@@ -697,8 +769,14 @@ def exclusive(fun):
     return locked_fun
 
 
-DispatchContext = collections.namedtuple('DispatchContext',
-                                         ('channel', 'execute', 'fqin', 'pending_remote_task'))
+DispatchLocalContext = collections.namedtuple(
+    'DispatchContext',
+    ('channel', 'execute', 'fqin', 'remote_future')
+)
+DispatchRemoteContext = collections.namedtuple(
+    'DispatchContext',
+    ('channel', 'execute', 'fqin', 'pending_remote_task')
+)
 DISPATCHER_CHANNEL_NAME = 'Dispatcher'
 
 
@@ -753,7 +831,7 @@ class Dispatcher:
 
         finally:
             # teardown here
-            for fqin, fut in self.pending_commands.items():
+            for fqin, fut in list(self.pending_commands.items()):
                 log.warning("Teardown pending command: %s, %s", fqin, fut)
                 # XXX maybe do not cancel, just wait
                 # fut.cancel()
@@ -769,18 +847,18 @@ class Dispatcher:
         """
         fqin = command.__class__.create_fqin()
 
-        with self.context(fqin) as context:
-            async with self.remote_future(fqin, command) as future:
-                try:
-                    log.debug("Excute command: %s", command)
-                    # execute local side of command
-                    result = await command.local(context, remote_future=future)
-                    future.result()
-                    return result
+        async with self.remote_future(fqin, command) as future:
+            context = self.local_context(fqin, future)
+            try:
+                log.debug("Excute command: %s", command)
+                # execute local side of command
+                result = await command.local(context)
+                future.result()
+                return result
 
-                except:     # noqa
-                    log.error("Error while executing command: %s\n%s", command, traceback.format_exc())
-                    raise
+            except:     # noqa
+                log.error("Error while executing command: %s\n%s", command, traceback.format_exc())
+                raise
 
     def remote_future(self, fqin, command):        # noqa
         """Create a context for remote command future by sending
@@ -800,21 +878,35 @@ class Dispatcher:
 
         return _context()
 
-    @contextlib.contextmanager
-    def context(self, fqin, pending_remote_task=None):
-        """Create a context to pass to a `Command`s local and remote part.
+    def local_context(self, fqin, remote_future):
+        """Create a local context to pass to a `Command`s local part.
 
         The `Channel` is built via a fully qualified instance name (fqin).
 
         """
         channel = self.io_queues.get_channel(fqin)
-        context = DispatchContext(
+        context = DispatchLocalContext(
+            channel=channel,
+            execute=self.execute,
+            fqin=fqin,
+            remote_future=remote_future
+        )
+        return context
+
+    def remote_context(self, fqin, pending_remote_task):
+        """Create a remote context to pass to a `Command`s remote part.
+
+        The `Channel` is built via a fully qualified instance name (fqin).
+
+        """
+        channel = self.io_queues.get_channel(fqin)
+        context = DispatchRemoteContext(
             channel=channel,
             execute=self.execute,
             fqin=fqin,
             pending_remote_task=pending_remote_task
         )
-        yield context
+        return context
 
     async def execute_remote(self, fqin, command):
         """Execute the remote part of a `Command`.
@@ -827,24 +919,23 @@ class Dispatcher:
         current_task = asyncio.Task.current_task()
         self.pending_remote_tasks.add(current_task)
         log.debug("Starting remote task: %s", fqin)
+        context = self.remote_context(fqin, current_task)
         try:
-            with self.context(fqin, current_task) as context:
-                try:
-                    # execute remote side of command
-                    result = await command.remote(context)
-                    await self.channel.send(DispatchResult(fqin, result=result))
+            # execute remote side of command
+            result = await command.remote(context)
+            await self.channel.send(DispatchResult(fqin, result=result))
 
-                    return result
+            return result
 
-                except asyncio.CancelledError:
-                    log.info("Remote execution canceled")
+        except asyncio.CancelledError:
+            log.info("Remote execution canceled")
 
-                except Exception as ex:
-                    tb = traceback.format_exc()
-                    log.error("traceback:\n%s", tb)
-                    await self.channel.send(DispatchException(fqin, exception=ex, tb=tb))
+        except Exception as ex:
+            tb = traceback.format_exc()
+            log.error("traceback:\n%s", tb)
+            await self.channel.send(DispatchException(fqin, exception=ex, tb=tb))
+            raise
 
-                    raise
         finally:
             log.debug("Finalizing remote task: %s", fqin)
             self.pending_remote_tasks.remove(current_task)
@@ -881,6 +972,7 @@ class _CommandMeta(type):
         return command_class
 
 
+@Msgpack.register(ext_code=0x06)
 class Command(dict, metaclass=_CommandMeta):
 
     """Common ancestor of all Commands."""
@@ -892,6 +984,14 @@ class Command(dict, metaclass=_CommandMeta):
     def __repr__(self):
         _repr = super().__repr__()
         return "<{self.__class__.command_name} {_repr}>".format(**locals())
+
+    @classmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return encode(dict(data))
+
+    @classmethod
+    def __msgpack_decode__(cls, encoded, data_type):
+        return data_type(decode(encoded))
 
 
 class DispatchMessage:
@@ -905,7 +1005,7 @@ class DispatchMessage:
         return "<{self.__class__.__name__} {self.fqin}>".format(**locals())
 
 
-class DispatchCommand(DispatchMessage, MsgpackEncoder):
+class DispatchCommand(DispatchMessage):
 
     """Arguments for a command dispatch."""
 
@@ -920,17 +1020,17 @@ class DispatchCommand(DispatchMessage, MsgpackEncoder):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return (data.fqin, data.command.__class__.command_name, data.command)
+        return encode((data.fqin, data.command.__class__.command_name, data.command))
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        fqin, command_name, params = encoded
+        fqin, command_name, params = decode(encoded)
         command = Command[command_name]()
         command.update(params)
         return cls(fqin, command)
 
 
-class DispatchException(DispatchMessage, MsgpackEncoder):
+class DispatchException(DispatchMessage):
 
     """Remote execution ended in an exception."""
 
@@ -946,15 +1046,15 @@ class DispatchException(DispatchMessage, MsgpackEncoder):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return (data.fqin, data.exception, data.tb)
+        return encode((data.fqin, data.exception, data.tb))
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        fqin, exc, tb = encoded
+        fqin, exc, tb = decode(encoded)
         return cls(fqin, exc, tb)
 
 
-class DispatchResult(DispatchMessage, MsgpackEncoder):
+class DispatchResult(DispatchMessage):
 
     """The result of a remote execution."""
 
@@ -969,11 +1069,11 @@ class DispatchResult(DispatchMessage, MsgpackEncoder):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return (data.fqin, data.result)
+        return encode((data.fqin, data.result))
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        return cls(*encoded)
+        return cls(*decode(encoded))
 
 
 # events are taken from https://github.com/zopefoundation/zope.event
@@ -1033,9 +1133,9 @@ class NotifyEvent(Command):
         self.dispatch_local = local
         self.event = event
 
-    async def local(self, context, remote_future):
+    async def local(self, context):
         # we wait for remote events to be dispatched first
-        await remote_future
+        await context.remote_future
 
         if self.dispatch_local:
             log.info("Notify local %s", self.event)
@@ -1051,54 +1151,6 @@ class NotifyEvent(Command):
         asyncio.ensure_future(notify_after_pending_command_finalized())
 
 
-class Echo(Command):
-
-    """Demonstrate the basic command API."""
-
-    async def local(self, context, remote_future):
-        # custom protocol
-        # first: receive
-        async with context.channel.stop_iteration():
-            for x in "send to remote":
-                await context.channel.send(x)
-
-        # second: send
-        # py 3.6
-        # from_remote = ''.join([x async for x in context.channel])
-        from_remote = []
-        async for x in context.channel:
-            from_remote.append(x)
-
-        # third: wait for remote to finish
-        remote_result = await remote_future
-
-        result = {
-            'from_remote': ''.join(from_remote),
-        }
-        result.update(remote_result)
-        return result
-
-    async def remote(self, context):
-        # first: send
-        # py 3.6
-        # from_local = ''.join([x async for x in context.channel])
-        from_local = []
-        async for x in context.channel:
-            from_local.append(x)
-
-        # second: receive
-        async with context.channel.stop_iteration():
-            for x in "send to local":
-                await context.channel.send(x)
-
-        # third: return result
-        return {
-            'from_local': ''.join(from_local),
-            'remote_self': self,
-            'pid': os.getpid()
-        }
-
-
 class InvokeImport(Command):
 
     """Invoke an import of a module on the remote side.
@@ -1111,9 +1163,10 @@ class InvokeImport(Command):
 
     """
 
-    async def local(self, context, remote_future):
-        importlib.import_module(self.fullname)
-        result = await remote_future
+    async def local(self, context):
+        module = importlib.import_module(self.fullname)
+        log.debug("Locally module: %s", module)
+        result = await context.remote_future
         return result
 
     @exclusive
@@ -1125,7 +1178,8 @@ class InvokeImport(Command):
             asyncio.set_event_loop(thread_loop)
 
             try:
-                importlib.import_module(self.fullname)
+                module = importlib.import_module(self.fullname)
+                log.debug("Remotelly imported module: %s", module)
 
             except ImportError:
                 log.debug("Error when importing %s:\n%s", self.fullname, traceback.format_exc())
@@ -1142,8 +1196,8 @@ class FindModule(Command):
 
     """Find a module on the remote side."""
 
-    async def local(self, context, remote_future):
-        module_loaded = await remote_future
+    async def local(self, context):
+        module_loaded = await context.remote_future
 
         return module_loaded
 
@@ -1305,37 +1359,7 @@ class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0
         return "<module '{}' (namespace)>".format(module.__name__)
 
 
-async def cancel_pending_tasks(loop):
-    for task in asyncio.Task.all_tasks():
-        if task.done() or task.cancelled():
-            continue
-
-        try:
-            task.cancel()
-            await task
-
-        # try:
-        #     loop.run_until_complete(task)
-
-        except asyncio.CancelledError:
-            pass
-
-
-async def log_tcp_10001():
-    try:
-        reader, writer = await asyncio.open_connection('localhost', 10001)
-
-        while True:
-            msg = await reader.readline()
-
-            log.info("TCP: %s", msg)
-
-    except asyncio.CancelledError:
-        log.info("close tcp log")
-        writer.close()
-
-
-class ShutdownRemoteEvent(MsgpackEncoder):
+class ShutdownRemoteEvent:
 
     """A Shutdown event."""
 
@@ -1467,17 +1491,11 @@ def main(debug=False, log_config=None, echo=None, **kwargs):
     _setup_logging(loop, debug, log_config)
     log.info(' *** ' * 5)
     log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
-    log.debug("msgpack used: %s", msgpack)
-
 
     try:
         loop.run_until_complete(
-            # run(
-                communicate(loop, echo=echo)
-                # log_tcp_10001()
-            # )
+            communicate(loop, echo=echo)
         )
-        # loop.run_until_complete(cancel_pending_tasks(loop))
         log.info("Finally.")
 
     except asyncio.CancelledError as ex:

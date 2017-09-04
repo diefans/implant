@@ -138,9 +138,8 @@ class Connector(metaclass=abc.ABCMeta):
         return hash(self) == hash(other)
 
     @staticmethod
-    def bootstrap_code(code=None, options=None):
+    def bootstrap_code(code=core, options=None):
         """Create the python bootstrap code."""
-        # we default to our core
         if code is None:
             code = core
         bootstrap_code = str(bootstrap.Bootstrap(code, options))
@@ -188,7 +187,11 @@ class Connector(metaclass=abc.ABCMeta):
             raise RemoteMisbehavesError("Remote does not echo `{}`!".format(echo))
 
         except EOFError:
-            raise RemoteMisbehavesError("Remote closed stdout!")
+            errors = []
+            async for line in remote.stderr:
+                errors.append(line)
+            log.error("Remote close stdout on bootstrap:\n%s", (b''.join(errors)).decode('utf-8'))
+            raise RemoteMisbehavesError("Remote closed stdout!", errors)
 
         log.info("Started remote process: %s", remote)
         return remote

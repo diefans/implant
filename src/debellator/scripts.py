@@ -53,7 +53,7 @@ def cli(ctx, event_loop, debug, log_config):
         # we need to import master lazy because master imports core,
         # which may use exclusive decorator, which tries to get the actual loop,
         # which is only set after running set_event_loop_policy
-        from debellator import master, console
+        from debellator import master
 
         if debug:
             log.info("Enable asyncio debug")
@@ -61,56 +61,8 @@ def cli(ctx, event_loop, debug, log_config):
             asyncio.get_event_loop().set_debug(debug)
 
         master.main(log_config=log_config, debug=debug)
-        # console.main(log_config=log_config, debug=debug)
 
     else:
         if debug:
             asyncio.get_event_loop().set_debug(debug)
             log.setLevel(logging.DEBUG)
-
-
-class EvolveCfg:
-    def __init__(self, root, settings):
-        import yaml
-        self.root = root
-        self.settings = yaml.load(settings) if settings is not None else {}
-
-
-@cli.group()
-@click.option('--root', '-r',
-              default=None,
-              type=click.Path(exists=True, file_okay=False, resolve_path=True),
-              help='Lookup specs in this directory.')
-@click.option('--settings', '-s',
-              default=None,
-              type=click.File(),
-              envvar='SETTINGS')
-@click.pass_context
-def evolve(ctx, root, settings):
-    ctx.obj = EvolveCfg(root, settings)
-
-
-@evolve.command('launch')
-@click.argument('definitions', nargs=-1, required=True)
-@click.pass_obj
-def evolve_launch(cfg, definitions):
-    from debellator import evolve
-
-    evolve.main(
-        definitions=definitions,
-        settings=cfg.settings,
-        root=cfg.root,
-    )
-
-
-@evolve.command('definitions')
-@click.pass_obj
-def evolve_definitions(cfg):
-    from debellator import evolve
-
-    evolve.config.bootstrap(cfg.root)
-    for def_tuple, definition in evolve.config.find_definitions().items():
-        def_name = ':'.join(map(str, def_tuple))
-        click.echo('{def_name} - {type(definition)}'.format(locals()))
-
-

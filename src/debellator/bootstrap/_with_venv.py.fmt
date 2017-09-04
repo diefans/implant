@@ -18,9 +18,9 @@ pkg_resources.working_set.add_entry(entry)
 
 # pip should come from venv now
 try:
-    import msgpack
+    import umsgpack
 except ImportError:
-    # try to install msgpack
+    # try to install umsgpack
     import pip
     # TODO use ssh port forwarding to install via master
-    pip.main(["install", "--prefix", venv_path, "-q", "msgpack-python"])
+    pip.main(["install", "--prefix", venv_path, "-q", "u-msgpack-python"])
