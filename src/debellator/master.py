@@ -7,7 +7,7 @@ import signal
 import sys
 import traceback
 
-from debellator import core, connect
+from debellator import core, connect, commands
 
 log = logging.getLogger(__name__)
 PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'

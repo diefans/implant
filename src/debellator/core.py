@@ -1027,10 +1027,15 @@ class DispatchCommand(DispatchMessage):
         log.info("Dispatch created: %s %s", self.fqin, self.params)
 
     async def __call__(self, dispatcher):
-        command = Command[self.command_name]()
-        command.update(self.params)
+        async def execute():
+            if self.command_module not in sys.modules:
+                await async_import(self.command_module)
+
+            command = Command[self.command_name]()
+            command.update(self.params)
+            await dispatcher.execute_remote(self.fqin, command)
         # schedule remote execution
-        asyncio.ensure_future(dispatcher.execute_remote(self.fqin, command))
+        asyncio.ensure_future(execute())
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -1062,7 +1067,6 @@ class DispatchReady(DispatchMessage):
     def __msgpack_decode__(cls, encoded, data_type):
         fqin = decode(encoded)
         return cls(fqin)
-
 
 
 class DispatchException(DispatchMessage):
