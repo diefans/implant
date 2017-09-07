@@ -72,15 +72,15 @@ def test_command(core):
     assert isinstance(decoded_data, core.Command)
 
 
-def test_dispacth_command(core):
+def test_dispatch_command(core):
     from debellator import commands
     cmd = commands.Echo(foo='bar')
-    data = core.DispatchCommand('fqin', cmd)
+    data = core.DispatchCommand('fqin', *cmd.dispatch_data)
 
     encoded_data = core.encode(data)
     decoded_data = core.decode(encoded_data)
     assert isinstance(decoded_data, core.DispatchCommand)
-    assert (decoded_data.fqin, decoded_data.command) == (data.fqin, data.command)
+    assert decoded_data.__dict__ == data.__dict__
 
 
 def test_stop_async_iteration(core):
