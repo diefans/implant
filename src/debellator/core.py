@@ -1182,7 +1182,6 @@ class NotifyEvent(Command):
 
     async def remote(self, context):
         async def notify_after_pending_command_finalized():
-            # we notify after aknowledgement was sent
             log.debug("Waiting for finalization of remote task: %s", context.fqin)
             await context.pending_remote_task
             log.debug("Notify remote %s", self.event)
