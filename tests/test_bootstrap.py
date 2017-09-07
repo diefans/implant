@@ -46,7 +46,7 @@ def test_bootstrap_iter(inspect, with_venv, venv_lines, options):
         'setattr(debellator, "__path__", [])\n',
         'sys.modules["debellator.core"] = core = imp.new_module("debellator.core")\n',
         'debellator.__dict__["core"] = core\n',
-        'c = compile(zlib.decompress(base64.b64decode(b"(\'eNpLLC5OLSpRCCkqTQUAGlIEUw==\',)")),'
+        'c = compile(zlib.decompress(base64.b64decode(b"eNpLLC5OLSpRCCkqTQUAGlIEUw==")),'
         ' "remote-string://", "exec", dont_inherit=True)\n',
         'exec(c, core.__dict__)\n',
         'core.main(**core.decode(base64.b64decode(b"{options}")))\n'.format(

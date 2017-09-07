@@ -1,6 +1,7 @@
 """Bootstrap of a remote python process."""
 import base64
 import inspect
+import logging
 import types
 import zlib
 
@@ -8,6 +9,9 @@ import pkg_resources
 import umsgpack
 
 from .. import core
+
+
+log = logging.getLogger(__name__)
 
 
 VENV_DEFAULT = '~/.debellator'
@@ -36,7 +40,11 @@ class Bootstrap(dict):
             code_source = code
             self.code_path = 'remote-string://'
 
-        self.code = base64.b64encode(zlib.compress(code_source, 9)).decode(),
+        self.code = base64.b64encode(zlib.compress(code_source, 9)).decode()
+        raw_len = len(code_source)
+        comp_len = len(self.code)
+        log.debug("Code compression ratio of %s -> %s: %.2f%%",
+                  raw_len, comp_len, comp_len * 100 / raw_len)
 
         msgpack_code_source = inspect.getsource(umsgpack).encode()
         self.msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(umsgpack))
