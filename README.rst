@@ -73,9 +73,3 @@ Example
         loop = asyncio.get_event_loop()
         loop.run_until_complete(remote_tasks())
         loop.close()
-
-
-Motivation
-^^^^^^^^^^
-
-This project is born by my work, insights and frustrations with Ansible, which I think is a total mess in terms of issue management and code in every aspect.
