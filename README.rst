@@ -13,6 +13,8 @@ Features
 
 - adhoc transferable remote procedures
 
+- a `Command` specific `Channel` enables arbitrary protocols between local and remote side
+
 - events
 
 - quite small core
@@ -29,10 +31,18 @@ Limitations
 
 - `Commands` must reside in a module other then `__main__`
 
+- local and remote part of a `Command` share the same module
+
+- at the moment sudo must not ask for password
+
 
 
 Example
 =======
+
+
+General application
+-------------------
 
 .. code:: python
 
@@ -73,3 +83,59 @@ Example
         loop = asyncio.get_event_loop()
         loop.run_until_complete(remote_tasks())
         loop.close()
+
+
+An example Echo Command
+-----------------------
+
+.. code:: python
+
+    import logging
+    import os
+
+    from debellator import core
+
+
+    log = logging.getLogger(__name__)
+
+
+    class Echo(core.Command):
+
+        """Demonstrate the basic command API."""
+
+        async def local(self, context):
+            # custom protocol
+            # first: send
+            await context.channel.send_iteration("send to remote")
+
+            # second: receive
+            from_remote = []
+            async for x in context.channel:
+                from_remote.append(x)
+            log.debug("************ receiving from remote: %s", from_remote)
+
+            # third: wait for remote to finish and return result
+            remote_result = await context.remote_future
+
+            result = {
+                'from_remote': ''.join(from_remote),
+            }
+            result.update(remote_result)
+            return result
+
+        async def remote(self, context):
+            # first: receive
+            from_local = []
+            async for x in context.channel:
+                from_local.append(x)
+            log.debug("************ receiving from local: %s", from_local)
+
+            # second: send
+            await context.channel.send_iteration("send to local")
+
+            # third: return result
+            return {
+                'from_local': ''.join(from_local),
+                'remote_self': self,
+                'pid': os.getpid()
+            }

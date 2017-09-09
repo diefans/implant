@@ -20,16 +20,16 @@ class Echo(core.Command):
 
     async def local(self, context):
         # custom protocol
-        # first: receive
+        # first: send
         await context.channel.send_iteration("send to remote")
 
-        # second: send
+        # second: receive
         from_remote = []
         async for x in context.channel:
             from_remote.append(x)
         log.debug("************ receiving from remote: %s", from_remote)
 
-        # third: wait for remote to finish
+        # third: wait for remote to finish and return result
         remote_result = await context.remote_future
 
         result = {
@@ -39,13 +39,13 @@ class Echo(core.Command):
         return result
 
     async def remote(self, context):
-        # first: send
+        # first: receive
         from_local = []
         async for x in context.channel:
             from_local.append(x)
         log.debug("************ receiving from local: %s", from_local)
 
-        # second: receive
+        # second: send
         await context.channel.send_iteration("send to local")
 
         # third: return result
