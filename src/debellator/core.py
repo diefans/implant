@@ -972,7 +972,7 @@ class _CommandMeta(type):
         return command_class
 
 
-@Msgpack.register(ext_code=0x06)
+@Msgpack.register()
 class Command(dict, metaclass=_CommandMeta):
 
     """Common ancestor of all Commands."""
@@ -987,11 +987,11 @@ class Command(dict, metaclass=_CommandMeta):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode(dict(data))
+        return dict(data)
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        return data_type(decode(encoded))
+        return data_type(encoded)
 
     @property
     def dispatch_data(self):
