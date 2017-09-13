@@ -18,6 +18,8 @@ class Echo(core.Command):
 
     """Demonstrate the basic command API."""
 
+    data = core.Parameter(default='ping', description='Meaningful data.')
+
     async def local(self, context):
         # custom protocol
         # first: send
@@ -33,6 +35,7 @@ class Echo(core.Command):
         remote_result = await context.remote_future
 
         result = {
+            'local_data': self.data,
             'from_remote': ''.join(from_remote),
         }
         result.update(remote_result)
@@ -51,8 +54,8 @@ class Echo(core.Command):
         # third: return result
         return {
             'from_local': ''.join(from_local),
-            'remote_self': self,
-            'pid': os.getpid()
+            'remote_data': self.data,
+            'remote_pid': os.getpid()
         }
 
 
@@ -67,11 +70,12 @@ class SystemLoad(core.Command):
 
 
 class Copy(core.Command):
-    def __init__(self, src, dest):
-        super(Copy, self).__init__(src=src, dest=dest)
 
-        assert self.src
-        assert self.dest
+    src = core.Parameter(description='Source file at local side.')
+    dest = core.Parameter(description='Desatination file at remote side.')
+
+    def __init__(self, *args, **kwargs):
+        super(Copy, self).__init__(*args, **kwargs)
 
         self.executor = concurrent.futures.ThreadPoolExecutor()
         self.loop = asyncio.get_event_loop()

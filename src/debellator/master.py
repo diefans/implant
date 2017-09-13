@@ -33,9 +33,9 @@ def parse_command(line):
 
 async def _execute_command(io_queues, line):
     default_lines = {
-        b'e\n': (b'debellator.commands:Echo foo=bar bar=123\n', {}),
+        b'e\n': (b'debellator.commands:Echo data=bar\n', {}),
         b'i\n': (b'debellator.core:InvokeImport fullname=debellator.commands\n', {}),
-        b'\n': (b'debellator.commands:Echo foo=bar bar=123\n', {}),
+        b'\n': (b'debellator.commands:Echo data=bar\n', {}),
     }
 
     if line in default_lines:

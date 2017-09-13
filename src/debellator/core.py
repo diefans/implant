@@ -949,9 +949,31 @@ class _CommandMeta(type):
         """Create Command class.
 
         Add command_name as __module__:__name__
+        Collect parameters
         """
         dct['command_name'] = ':'.join((dct['__module__'], dct['__qualname__']))
+        dct['parameters'] = {name: attr for name, attr in dct.items() if isinstance(attr, Parameter)}
+
+        # check for remote outsourcing
+        if mcs.base is not None:
+            try:
+                remote = dct['remote']
+            except KeyError:
+                raise TypeError("Command must define a remote,"
+                                " either as a method or as a dotted name pointing to another class.")
+
+            if isinstance(remote, str):
+                dct['_remote_module'], dct['_remote_class'] = remote.rsplit('.', 1)
+
+            else:
+                dct['_remote_module'], dct['_remote_class'] = dct['__module__'], dct['__qualname__']
+
         cls = type.__new__(mcs, name, bases, dct)
+
+        # set parameter names in python < 3.6
+        if sys.version_info < (3, 6):
+            for attr_name, parameter in cls.parameters.items():
+                parameter.__set_name__(cls, attr_name)
 
         if mcs.base is None:
             mcs.base = cls
@@ -963,7 +985,6 @@ class _CommandMeta(type):
 
     def create_fqin(cls):
         uid = Uid()
-
         fqin = '/'.join(map(str, (cls.command_name, uid)))
         return fqin
 
@@ -972,26 +993,56 @@ class _CommandMeta(type):
         return command_class
 
 
-@Msgpack.register()
+class NoDefault:
+    pass
+
+
+class Parameter:
+
+    """Define a `Command` parameter."""
+
+    def __init__(self, *, default=NoDefault, description=None):
+        self.name = None
+        self.default = default
+        self.description = description
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        try:
+            return instance.__dict__[self.name]
+        except KeyError:
+            if self.default is NoDefault:
+                raise AttributeError("The Parameter has no default value "
+                                     "and another value was not assigned yet: {}".format(self.name))
+            return self.default
+
+    def __set__(self, instance, value):
+        instance.__dict__[self.name] = value
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+
 class Command(dict, metaclass=_CommandMeta):
 
     """Common ancestor of all Commands."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **parameters):
         self.__dict__ = self
-        super().__init__(*args, **kwargs)
+        super().__init__()
+        for name, value in parameters.items():
+            setattr(self, name, value)
+
+    def __iter__(self):
+        from pdb import set_trace; set_trace()       # XXX BREAKPOINT
+
+        return iter((name, getattr(self, name)) for name in self.__class__.parameters)
 
     def __repr__(self):
         _repr = super().__repr__()
-        return "<{self.__class__.command_name} {_repr}>".format(**locals())
-
-    @classmethod
-    def __msgpack_encode__(cls, data, data_type):
-        return dict(data)
-
-    @classmethod
-    def __msgpack_decode__(cls, encoded, data_type):
-        return data_type(encoded)
+        command_name = self.__class__.command_name
+        return "<{command_name} {_repr}>".format(command_name=command_name, _repr=_repr)
 
     @property
     def dispatch_data(self):
@@ -1162,15 +1213,8 @@ class NotifyEvent(Command):
 
     """
 
-    def __init__(self, event=None, local=False):
-        """Initialize NotifyEvent command.
-
-        :param event: the event instance, which has to be de/encodable via message pack
-        :param local: if True, the local side will also be notified
-        """
-        super().__init__()
-        self.dispatch_local = local
-        self.event = event
+    event = Parameter(default=None, description='the event instance, which has to be de/encodable via message pack')
+    dispatch_local = Parameter(default=False, description='if True, the local side will also be notified')
 
     async def local(self, context):
         # we wait for remote events to be dispatched first
@@ -1227,6 +1271,8 @@ class InvokeImport(Command):
 
     """
 
+    fullname = Parameter(description='The full module name to be imported')
+
     async def local(self, context):
         module = importlib.import_module(self.fullname)
         log.debug("Locally module: %s", module)
@@ -1241,6 +1287,8 @@ class InvokeImport(Command):
 class FindModule(Command):
 
     """Find a module on the remote side."""
+
+    fullname = Parameter(description='The full module name to find.')
 
     async def local(self, context):
         module_loaded = await context.remote_future
@@ -1284,7 +1332,7 @@ class FindModule(Command):
         return filename
 
     async def remote(self, context):
-        module = sys.modules.get(self.module_name)
+        module = sys.modules.get(self.fullname)
 
         if module:
             is_namespace = self._is_namespace(module)
@@ -1292,7 +1340,7 @@ class FindModule(Command):
 
             log.debug("module found: %s", module)
             remote_module_data = {
-                'name': self.module_name,
+                'name': self.fullname,
                 'is_namespace': is_namespace,
                 'is_package': is_package
             }
@@ -1305,7 +1353,7 @@ class FindModule(Command):
 
             return remote_module_data
         else:
-            log.warning('Module not loaded: %s', self.module_name)
+            log.warning('Module not loaded: %s', self.fullname)
             return None
 
 
@@ -1330,7 +1378,7 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         log.debug("Module lookup: %s", module_name)
 
         future = asyncio.run_coroutine_threadsafe(
-            self.dispatcher.execute(FindModule(module_name=module_name)),
+            self.dispatcher.execute(FindModule(fullname=module_name)),
             loop=self.main_loop
         )
         module_data = future.result()

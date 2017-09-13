@@ -64,7 +64,7 @@ class Remote:
         if self.returncode is None:
             log.info("Send shutdown: %s", self)
             shutdown_event = core.ShutdownRemoteEvent()
-            event = self.execute(core.NotifyEvent(shutdown_event))
+            event = self.execute(core.NotifyEvent(event=shutdown_event))
             await event
 
     async def execute(self, command):
@@ -96,7 +96,7 @@ class Remote:
                 log.info("Remote communication cancelled.")
                 log.info("Send shutdown: %s", self)
                 shutdown_event = core.ShutdownRemoteEvent()
-                event = self.execute(core.NotifyEvent(shutdown_event))
+                event = self.execute(core.NotifyEvent(event=shutdown_event))
                 await event
                 # await self.send_shutdown()
 
