@@ -45,8 +45,7 @@ async def _execute_command(io_queues, line):
     log.info("sending: %s %s", command_name, params)
 
     try:
-        cmd = core.Command.commands[command_name](**params)
-        result = await io_queues.execute(cmd)
+        result = await io_queues.execute(command_name, **params)
 
     except Exception as ex:     # noqa
         log.error("Error:\n%s", traceback.format_exc())
@@ -61,89 +60,85 @@ async def log_remote_stderr(remote):
         log.debug("\tRemote #%s: %s", remote.pid, line[:-1].decode())
 
 
-async def feed_stdin_to_remotes(**options):
-    current_task = asyncio.Task.current_task()
-    asyncio.get_event_loop().add_signal_handler(signal.SIGINT, current_task.cancel)
-
-    connectors = {
-        connect.Local(): {
-            'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-        },
-        connect.Ssh(hostname='localhost'): {
-            'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-        },
-        connect.Lxd(
-            container='zesty',
-            hostname='localhost'
-        ): {
-            'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
-        },
-    }
-
-    remotes = {}
-    remote_error_logs = set()
-
-    for connector, default_args in connectors.items():
-        if remotes.get(connector, None) is not None:
-            log.warning('Process for %s already launched! Skipping...', connector)
-            continue
-        remote = await connector.launch(
-            options=options, **default_args
-        )
-        fut_remote = asyncio.ensure_future(
-            remote.communicate()
-        )
-        remotes[connector] = (remote, fut_remote)
-
-        remote_error_logs.add(asyncio.ensure_future(log_remote_stderr(remote)))
-
-    try:
-        async with core.Incomming(pipe=sys.stdin) as reader:
-            while True:
-                line = await reader.readline()
-
-                if line == b'':
-                    break
-
-                result = await asyncio.gather(
-                    *(_execute_command(remote, line) for remote, _ in remotes.values())
-                )
-
-                print("< {}\n >".format(result), end="")
-
-    except asyncio.CancelledError:
-        log.info("Terminating...")
-
-        for remote, fut_remote in remotes.values():
-            fut_remote.cancel()
-            returncode = await fut_remote
-            log.info("Remote %s exited with: %s", remote, returncode)
-
-        for remote_error_log in remote_error_logs:
-            remote_error_log.cancel()
-            await remote_error_log
+def log_signal():
+    log.debug("signal")
 
 
-async def serve_tcp_10000(reader, writer):
-    try:
-        while True:
-            writer.write(b"Hello World\n")
-            await asyncio.sleep(1)
+class Console:
+    def __init__(self, *, loop=None, **options):
+        self.loop = loop if loop is not None else asyncio.get_event_loop()
+        self.options = options
+        self.connectors = {
+            # connect.Local(): {
+            #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+            # },
+            # connect.Ssh(hostname='localhost'): {
+            #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+            # },
+            connect.Lxd(
+                container='zesty',
+                hostname='localhost'
+            ): {
+                'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
+            },
+        }
 
-    except asyncio.CancelledError:
-        writer.close()
+    async def connect(self):
+        remotes = {}
+        for connector, default_args in self.connectors.items():
+            if remotes.get(connector, None) is not None:
+                log.warning('Process for %s already launched! Skipping...', connector)
+                continue
+            remote = await connector.launch(
+                options=self.options, **default_args
+            )
+            fut_remote = asyncio.ensure_future(remote.communicate(), loop=self.loop)
+            error_log = asyncio.ensure_future(log_remote_stderr(remote), loop=self.loop)
+            remotes[connector] = (remote, fut_remote, error_log)
 
+        return remotes
 
-async def print_debug(loop):
-    while True:
-        print(chr(27) + "[2J")  # clear screen
-        loop.print_debug_info()
-        await asyncio.sleep(0.5, loop=loop)
+    async def run(self):
+        remotes = await self.connect()
+
+        feeder = asyncio.ensure_future(self.feed_stdin_to_remotes(remotes), loop=self.loop)
+        # our real SIGINT handler
+        self.loop.add_signal_handler(signal.SIGINT, feeder.cancel)
+        await feeder
+
+    async def feed_stdin_to_remotes(self, remotes):
+        try:
+            # asyncio.get_event_loop().add_signal_handler(signal.SIGINT, current_task.cancel)
+            async with core.Incomming(pipe=sys.stdin, loop=self.loop) as reader:
+                while True:
+                    line = await reader.readline()
+
+                    if line == b'':
+                        break
+
+                    result = await asyncio.gather(
+                        *(_execute_command(remote, line) for remote, *_ in remotes.values()),
+                        loop=self.loop
+                    )
+                    print("< {}\n >".format(result), end="")
+
+        except asyncio.CancelledError:
+            log.info("Terminating...")
+            for remote, fut_remote, error_log in remotes.values():
+                fut_remote.cancel()
+                returncode = await fut_remote
+                log.info("Remote %s exited with: %s", remote, returncode)
+                error_log.cancel()
+                await error_log
 
 
 def main(debug=False, log_config=None):
-
     loop = asyncio.get_event_loop()
+    # replace existing signal handler with noop as long as our remotes are not fully running
+    # otherwise cancellation of process startup will lead to orphaned remote processes
+    def noop():
+        pass
+    loop.add_signal_handler(signal.SIGINT, noop)
 
     options = {
         'debug': debug,
@@ -156,9 +151,10 @@ def main(debug=False, log_config=None):
     if debug:
         log.setLevel(logging.DEBUG)
 
+    console = Console(loop=loop, **options)
     try:
         loop.run_until_complete(
-            feed_stdin_to_remotes(**options),
+            console.run(),
         )
 
     except Exception as ex:

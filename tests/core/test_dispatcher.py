@@ -28,13 +28,10 @@ async def test_echo(event_loop):
     # setup launch specific tasks
     com_remote = asyncio.ensure_future(remote.communicate())
     try:
-        com_import = core.InvokeImport(fullname='debellator.commands')
-        result = await remote.execute(com_import)
+        result = await remote.execute(core.InvokeImport, fullname='debellator.commands')
+        result = await remote.execute('debellator.commands:Echo', data='foobar')
 
-        com_echo = core.Command['debellator.commands:Echo'](foo='bar')
-        result = await remote.execute(com_echo)
-
-        assert result['remote_self']['foo'] == 'bar'
+        assert result['remote_data'] == 'foobar'
 
     finally:
         com_remote.cancel()

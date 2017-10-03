@@ -22,7 +22,8 @@ class Remote:
 
     """A remote process."""
 
-    def __init__(self, transport, protocol):
+    def __init__(self, transport, protocol, *, loop=None):
+        self.loop = loop if loop is None else asyncio.get_event_loop()
         self._transport = transport
         self._protocol = protocol
         self.stdin = protocol.stdin
@@ -30,10 +31,10 @@ class Remote:
         self.stderr = protocol.stderr
         self.pid = transport.get_pid()
 
-        self.io_queues = core.Channels(reader=protocol.stdout, writer=protocol.stdin)
-        self.dispatcher = core.Dispatcher(self.io_queues)
+        self.io_queues = core.Channels(reader=protocol.stdout, writer=protocol.stdin, loop=self.loop)
+        self.dispatcher = core.Dispatcher(self.io_queues, loop=self.loop)
 
-        self._lck_communicate = asyncio.Lock()
+        self._lck_communicate = asyncio.Lock(loop=self.loop)
 
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, self.pid)
@@ -55,24 +56,13 @@ class Remote:
     def kill(self):
         self._transport.kill()
 
-    async def send_shutdown(self):
-        """Send a `ShutdownRemoteEvent` to shutdown the remote process.
-
-        It also waits for the process to finish.
-
-        """
-        if self.returncode is None:
-            log.info("Send shutdown: %s", self)
-            shutdown_event = core.ShutdownRemoteEvent()
-            event = self.execute(core.NotifyEvent(event=shutdown_event))
-            await event
-
-    async def execute(self, command):
-        return await self.dispatcher.execute(command)
+    async def execute(self, *args, **kwargs):
+        # forward to dispatcher
+        return await self.dispatcher.execute(*args, **kwargs)
 
     async def communicate(self):
         async with self._lck_communicate:
-            never_ending = asyncio.Future()
+            never_ending = asyncio.Future(loop=self.loop)
 
             async def enqueue():
                 try:
@@ -86,8 +76,8 @@ class Remote:
                 except Exception as ex:
                     never_ending.set_exception(ex)
 
-            fut_enqueue = asyncio.ensure_future(enqueue())
-            fut_dispatch = asyncio.ensure_future(dispatch())
+            fut_enqueue = asyncio.ensure_future(enqueue(), loop=self.loop)
+            fut_dispatch = asyncio.ensure_future(dispatch(), loop=self.loop)
 
             try:
                 result = await never_ending
@@ -96,9 +86,8 @@ class Remote:
                 log.info("Remote communication cancelled.")
                 log.info("Send shutdown: %s", self)
                 shutdown_event = core.ShutdownRemoteEvent()
-                event = self.execute(core.NotifyEvent(event=shutdown_event))
+                event = self.execute(core.NotifyEvent, event=shutdown_event)
                 await event
-                # await self.send_shutdown()
 
                 fut_dispatch.cancel()
                 await fut_dispatch
@@ -125,11 +114,18 @@ class Remote:
                 return self.returncode
 
 
-class Connector(metaclass=abc.ABCMeta):
+class Connector:
+    pass
+
+
+class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
 
     """A `Connector` uniquely defines a remote target."""
 
     __slots__ = ()
+
+    def __init__(self, *, loop=None):
+        self.loop = loop if loop is None else asyncio.get_event_loop()
 
     def __hash__(self):
         return hash(frozenset(map(lambda k: (k, getattr(self, k)), self.__slots__)))
@@ -174,7 +170,7 @@ class Connector(metaclass=abc.ABCMeta):
         )
         log.debug("Connector arguments: %s", ' '.join(command_args))
 
-        remote = await create_remote(*command_args, bootstrap_code, **kwargs)
+        remote = await create_subprocess_remote(*command_args, bootstrap_code, loop=self.loop, **kwargs)
 
         # TODO protocol needs improvement
         # some kind of a handshake, which is independent of sending echo via process options
@@ -200,7 +196,7 @@ class Connector(metaclass=abc.ABCMeta):
 _DEFAULT_LIMIT = 2 ** 16
 
 
-async def create_remote(program, *args, loop=None, limit=_DEFAULT_LIMIT, **kwds):
+async def create_subprocess_remote(program, *args, loop=None, limit=_DEFAULT_LIMIT, **kwds):
     if loop is None:
         loop = asyncio.events.get_event_loop()
 
@@ -223,13 +219,14 @@ async def create_remote(program, *args, loop=None, limit=_DEFAULT_LIMIT, **kwds)
     return Remote(transport, protocol)
 
 
-class Local(Connector):
+class Local(SubprocessConnector):
 
     """A `Connector` to a local python process."""
 
     __slots__ = ('sudo',)
 
-    def __init__(self, *, sudo=None):
+    def __init__(self, *, sudo=None, loop=None):
+        super().__init__(loop=loop)
         self.sudo = sudo
 
     def arguments(self, *, code=None, options=None, python_bin=sys.executable):
@@ -254,8 +251,8 @@ class Ssh(Local):
 
     __slots__ = ('sudo', 'hostname', 'user')
 
-    def __init__(self, *, hostname=None, user=None, sudo=None):
-        super().__init__(sudo=sudo)
+    def __init__(self, *, hostname=None, user=None, sudo=None, loop=None):
+        super().__init__(sudo=sudo, loop=loop)
         self.hostname = hostname
         self.user = user
 
@@ -291,8 +288,8 @@ class Lxd(Ssh):
 
     __slots__ = ('sudo', 'hostname', 'user', 'container')
 
-    def __init__(self, *, container, hostname=None, user=None, sudo=None):
-        super().__init__(hostname=hostname, user=user, sudo=sudo)
+    def __init__(self, *, container, hostname=None, user=None, sudo=None, loop=None):
+        super().__init__(hostname=hostname, user=user, sudo=sudo, loop=loop)
         self.container = container
 
     def arguments(self, *, code=None, options=None, python_bin=sys.executable):
