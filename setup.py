@@ -110,12 +110,10 @@ setup(
         ],
     },
 
-    install_requires=[
-        'click',
-        'pyyaml',
-        'u-msgpack-python',
-        'zope.component',
-    ],
+    install_requires=read('requirements.txt').split('\n'),
+    extras_require={
+        'dev': read('requirements-dev.txt').split('\n')
+    },
 
     tests_require=['tox'],
     cmdclass={'test': Tox},

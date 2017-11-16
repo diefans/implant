@@ -1,0 +1,4 @@
+click
+pyyaml
+u-msgpack-python
+zope.component

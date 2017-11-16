@@ -1,0 +1,13 @@
+pytest
+pytest-asyncio
+pytest-xdist
+pytest-sugar
+pytest-random
+pytest-cov
+pytest-catchlog
+pylama
+pylama-pylint
+pycodestyle
+pydocstyle
+radon
+isort
