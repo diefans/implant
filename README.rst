@@ -104,6 +104,10 @@ An example Echo Command
         """Demonstrate the basic command API."""
 
         async def local(self, context):
+            """The local side of the RPC.
+
+               :param context: :py:obj:`debellator.core.DispatchLocalContext`
+            """
             # custom protocol
             # first: send
             await context.channel.send_iteration("send to remote")
@@ -124,6 +128,10 @@ An example Echo Command
             return result
 
         async def remote(self, context):
+            """The remote side of the RPC.
+
+               :param context: :py:obj:`debellator.core.DispatchRemoteContext`
+            """
             # first: receive
             from_local = []
             async for x in context.channel:
