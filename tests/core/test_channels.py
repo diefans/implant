@@ -92,11 +92,11 @@ async def test_communicate(event_loop):
                     # parallel send
                     t1 = time.time()
                     await asyncio.gather(
-                        c.send('1' * 100000),
-                        c.send('2' * 100000),
-                        c.send('3' * 100000),
-                        c.send('4' * 100000),
-                        c.send('5' * 100000),
+                        c.send('1'),
+                        c.send('2'),
+                        c.send('3'),
+                        c.send('4'),
+                        c.send('5'),
                     )
 
                     msgs = []

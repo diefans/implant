@@ -112,8 +112,13 @@ setup(
 
     install_requires=read('requirements.txt').split('\n'),
     extras_require={
-        'dev': read('requirements-dev.txt').split('\n')
+        'dev': read('requirements-dev.txt').split('\n'),
+        'uvloop': read('requirements-uvloop.txt').split('\n'),
+        'tokio': read('requirements-tokio.txt').split('\n'),
     },
+    dependency_links=[
+        'git+https://github.com/PyO3/tokio#egg=tokio-0.99.0'
+    ],
 
     tests_require=['tox'],
     cmdclass={'test': Tox},

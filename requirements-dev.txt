@@ -5,6 +5,7 @@ pytest-sugar
 pytest-random
 pytest-cov
 pytest-catchlog
+pytest-benchmark
 pylama
 pylama-pylint
 pycodestyle

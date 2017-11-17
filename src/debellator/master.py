@@ -1,14 +1,14 @@
 """Controlles a bunch of remotes."""
-
 import asyncio
+import functools
 import logging
+import os
 import pathlib
 import signal
 import sys
 import traceback
 
-from debellator import core, connect, commands
-
+from debellator import commands, connect, core, testing
 
 log = logging.getLogger(__name__)
 PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
@@ -55,33 +55,44 @@ async def _execute_command(io_queues, line):
 
 async def log_remote_stderr(remote):
     # await remote.launched()
-    log.info("Logging remote stderr: %s", remote)
-    async for line in remote.stderr:
-        log.debug("\tRemote #%s: %s", remote.pid, line[:-1].decode())
-
-
-def log_signal():
-    log.debug("signal")
+    if remote.stderr:
+        log.info("Logging remote stderr: %s", remote)
+        async for line in remote.stderr:
+            log.debug("\tRemote #%s: %s", remote.pid, line[:-1].decode())
 
 
 class Console:
-    def __init__(self, *, loop=None, **options):
+    def __init__(self, connectors, *, loop=None, **options):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.options = options
-        self.connectors = {
-            # connect.Local(): {
-            #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-            # },
-            # connect.Ssh(hostname='localhost'): {
-            #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-            # },
-            connect.Lxd(
-                container='zesty',
-                hostname='localhost'
-            ): {
-                'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
-            },
-        }
+        self.connectors = connectors
+
+    async def feed_stdin_to_remotes(self, remotes):
+        try:
+            async with core.Incomming(pipe=sys.stdin, loop=self.loop) as reader:
+                while True:
+                    line = await reader.readline()
+
+                    if line == b'':
+                        break
+
+                    result = await asyncio.gather(
+                        *(_execute_command(remote, line) for remote, *_ in remotes.values()),
+                        loop=self.loop
+                    )
+                    print("< {}\n >".format(result), end="")
+
+        except asyncio.CancelledError:
+            log.info("Terminating...")
+
+        except Exception as ex:
+            log.info(ex)
+
+        for remote, fut_remote, error_log in remotes.values():
+            fut_remote.cancel()
+            await fut_remote
+            error_log.cancel()
+            await error_log
 
     async def connect(self):
         remotes = {}
@@ -99,45 +110,27 @@ class Console:
         return remotes
 
     async def run(self):
+        never_ending = asyncio.Future(loop=self.loop)
+
         remotes = await self.connect()
-
         feeder = asyncio.ensure_future(self.feed_stdin_to_remotes(remotes), loop=self.loop)
-        # our real SIGINT handler
-        self.loop.add_signal_handler(signal.SIGINT, feeder.cancel)
-        await feeder
-
-    async def feed_stdin_to_remotes(self, remotes):
         try:
-            # asyncio.get_event_loop().add_signal_handler(signal.SIGINT, current_task.cancel)
-            async with core.Incomming(pipe=sys.stdin, loop=self.loop) as reader:
-                while True:
-                    line = await reader.readline()
-
-                    if line == b'':
-                        break
-
-                    result = await asyncio.gather(
-                        *(_execute_command(remote, line) for remote, *_ in remotes.values()),
-                        loop=self.loop
-                    )
-                    print("< {}\n >".format(result), end="")
-
+            await never_ending
         except asyncio.CancelledError:
-            log.info("Terminating...")
-            for remote, fut_remote, error_log in remotes.values():
-                fut_remote.cancel()
-                returncode = await fut_remote
-                log.info("Remote %s exited with: %s", remote, returncode)
-                error_log.cancel()
-                await error_log
+            pass
+
+        feeder.cancel()
+        await feeder
 
 
 def main(debug=False, log_config=None):
+    log.info('deballator master process: %s', os.getpid())
     loop = asyncio.get_event_loop()
+
     # replace existing signal handler with noop as long as our remotes are not fully running
     # otherwise cancellation of process startup will lead to orphaned remote processes
     def noop():
-        pass
+        log.error('Noop on signal SIGINT')
     loop.add_signal_handler(signal.SIGINT, noop)
 
     options = {
@@ -151,18 +144,43 @@ def main(debug=False, log_config=None):
     if debug:
         log.setLevel(logging.DEBUG)
 
-    console = Console(loop=loop, **options)
-    try:
-        loop.run_until_complete(
-            console.run(),
-        )
+    console = Console({
+        # testing.PipeConnector(loop=self.loop): {},
+        connect.Local(): {
+            'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+        },
+        # connect.Ssh(hostname='localhost'): {
+        #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+        # },
+        # connect.Lxd(
+        #     container='zesty',
+        #     hostname='localhost'
+        # ): {
+        #     'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
+        # },
+    }, loop=loop, **options)
+    task = asyncio.ensure_future(console.run())
 
-    except Exception as ex:
+    def sigint_handler():
+        log.info('SIGINT...')
+        task.cancel()
+    loop.add_signal_handler(signal.SIGINT, sigint_handler)
+
+    try:
+        loop.run_until_complete(task)
+
+    except KeyboardInterrupt:
+        log.error('Keyboard interrupt...')
+        task.cancel()
+        loop.run_until_complete(task)
+
+    except BaseException as ex:
         core.log.error("Error %s:\n%s", type(ex), traceback.format_exc())
 
     finally:
         for task in asyncio.Task.all_tasks():
             if not task.done():
-                log.info("pending: %s", task)
-        log.info(" close " * 10)
-        loop.close()
+                log.error("pending: %s", task)
+    loop.stop()
+    loop.close()
+    log.info(' - '.join(["this is the end"] * 3))

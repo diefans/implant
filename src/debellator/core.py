@@ -11,7 +11,6 @@ import functools
 import hashlib
 import importlib.abc
 import importlib.machinery
-import importlib._bootstrap_external
 import inspect
 import io
 import logging
@@ -311,14 +310,18 @@ class Incomming(asyncio.StreamReader):
         self.pipe = os.fdopen(pipe) if isinstance(pipe, int) else pipe
 
     async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def connect(self):
         protocol = asyncio.StreamReaderProtocol(self)
 
-        await self._loop.connect_read_pipe(
+        transport, protocol = await self._loop.connect_read_pipe(
             lambda: protocol,
             self.pipe,
         )
 
-        return self
+        return transport, protocol
 
     async def __aexit__(self, exc_type, value, tb):
         self._transport.close()
@@ -376,6 +379,10 @@ class Outgoing:
         self.shutdown = shutdown
 
     async def __aenter__(self):
+        writer = await self.connect()
+        return writer
+
+    async def connect(self):
         self.transport, protocol = await self.loop.connect_write_pipe(
             ShutdownOnConnectionLost if self.shutdown else asyncio.streams.FlowControlMixin,
             self.pipe
@@ -1098,7 +1105,7 @@ class DispatchCommand(DispatchMessage):
     def _send_command_dispatch_errors(self, fut):
         try:
             fut.result()
-        except Exception as ex:
+        except Exception as ex:     # pylint: disable=W0703
             tb = traceback.format_exc()
             log.error("traceback:\n%s", tb)
             asyncio.ensure_future(self.channel.send(DispatchException(self.fqin, exception=ex, tb=tb)))
@@ -1516,19 +1523,6 @@ class Core:
         self.loop = loop
         self.echo = echo
 
-    async def connect_sysio(self):
-        log.info(' *** ' * 5)
-        log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
-        async with Incomming(pipe=sys.stdin) as reader:
-            async with Outgoing(pipe=sys.stdout, shutdown=True) as writer:
-                # TODO think about generic handshake
-                # send echo to master to prove behavior
-                if self.echo is not None:
-                    writer.write(self.echo)
-                    await writer.drain()
-
-                await self.communicate(reader, writer)
-
     async def communicate(self, reader, writer):
         try:
             channels = Channels(reader=reader, writer=writer)
@@ -1537,27 +1531,35 @@ class Core:
             fut_enqueue = asyncio.ensure_future(channels.enqueue())
             fut_dispatch = asyncio.ensure_future(dispatcher.dispatch())
 
+            remote_module_finder = RemoteModuleFinder(self.loop, dispatcher)
+
             # shutdown is done via event
             @event_handler(ShutdownRemoteEvent)
             async def _shutdown(event):
+                log.info("Shutdown remote event")
+
+                self.teardown_import_hook(remote_module_finder)
+
                 fut_dispatch.cancel()
                 await fut_dispatch
 
                 fut_enqueue.cancel()
                 await fut_enqueue
 
-            self.setup_import_hook(dispatcher)
+            self.setup_import_hook(remote_module_finder)
 
             await asyncio.gather(fut_enqueue, fut_dispatch)
         except asyncio.CancelledError:
             log.info("Cancelled communicate??")
         log.info('Communication end.')
 
-    def setup_import_hook(self, dispatcher):
-        remote_module_finder = RemoteModuleFinder(self.loop, dispatcher)
-        sys.meta_path.append(remote_module_finder)
+    @staticmethod
+    def setup_import_hook(module_finder):
+        sys.meta_path.append(module_finder)
 
-        log.debug("meta path: %s", sys.meta_path)
+    @staticmethod
+    def teardown_import_hook(module_finder):
+        sys.meta_path.remove(module_finder)
 
     def setup_logging(self, debug=False, log_config=None):
         if log_config is None:
@@ -1595,10 +1597,27 @@ class Core:
             log.setLevel(logging.DEBUG)
             self.loop.set_debug(debug)
 
+    async def connect_sysio(self):
+        return await self.connect(stdin=sys.stdin, stdout=sys.stdout)
+
+    async def connect(self, *, stdin, stdout, stderr=None):
+        log.info(' *** ' * 5)
+        log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
+        async with Incomming(pipe=stdin) as reader:
+            async with Outgoing(pipe=stdout, shutdown=True) as writer:
+                # TODO think about generic handshake
+                # send echo to master to prove behavior
+                if self.echo is not None:
+                    writer.write(self.echo)
+                    await writer.drain()
+
+                await self.communicate(reader, writer)
+
     @classmethod
-    def main(cls, debug=False, log_config=None, **kwargs):
+    def main(cls, debug=False, log_config=None, *, loop=None, **kwargs):
+        loop = loop if loop is not None else asyncio.get_event_loop()
+
         thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
-        loop = asyncio.get_event_loop()
         loop.set_default_executor(thread_pool_executor)
 
         core = cls(loop, **kwargs)

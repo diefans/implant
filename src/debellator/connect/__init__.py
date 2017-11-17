@@ -18,23 +18,85 @@ class RemoteMisbehavesError(Exception):
     """Exception is raised, when a remote process seems to be not what we expect."""
 
 
-class Remote:
+class Remote(metaclass=abc.ABCMeta):
+
+    """A remote receiving commands."""
+
+    def __init__(self, *, stdin=None, stdout=None, stderr=None, loop=None):
+        self.loop = loop if loop is None else asyncio.get_event_loop()
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+
+        self.channels = core.Channels(reader=stdout, writer=stdin, loop=self.loop)
+        self.dispatcher = core.Dispatcher(self.channels, loop=self.loop)
+
+        self._lck_communicate = asyncio.Lock(loop=self.loop)
+
+    async def execute(self, *args, **kwargs):
+        # forward to dispatcher
+        return await self.dispatcher.execute(*args, **kwargs)
+
+    @abc.abstractmethod
+    async def wait(self):
+        pass
+
+    async def _shutdown(self, *futures):
+        log.info("Send shutdown: %s", self)
+        shutdown_event = core.ShutdownRemoteEvent()
+        event = self.execute(core.NotifyEvent, event=shutdown_event)
+        await event
+
+        for fut in futures:
+            fut.cancel()
+            await fut
+
+        await self.wait()
+
+    async def communicate(self):
+        async with self._lck_communicate:
+            never_ending = asyncio.Future(loop=self.loop)
+
+            async def enqueue():
+                try:
+                    await self.channels.enqueue()
+                except Exception as ex:     # pylint: disable=W0703
+                    never_ending.set_exception(ex)
+
+            async def dispatch():
+                try:
+                    await self.dispatcher.dispatch()
+                except Exception as ex:     # pylint: disable=W0703
+                    never_ending.set_exception(ex)
+
+            fut_enqueue = asyncio.ensure_future(enqueue(), loop=self.loop)
+            fut_dispatch = asyncio.ensure_future(dispatch(), loop=self.loop)
+
+            try:
+                await never_ending
+
+            except asyncio.CancelledError:
+                await self._shutdown(fut_dispatch, fut_enqueue)
+
+            except Exception:
+                log.error("Error while processing:\n%s", traceback.format_exc())
+                raise
+
+
+class SubprocessRemote(Remote):
 
     """A remote process."""
 
     def __init__(self, transport, protocol, *, loop=None):
-        self.loop = loop if loop is None else asyncio.get_event_loop()
+        super().__init__(
+            stdin=protocol.stdin,
+            stdout=protocol.stdout,
+            stderr=protocol.stderr,
+            loop=loop
+        )
         self._transport = transport
         self._protocol = protocol
-        self.stdin = protocol.stdin
-        self.stdout = protocol.stdout
-        self.stderr = protocol.stderr
         self.pid = transport.get_pid()
-
-        self.io_queues = core.Channels(reader=protocol.stdout, writer=protocol.stdin, loop=self.loop)
-        self.dispatcher = core.Dispatcher(self.io_queues, loop=self.loop)
-
-        self._lck_communicate = asyncio.Lock(loop=self.loop)
 
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, self.pid)
@@ -55,63 +117,6 @@ class Remote:
 
     def kill(self):
         self._transport.kill()
-
-    async def execute(self, *args, **kwargs):
-        # forward to dispatcher
-        return await self.dispatcher.execute(*args, **kwargs)
-
-    async def communicate(self):
-        async with self._lck_communicate:
-            never_ending = asyncio.Future(loop=self.loop)
-
-            async def enqueue():
-                try:
-                    await self.io_queues.enqueue()
-                except Exception as ex:
-                    never_ending.set_exception(ex)
-
-            async def dispatch():
-                try:
-                    await self.dispatcher.dispatch()
-                except Exception as ex:
-                    never_ending.set_exception(ex)
-
-            fut_enqueue = asyncio.ensure_future(enqueue(), loop=self.loop)
-            fut_dispatch = asyncio.ensure_future(dispatch(), loop=self.loop)
-
-            try:
-                result = await never_ending
-
-            except asyncio.CancelledError:
-                log.info("Remote communication cancelled.")
-                log.info("Send shutdown: %s", self)
-                shutdown_event = core.ShutdownRemoteEvent()
-                event = self.execute(core.NotifyEvent, event=shutdown_event)
-                await event
-
-                fut_dispatch.cancel()
-                await fut_dispatch
-                # self.dispatcher.shutdown()
-
-                fut_enqueue.cancel()
-                await fut_enqueue
-                # self.io_queues.shutdown()
-                await self.wait()
-                log.info("Shutdown end.")
-
-            except Exception:
-                log.error("Error while processing:\n%s", traceback.format_exc())
-                raise
-
-            finally:
-                log.info("Remote process terminated")
-                # terminate if process is still running
-
-                if self.returncode is None:
-                    log.warning("Terminating remote process: %s", self.pid)
-                    self.terminate()
-                    await self.wait()
-                return self.returncode
 
 
 class Connector:
@@ -216,7 +221,7 @@ async def create_subprocess_remote(program, *args, loop=None, limit=_DEFAULT_LIM
         preexec_fn=preexec_detach_from_parent,
         **kwds
     )
-    return Remote(transport, protocol)
+    return SubprocessRemote(transport, protocol)
 
 
 class Local(SubprocessConnector):

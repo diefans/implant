@@ -4,7 +4,7 @@ import pytest
 @pytest.yield_fixture
 def event_loop():
     try:
-        import uvloop_
+        import uvloop
         loop = uvloop.new_event_loop()
 
     except ImportError:
@@ -16,8 +16,9 @@ def event_loop():
     loop.close()
 
 
+@pytest.mark.env('ssh')
 @pytest.mark.asyncio
-async def test_echo(event_loop):
+async def test_ssh(event_loop):
     import asyncio
     from debellator import core, connect
 
