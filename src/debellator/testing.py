@@ -1,10 +1,18 @@
+"""Provide a pytest fixture for testing commands."""
 import asyncio
 import os
+
+import pytest
 
 from debellator import connect, core
 
 
 class RemoteTask(connect.Remote):
+
+    """In-process remote task.
+
+    Useful to run debellator for testing.
+    """
 
     def __init__(self, remote_core_fut, *, stdin, stdout):
         super().__init__(stdin=stdin, stdout=stdout)
@@ -15,6 +23,9 @@ class RemoteTask(connect.Remote):
 
 
 class PipeConnector(connect.Connector):
+
+    """A connector which executes the remote core in a task in the current process."""
+
     def __init__(self, *, loop=None):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.stdin_pipe = os.pipe()
@@ -27,6 +38,7 @@ class PipeConnector(connect.Connector):
 
 
 async def create_pipe_remote(stdin_pipe, stdout_pipe, stderr_pipe, *, loop=None):
+    """Launch remote core as a background task."""
     if loop is None:
         loop = asyncio.events.get_event_loop()
 
@@ -44,3 +56,13 @@ async def create_pipe_remote(stdin_pipe, stdout_pipe, stderr_pipe, *, loop=None)
     writer = await core.Outgoing(pipe=stdin_w).connect()
     remote = RemoteTask(remote_core_fut, stdin=writer, stdout=reader)
     return remote
+
+
+@pytest.fixture
+async def remote_task(event_loop):
+    connector = PipeConnector(loop=event_loop)
+    remote = await connector.launch()
+    com_remote = asyncio.ensure_future(remote.communicate())
+    yield remote
+    com_remote.cancel()
+    await com_remote

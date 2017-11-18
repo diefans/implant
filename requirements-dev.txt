@@ -12,3 +12,5 @@ pycodestyle
 pydocstyle
 radon
 isort
+ipython
+pdbpp

@@ -11,6 +11,7 @@ import functools
 import hashlib
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import inspect
 import io
 import logging
@@ -1353,6 +1354,31 @@ class FindModule(Command):
             return None
 
 
+class FindSpecData(Command):
+
+    """Find spec data for a module to import at the peer side."""
+
+    fullname = Parameter(description='The full module name to find.')
+
+    async def local(self, context):
+        pass
+
+    async def remote(self, context):
+        spec = importlib.util.find_spec(self.fullname)
+
+        spec_data = {
+            'name': spec.name,
+            'origin': spec.origin,
+            'submodule_search_locations': spec.submodule_search_locations,
+            'loader': self._extract_loader_data(spec)
+        }
+
+        return spec_data
+
+    def _extract_loader_data(self, spec):
+        return {}
+
+
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
 
     """Import hook that schedules a `FindModule` coroutine in the main loop.
@@ -1467,7 +1493,8 @@ async def async_import(fullname):
 
     log.debug("Importing module: %s", fullname)
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, import_stuff)
+    thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
+    await loop.run_in_executor(thread_pool_executor, import_stuff)
 
 
 class ShutdownRemoteEvent:
@@ -1559,7 +1586,8 @@ class Core:
 
     @staticmethod
     def teardown_import_hook(module_finder):
-        sys.meta_path.remove(module_finder)
+        if module_finder in sys.meta_path:
+            sys.meta_path.remove(module_finder)
 
     def setup_logging(self, debug=False, log_config=None):
         if log_config is None:
@@ -1617,8 +1645,8 @@ class Core:
     def main(cls, debug=False, log_config=None, *, loop=None, **kwargs):
         loop = loop if loop is not None else asyncio.get_event_loop()
 
-        thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
-        loop.set_default_executor(thread_pool_executor)
+        # thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
+        # loop.set_default_executor(thread_pool_executor)
 
         core = cls(loop, **kwargs)
         core.setup_logging(debug, log_config)
