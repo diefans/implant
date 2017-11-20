@@ -1,16 +1,16 @@
 # coding: utf-8
 # this is part of the core bootstrap
 import sys, imp, base64, zlib
-# just a msgpack fallback if no venv is used or msgpack somehow failed to install
-try:
-    import umsgpack
-except ImportError:
-    sys.modules["umsgpack"] = umsgpack = imp.new_module("umsgpack")
-    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec")
-    exec(c, umsgpack.__dict__)
-
 sys.modules["debellator"] = debellator = imp.new_module("debellator")
 setattr(debellator, "__path__", [])
+# just a msgpack fallback if no venv is used or msgpack somehow failed to install
+try:
+    from debellator import msgpack
+except ImportError:
+    sys.modules["debellator.msgpack"] = msgpack = imp.new_module("debellator.msgpack")
+    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")), "{msgpack_code_path}", "exec")
+    exec(c, msgpack.__dict__)
+
 sys.modules["debellator.core"] = core = imp.new_module("debellator.core")
 debellator.__dict__["core"] = core
 

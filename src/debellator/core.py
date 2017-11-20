@@ -25,7 +25,7 @@ import traceback
 import weakref
 import zlib
 
-import umsgpack
+from . import msgpack
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class MsgpackMeta(abc.ABCMeta):
 
             if ext_code is not None:
                 cls.ext_handlers_encode[_data_type] = \
-                    lambda data: umsgpack.Ext(ext_code, handler.__msgpack_encode__(data, _data_type))
+                    lambda data: msgpack.Ext(ext_code, handler.__msgpack_encode__(data, _data_type))
                 cls.ext_handlers_decode[ext_code] = \
                     lambda ext: handler.__msgpack_decode__(ext.data, _data_type)
             else:
@@ -55,57 +55,12 @@ class MsgpackMeta(abc.ABCMeta):
             return handler
         return decorator
 
-    def _pack(cls, obj, fp, **options):
-        # pylint: disable=W0212
-        ext_handlers = options.get("ext_handlers")
-        # lookup mro except object for matching handler
-        ext_handler_match = next((
-            obj_cls for obj_cls in obj.__class__.__mro__[:-1]
-            if obj_cls in ext_handlers
-        ), None) if ext_handlers else None
-
-        if obj is None:
-            umsgpack._pack_nil(obj, fp, options)
-        elif ext_handler_match:
-            umsgpack._pack_ext(ext_handlers[ext_handler_match](obj), fp, options)
-        elif isinstance(obj, bool):
-            umsgpack._pack_boolean(obj, fp, options)
-        elif isinstance(obj, int):
-            umsgpack._pack_integer(obj, fp, options)
-        elif isinstance(obj, float):
-            umsgpack._pack_float(obj, fp, options)
-        elif umsgpack.compatibility and isinstance(obj, str):
-            umsgpack._pack_oldspec_raw(obj.encode('utf-8'), fp, options)
-        elif umsgpack.compatibility and isinstance(obj, bytes):
-            umsgpack._pack_oldspec_raw(obj, fp, options)
-        elif isinstance(obj, str):
-            umsgpack._pack_string(obj, fp, options)
-        elif isinstance(obj, bytes):
-            umsgpack._pack_binary(obj, fp, options)
-        elif isinstance(obj, (tuple, list)):
-            umsgpack._pack_array(obj, fp, options)
-        elif isinstance(obj, dict):
-            umsgpack._pack_map(obj, fp, options)
-        elif isinstance(obj, umsgpack.Ext):
-            umsgpack._pack_ext(obj, fp, options)
-        # default fallback
-        elif ext_handlers and object in ext_handlers:
-            umsgpack._pack_ext(ext_handlers[object](obj), fp, options)
-        else:
-            raise umsgpack.UnsupportedTypeException(
-                "unsupported type: %s" % str(type(obj)))
-
-    def _packb(cls, obj, **options):
-        fp = io.BytesIO()
-        cls._pack(obj, fp, **options)
-        return fp.getvalue()
-
     def encode(cls, data):
-        encoded_data = cls._packb(data, ext_handlers=cls.ext_handlers_encode)
+        encoded_data = msgpack.Encoder.packb(data, ext_handlers=cls.ext_handlers_encode)
         return encoded_data
 
     def decode(cls, encoded_data):
-        data = umsgpack.unpackb(encoded_data, ext_handlers=cls.ext_handlers_decode)
+        data = msgpack.Decoder.unpackb(encoded_data, ext_handlers=cls.ext_handlers_decode)
         return data
 
     def get_custom_encoder(cls, data_type):
@@ -666,7 +621,11 @@ class Channels:
         """
         uid = Uid()
         encoded_channel_name = channel_name.encode()
-        encoded_data = encode(data)
+        try:
+            encoded_data = encode(data)
+        except:
+            ex = traceback.format_exc()
+            raise
 
         log.debug("%s: channel `%s` sends: %s bytes", uid, channel_name, len(encoded_data))
 
@@ -1101,15 +1060,17 @@ class DispatchCommand(DispatchMessage):
             await dispatcher.execute_remote(self.fqin, command)
         # schedule remote execution
         fut = asyncio.ensure_future(execute())
-        fut.add_done_callback(self._send_command_dispatch_errors)
+        fut.add_done_callback(functools.partial(self._send_command_dispatch_errors, dispatcher))
 
-    def _send_command_dispatch_errors(self, fut):
+    def _send_command_dispatch_errors(self, dispatcher, fut):
         try:
             fut.result()
         except Exception as ex:     # pylint: disable=W0703
             tb = traceback.format_exc()
             log.error("traceback:\n%s", tb)
-            asyncio.ensure_future(self.channel.send(DispatchException(self.fqin, exception=ex, tb=tb)))
+            asyncio.ensure_future(
+                dispatcher.channel.send(DispatchException(self.fqin, exception=ex, tb=tb))
+            )
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -1356,27 +1317,32 @@ class FindModule(Command):
 
 class FindSpecData(Command):
 
-    """Find spec data for a module to import at the peer side."""
+    """Find spec data for a module to import from the remote side."""
 
     fullname = Parameter(description='The full module name to find.')
 
     async def local(self, context):
-        pass
+        spec_data = await context.remote_future
+        return spec_data
 
     async def remote(self, context):
+        return self.spec_data()
+
+    def spec_data(self):
         spec = importlib.util.find_spec(self.fullname)
+        if spec is None:
+            return None
 
         spec_data = {
             'name': spec.name,
             'origin': spec.origin,
-            'submodule_search_locations': spec.submodule_search_locations,
-            'loader': self._extract_loader_data(spec)
+            # 'submodule_search_locations': spec.submodule_search_locations,
+            'namespace': (spec.loader is None and spec.submodule_search_locations is not None),
+            'source': (spec.loader.get_source(spec.name)
+                       if isinstance(spec.loader, importlib.abc.InspectLoader)
+                       else None)
         }
-
         return spec_data
-
-    def _extract_loader_data(self, spec):
-        return {}
 
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
@@ -1447,6 +1413,27 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
 
         else:
             log.debug("No module found for %s", fullname)
+
+
+class FakeModuleFinder(importlib.abc.MetaPathFinder):
+    def __init__(self, dispatcher, *, loop):
+        pass
+
+    def _find_remote_spec_data(self, fullname):
+        # ask master for this module
+        print("Module lookup: %s", module_name)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.dispatcher.execute(FindModule, fullname=module_name),
+            loop=self.main_loop
+        )
+        module_data = future.result()
+
+        return module_data
+
+    def find_spec(self, fullname, path, target=None):
+        print('foo', fullname, path, target)
+        pass
 
 
 class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0223
@@ -1552,13 +1539,14 @@ class Core:
 
     async def communicate(self, reader, writer):
         try:
-            channels = Channels(reader=reader, writer=writer)
-            dispatcher = Dispatcher(channels)
+            channels = Channels(reader=reader, writer=writer, loop=self.loop)
+            dispatcher = Dispatcher(channels, loop=self.loop)
 
-            fut_enqueue = asyncio.ensure_future(channels.enqueue())
-            fut_dispatch = asyncio.ensure_future(dispatcher.dispatch())
+            fut_enqueue = asyncio.ensure_future(channels.enqueue(), loop=self.loop)
+            fut_dispatch = asyncio.ensure_future(dispatcher.dispatch(), loop=self.loop)
 
-            remote_module_finder = RemoteModuleFinder(self.loop, dispatcher)
+            # remote_module_finder = RemoteModuleFinder(self.loop, dispatcher)
+            remote_module_finder = FakeModuleFinder(dispatcher, loop=self.loop)
 
             # shutdown is done via event
             @event_handler(ShutdownRemoteEvent)

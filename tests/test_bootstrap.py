@@ -29,21 +29,21 @@ def test_bootstrap_iter(inspect, with_venv, venv_lines, options):
     import zlib
     import base64
 
-    inspect.getsource.return_value = 'umsgpack-code'
-    inspect.getsourcefile.return_value = 'umsgpack-source-file'
-    msgpack_code = base64.b64encode(zlib.compress(b'umsgpack-code', 9)).decode(),
+    inspect.getsource.return_value = 'msgpack-code'
+    inspect.getsourcefile.return_value = 'msgpack-source-file'
+    msgpack_code = base64.b64encode(zlib.compress(b'msgpack-code', 9)).decode(),
 
     lines = [
         'import sys, imp, base64, zlib\n',
-        'try:\n',
-        '    import umsgpack\n',
-        'except ImportError:\n',
-        '    sys.modules["umsgpack"] = umsgpack = imp.new_module("umsgpack")\n',
-        '    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")),'
-        ' "remote://umsgpack-source-file", "exec")\n'.format(**locals()),
-        '    exec(c, umsgpack.__dict__)\n',
         'sys.modules["debellator"] = debellator = imp.new_module("debellator")\n',
         'setattr(debellator, "__path__", [])\n',
+        'try:\n',
+        '    from debellator import msgpack\n',
+        'except ImportError:\n',
+        '    sys.modules["debellator.msgpack"] = msgpack = imp.new_module("debellator.msgpack")\n',
+        '    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")),'
+        ' "remote://msgpack-source-file", "exec")\n'.format(**locals()),
+        '    exec(c, msgpack.__dict__)\n',
         'sys.modules["debellator.core"] = core = imp.new_module("debellator.core")\n',
         'debellator.__dict__["core"] = core\n',
         'c = compile(zlib.decompress(base64.b64decode(b"eNpLLC5OLSpRCCkqTQUAGlIEUw==")),'

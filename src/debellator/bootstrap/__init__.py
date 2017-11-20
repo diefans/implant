@@ -6,9 +6,8 @@ import types
 import zlib
 
 import pkg_resources
-import umsgpack
 
-from .. import core
+from .. import core, msgpack
 
 
 log = logging.getLogger(__name__)
@@ -46,8 +45,8 @@ class Bootstrap(dict):
         log.debug("Code compression ratio of %s -> %s: %.2f%%",
                   raw_len, comp_len, comp_len * 100 / raw_len)
 
-        msgpack_code_source = inspect.getsource(umsgpack).encode()
-        self.msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(umsgpack))
+        msgpack_code_source = inspect.getsource(msgpack).encode()
+        self.msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(msgpack))
         self.msgpack_code = base64.b64encode(zlib.compress(msgpack_code_source, 9)).decode(),
 
     def formatsourcelines(self, lines):
