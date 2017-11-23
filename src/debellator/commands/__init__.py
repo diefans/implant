@@ -41,22 +41,7 @@ class Echo(core.Command):
         result.update(remote_result)
         return result
 
-    async def remote(self, context):
-        # first: receive
-        from_local = []
-        async for x in context.channel:
-            from_local.append(x)
-        log.debug("************ receiving from local: %s", from_local)
-
-        # second: send
-        await context.channel.send_iteration("send to local")
-
-        # third: return result
-        return {
-            'from_local': ''.join(from_local),
-            'remote_data': self.data,
-            'remote_pid': os.getpid()
-        }
+    remote = core.CommandRemote('debellator.commands.remotes.Echo')
 
 
 class SystemLoad(core.Command):

@@ -11,8 +11,8 @@ formatters:
 handlers:
     console:
         # FIXME Executor disturbes uvloop
-        #class: debellator.core.ExecutorConsoleHandler
-        class: logging.StreamHandler
+        class: debellator.core.ExecutorConsoleHandler
+        #class: logging.StreamHandler
         level: !!python/name:logging.NOTSET
         #level: DEBUG
         formatter: simple
@@ -32,6 +32,11 @@ loggers:
 
     debellator.core:
         level: DEBUG
+        handlers: [console, logfile]
+        propagate: no
+
+    debellator.core.Channels:
+        level: WARN
         handlers: [console, logfile]
         propagate: no
 

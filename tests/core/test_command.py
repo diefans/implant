@@ -1,6 +1,18 @@
 import pytest
 
 
+@pytest.mark.asyncio
+async def test_remote_descriptor(core):
+    class Foo(core.Command):
+        foobar = core.Parameter(description='foobar')
+        remote = core.CommandRemote('debellator.testing.foobar.Foobar')
+
+    foo = Foo()
+    foo.foobar = 'foobar'
+
+    assert await foo.remote(None) == 'foobar'
+
+
 def test_parameter(core):
     class Foo(core.Command):
         foo = core.Parameter(default='bar')
@@ -12,7 +24,7 @@ def test_parameter(core):
         def remote(self, context):
             pass
 
-    foo = Foo({'bar': 'baz'})
+    foo = Foo(bar='baz')
 
     assert foo.bar == 'baz'
     assert foo.foo == 'bar'

@@ -30,6 +30,18 @@ from . import msgpack
 log = logging.getLogger(__name__)
 
 
+colors = {
+    'red': '\033[0;31m',
+    'green': '\033[0;32m',
+    'yellow': '\033[1;33m',
+    None: '\033[0m',
+}
+
+
+def colored(msg, color='red'):
+    return colors[color] + msg + colors[None]
+
+
 class MsgpackMeta(abc.ABCMeta):
     ext_handlers_encode = {}
     ext_handlers_decode = {}
@@ -461,6 +473,8 @@ class Channels:
     acknowledgements = {}
     """Global acknowledgment futures distinctive by uid."""
 
+    log = logging.getLogger(__module__ + '.' + __qualname__)
+
     def __init__(self, reader, writer, *, loop=None):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.incomming = weakref.WeakValueDictionary()
@@ -500,7 +514,7 @@ class Channels:
                 # never ending
                 await asyncio.Future(loop=self.loop)
             except asyncio.CancelledError:
-                log.info("Shutdown of message enqueueing")
+                self.log.info("Shutdown of message enqueueing")
 
             # stop receiving new messages
             fut_receive_reader.cancel()
@@ -511,7 +525,7 @@ class Channels:
         raw_header = await self.reader.readexactly(HEADER_SIZE + 16)
         uid, flags, channel_name_length, data_length = _decode_header(raw_header)
 
-        log.debug("%s: flags %s", uid, flags)
+        self.log.debug("%s: flags %s", uid, flags)
 
         # read channel name
         channel_name = (await self.reader.readexactly(channel_name_length)).decode() \
@@ -547,14 +561,14 @@ class Channels:
             ack_future = self.acknowledgements.get(chunk.uid)
             if ack_future and chunk.flags.recv_ack:
                 try:
-                    log.debug("%s: acknowledge", chunk.uid)
+                    self.log.debug("%s: acknowledge", chunk.uid)
                     duration = time.time() - chunk.uid.time
                     ack_future.set_result((chunk.uid, duration))
                 finally:
                     del self.acknowledgements[chunk.uid]
 
-    @staticmethod
-    def _feed_data(buffer, chunk):
+    @classmethod
+    def _feed_data(cls, buffer, chunk):
         if chunk.data:
             if chunk.uid not in buffer:
                 buffer[chunk.uid] = bytearray()
@@ -563,10 +577,10 @@ class Channels:
 
         # debug
         if chunk.channel_name:
-            log.debug("%s: channel `%s` receives: %s bytes",
-                      chunk.uid, chunk.channel_name, len(chunk.data) if chunk.data else 0)
+            cls.log.debug("%s: channel `%s` receives: %s bytes",
+                          chunk.uid, chunk.channel_name, len(chunk.data) if chunk.data else 0)
         else:
-            log.debug("%s: no channel received: %s", chunk.uid, chunk.flags)
+            cls.log.debug("%s: no channel received: %s", chunk.uid, chunk.flags)
 
     async def _receive_single_message(self, buffer):
         chunk = await self._read_chunk()
@@ -577,7 +591,7 @@ class Channels:
 
     async def _receive_reader(self):
         # receive incomming data into queues
-        log.info("Start receiving from %s...", self.reader)
+        self.log.info("Start receiving from %s...", self.reader)
         buffer = {}
         try:
             while True:
@@ -585,13 +599,13 @@ class Channels:
 
         except (asyncio.CancelledError, GeneratorExit):
             if buffer:
-                log.warning("Receive buffer was not empty when canceled!")
+                self.log.warning("Receive buffer was not empty when canceled!")
 
         except EOFError:
-            log.info("While waiting for data, we received EOF.")
+            self.log.info("While waiting for data, we received EOF.")
 
         except:     # noqa
-            log.error("Error while receiving:\n%s", traceback.format_exc())
+            self.log.error("Error while receiving:\n%s", traceback.format_exc())
             raise
 
     async def _send_ack(self, uid):
@@ -600,7 +614,7 @@ class Channels:
             'eom': True, 'recv_ack': True
         })
 
-        log.debug("%s: send acknowledgement", uid)
+        self.log.debug("%s: send acknowledgement", uid)
         await self._send_raw(header)
 
     async def _send_raw(self, *data):
@@ -621,13 +635,9 @@ class Channels:
         """
         uid = Uid()
         encoded_channel_name = channel_name.encode()
-        try:
-            encoded_data = encode(data)
-        except:
-            ex = traceback.format_exc()
-            raise
+        encoded_data = encode(data)
 
-        log.debug("%s: channel `%s` sends: %s bytes", uid, channel_name, len(encoded_data))
+        self.log.debug("%s: channel `%s` sends: %s bytes", uid, channel_name, len(encoded_data))
 
         for part in split_data(encoded_data, self.chunk_size):
             if compress:
@@ -635,8 +645,8 @@ class Channels:
                 part = zlib.compress(part, compress)
                 comp_len = len(part)
 
-                log.debug("%s: compression ratio of %s -> %s: %.2f%%",
-                          uid, raw_len, comp_len, comp_len * 100 / raw_len)
+                self.log.debug("%s: compression ratio of %s -> %s: %.2f%%",
+                               uid, raw_len, comp_len, comp_len * 100 / raw_len)
 
             header = _encode_header(uid, channel_name, part, flags={
                 'eom': False, 'send_ack': False, 'compression': bool(compress)
@@ -657,9 +667,9 @@ class Channels:
         await self._send_raw(header, encoded_channel_name)
 
         if ack:
-            log.debug("%s: wait for acknowledgement...", uid)
+            self.log.debug("%s: wait for acknowledgement...", uid)
             acknowledgement = await ack_future
-            log.debug("%s: acknowldeged: %s", uid, acknowledgement)
+            self.log.debug("%s: acknowldeged: %s", uid, acknowledgement)
 
             return acknowledgement
 
@@ -736,11 +746,11 @@ def exclusive(fun):
 
 DispatchLocalContext = collections.namedtuple(
     'DispatchContext',
-    ('channel', 'execute', 'fqin', 'remote_future')
+    ('loop', 'channel', 'execute', 'fqin', 'remote_future')
 )
 DispatchRemoteContext = collections.namedtuple(
     'DispatchContext',
-    ('channel', 'execute', 'fqin', 'pending_remote_task')
+    ('loop', 'channel', 'execute', 'fqin', 'pending_remote_task')
 )
 DISPATCHER_CHANNEL_NAME = 'Dispatcher'
 
@@ -756,10 +766,12 @@ class Dispatcher:
 
     """
 
-    def __init__(self, io_queues, *, loop=None):
+    log = logging.getLogger(__module__ + '.' + __qualname__)
+
+    def __init__(self, channels, *, loop=None):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
-        self.io_queues = io_queues
-        self.channel = self.io_queues.get_channel(DISPATCHER_CHANNEL_NAME)
+        self.channels = channels
+        self.channel = self.channels.get_channel(DISPATCHER_CHANNEL_NAME)
         self.pending_commands = collections.defaultdict(functools.partial(asyncio.Future, loop=self.loop))
         self.pending_dispatches = collections.defaultdict(functools.partial(asyncio.Event, loop=self.loop))
         self.pending_remote_tasks = set()
@@ -769,28 +781,39 @@ class Dispatcher:
     async def dispatch(self):
         """Start sending and receiving messages and executing them."""
         async with self._lock_dispatch:
-            fut_execute_io_queues = asyncio.ensure_future(self._execute_io_queues(), loop=self.loop)
+            fut_execute_channels = asyncio.ensure_future(self._execute_channels(), loop=self.loop)
             try:
                 # never ending
                 await asyncio.Future(loop=self.loop)
             except asyncio.CancelledError:
-                log.info("Shutdown of dispatcher")
+                self.log.info("Shutdown of dispatcher")
 
             for task in self.pending_remote_tasks:
-                log.info("Waiting for task to finalize: %s", task)
+                self.log.info("Waiting for task to finalize: %s", task)
                 await task
 
-            fut_execute_io_queues.cancel()
-            await fut_execute_io_queues
+            fut_execute_channels.cancel()
+            await fut_execute_channels
 
-    async def _execute_io_queues(self):
+    async def _execute_channels(self):
         """Execute messages sent via our `Dispatcher.channel`."""
-        log.info("Listening on channel %s for command dispatch...", self.channel)
+        self.log.info("Listening on channel %s for command dispatch...", self.channel)
+
+        def handle_message_exception(message, fut):
+            try:
+                fut.result()
+            except Exception as ex:
+                tb = traceback.format_exc()
+                self.log.error("traceback:\n%s", tb)
+                asyncio.ensure_future(
+                    self.channel.send(DispatchException(message.fqin, exception=ex, tb=tb))
+                )
 
         try:
             async for message in self.channel:
-                log.debug("Received dispatch message: %s", message)
-                await message(self)
+                self.log.debug(colored("%s - received dispatch message: %s", 'yellow'), message.fqin, type(message))
+                fut_message = asyncio.ensure_future(message(self))
+                fut_message.add_done_callback(functools.partial(handle_message_exception, message))
 
         except asyncio.CancelledError:
             pass
@@ -798,13 +821,13 @@ class Dispatcher:
         finally:
             # teardown here
             for fqin, fut in list(self.pending_commands.items()):
-                log.warning("Teardown pending command: %s, %s", fqin, fut)
+                self.log.warning("Teardown pending command: %s, %s", fqin, fut)
                 await fut
                 del self.pending_commands[fqin]
 
     def create_command(self, command_name, params):
         command_class = Command[command_name] if isinstance(command_name, str) else command_name
-        command = command_class(params, loop=self.loop)
+        command = command_class(**params)
         return command
 
     async def execute(self, command_name, **params):
@@ -822,17 +845,18 @@ class Dispatcher:
         async with self.remote_future(fqin, command) as future:
             context = self.local_context(fqin, future)
             try:
-                evt = self.pending_dispatches[fqin]
-                log.debug("%s - waiting for dispatch to be ready", fqin)
-                await evt.wait()
-                log.debug("%s - execute command: %s", fqin, command)
+                evt_dispatch_ready = self.pending_dispatches[fqin]
+                self.log.debug(colored("%s - waiting for dispatch to be ready", 'yellow'), fqin)
+                await evt_dispatch_ready.wait()
+                self.log.debug(colored("%s - execute command: %s", 'yellow'), fqin, command)
                 # execute local side of command
                 result = await command.local(context)
+                # get remote_future
                 future.result()
                 return result
 
             except:     # noqa
-                log.error("Error while executing command: %s\n%s", command, traceback.format_exc())
+                self.log.error(colored("Error while executing command: %s\n%s", 'red'), command, traceback.format_exc())
                 raise
 
     def remote_future(self, fqin, command):        # noqa
@@ -858,8 +882,9 @@ class Dispatcher:
         The `Channel` is built via a fully qualified instance name (fqin).
 
         """
-        channel = self.io_queues.get_channel(fqin)
+        channel = self.channels.get_channel(fqin)
         context = DispatchLocalContext(
+            loop=self.loop,
             channel=channel,
             execute=self.execute,
             fqin=fqin,
@@ -873,8 +898,9 @@ class Dispatcher:
         The `Channel` is built via a fully qualified instance name (fqin).
 
         """
-        channel = self.io_queues.get_channel(fqin)
+        channel = self.channels.get_channel(fqin)
         context = DispatchRemoteContext(
+            loop=self.loop,
             channel=channel,
             execute=self.execute,
             fqin=fqin,
@@ -893,28 +919,53 @@ class Dispatcher:
         # TODO current_task is not a stable API see PyO3/tokio#54
         current_task = asyncio.Task.current_task()
         self.pending_remote_tasks.add(current_task)
-        log.debug("Starting remote task: %s", fqin)
+        self.log.debug(colored("%s - starting remote task", 'yellow'), fqin)
         context = self.remote_context(fqin, current_task)
         await self.channel.send(DispatchReady(fqin))
         try:
             # execute remote side of command
+            self.log.debug(colored('%s - execute remote side', 'yellow'), fqin)
             result = await command.remote(context)
+            self.log.debug(colored('%s - send remote result', 'yellow'), fqin)
             await self.channel.send(DispatchResult(fqin, result=result))
 
             return result
 
         except asyncio.CancelledError:
-            log.info("Remote execution canceled")
-
-        except Exception as ex:
-            tb = traceback.format_exc()
-            log.error("traceback:\n%s", tb)
-            await self.channel.send(DispatchException(fqin, exception=ex, tb=tb))
-            raise
+            self.log.info("Remote execution canceled")
 
         finally:
-            log.debug("Finalizing remote task: %s", fqin)
+            self.log.debug("Finalizing remote task: %s", fqin)
             self.pending_remote_tasks.remove(current_task)
+
+    def set_dispatch_ready(self, fqin):
+        evt = self.pending_dispatches[fqin]
+        evt.set()
+        self.log.debug("%s - set dispatch ready", fqin)
+
+    def set_dispatch_exception(self, fqin, tb, exception):
+        future = self.pending_commands[fqin]
+        future.set_exception(exception)
+        self.log.error("Dispatch exception for %s:\n%s", fqin, tb)
+
+    def set_dispatch_result(self, fqin, result):
+        future = self.pending_commands[fqin]
+        future.set_result(result)
+        self.log.debug("Dispatch result of %s", fqin)
+
+    async def execute_dispatch_command(self, fqin, command_name, params):
+        try:
+            self.log.debug(colored('%s - create command', 'yellow'), fqin)
+            command = await Command.create_command(command_name, params, loop=self.loop)
+            self.log.debug(colored('%s - start execute_remote', 'yellow'), fqin)
+            await self.execute_remote(fqin, command)
+            self.log.debug(colored('%s - finished execute_remote', 'yellow'), fqin)
+        except Exception as ex:
+            tb = traceback.format_exc()
+            self.log.error("traceback:\n%s", tb)
+            asyncio.ensure_future(
+                dispatcher.channel.send(DispatchException(self.fqin, exception=ex, tb=tb))
+            )
 
 
 class _CommandMeta(type):
@@ -930,26 +981,16 @@ class _CommandMeta(type):
         dct['command_name'] = ':'.join((dct['__module__'], dct['__qualname__']))
         dct['parameters'] = {name: attr for name, attr in dct.items() if isinstance(attr, Parameter)}
 
-        # check for remote outsourcing
-        if mcs.base is not None:
-            try:
-                remote = dct['remote']
-            except KeyError:
-                raise TypeError("Command must define a remote,"
-                                " either as a method or as a dotted name pointing to another class.")
-
-            if isinstance(remote, str):
-                dct['_remote_module'], dct['_remote_class'] = remote.rsplit('.', 1)
-
-            else:
-                dct['_remote_module'], dct['_remote_class'] = dct['__module__'], dct['__qualname__']
-
         cls = type.__new__(mcs, name, bases, dct)
 
         # set parameter names in python < 3.6
         if sys.version_info < (3, 6):
             for attr_name, parameter in cls.parameters.items():
                 parameter.__set_name__(cls, attr_name)
+
+            # check for remote outsourcing
+            if mcs.base is not None and isinstance(cls.remote, CommandRemote):
+                cls.remote.__set_name__(cls, 'remote')
 
         if mcs.base is None:
             mcs.base = cls
@@ -967,6 +1008,75 @@ class _CommandMeta(type):
     def __getitem__(cls, command_name):
         command_class = cls.commands[command_name]
         return command_class
+
+    def _split_command_name(cls, command_name):
+        module_name, command_class_name = command_name.split(':')
+        return module_name, command_class_name
+
+    async def create_command(cls, command_name, params, *, loop):
+        module_name, command_class_name = cls._split_command_name(command_name)
+
+        module = sys.modules.get(module_name, await async_import(module_name, loop=loop))
+
+        command_class = getattr(module, command_class_name)
+        command = command_class(**params)
+
+        if isinstance(command.__class__.remote, CommandRemote):
+            remote = command.__class__.remote
+            remote_module_name, _ = remote.full_classname.rsplit('.', 1)
+            remote_module = await async_import(remote_module_name)
+            remote.set_remote_class(remote_module)
+
+        return command
+
+
+class CommandRemote:
+
+    """Delegates remote task to another class.
+
+    This is usefull, if one wants not to import remote modules at the master side.
+    """
+
+    log = logging.getLogger(__module__ + '.' + __qualname__)
+
+    def __init__(self, full_classname):
+        self.full_classname = full_classname
+        self.name = None
+        self.remote_class = None
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, inst, cls):
+        if inst is None:
+            return self
+
+        # log.debug(colored('Import: %s', 'green'), self.full_classname)
+        # module_name, class_name = self.full_classname.rsplit('.', 1)
+        # log.debug(colored('Import: %s', 'green'), self.full_classname)
+
+        if self.remote_class is None:
+            raise RuntimeError('set_remote_class must be called before accessing the descriptor')
+        # loop = asyncio.get_event_loop()
+        # future = asyncio.run_coroutine_threadsafe(async_import(module_name, loop=loop), loop)
+        # module = future.result()
+
+        # # module = importlib.import_module(module_name)
+        # log.debug(colored('Import: %s', 'green'), self.full_classname)
+        # remote_class = getattr(module, class_name)
+
+        remote_inst = self.remote_class()
+        for name, param in inst:
+            setattr(remote_inst, name, param)
+
+        setattr(inst, self.name, remote_inst.remote)
+        self.log.debug(colored('Remote of %s outsourced to %s', 'green'), inst, remote_inst.remote)
+
+        return remote_inst.remote
+
+    def set_remote_class(self, remote_module):
+        module_name, class_name = self.full_classname.rsplit('.', 1)
+        self.remote_class = getattr(remote_module, class_name)
 
 
 class NoDefault:
@@ -1004,8 +1114,7 @@ class Command(metaclass=_CommandMeta):
 
     """Common ancestor of all Commands."""
 
-    def __init__(self, parameters=None, *, loop=None):
-        self._loop = loop if loop is not None else asyncio.get_event_loop()
+    def __init__(self, **parameters):
         if parameters is not None:
             for name, value in parameters.items():
                 setattr(self, name, value)
@@ -1032,6 +1141,8 @@ class DispatchMessage:
 
     """Base class for command dispatch communication."""
 
+    log = logging.getLogger(__module__ + '.' + __qualname__)
+
     def __init__(self, fqin):
         self.fqin = fqin
 
@@ -1043,34 +1154,23 @@ class DispatchCommand(DispatchMessage):
 
     """Arguments for a command dispatch."""
 
+    log = logging.getLogger(__module__ + '.' + __qualname__)
+
     def __init__(self, fqin, command_name, command_class, command_module, params):
         super().__init__(fqin)
         self.command_name = command_name
         self.command_class = command_class
         self.command_module = command_module
         self.params = params
-        log.info("Dispatch created: %s %s", self.fqin, self.params)
+        self.log.info("Dispatch created: %s", self)
 
     async def __call__(self, dispatcher):
-        async def execute():
-            if self.command_module not in sys.modules:
-                await async_import(self.command_module)
-
-            command = dispatcher.create_command(self.command_name, self.params)
-            await dispatcher.execute_remote(self.fqin, command)
         # schedule remote execution
-        fut = asyncio.ensure_future(execute())
-        fut.add_done_callback(functools.partial(self._send_command_dispatch_errors, dispatcher))
+        await dispatcher.execute_dispatch_command(self.fqin, self.command_name, self.params)
 
-    def _send_command_dispatch_errors(self, dispatcher, fut):
-        try:
-            fut.result()
-        except Exception as ex:     # pylint: disable=W0703
-            tb = traceback.format_exc()
-            log.error("traceback:\n%s", tb)
-            asyncio.ensure_future(
-                dispatcher.channel.send(DispatchException(self.fqin, exception=ex, tb=tb))
-            )
+    def __repr__(self):
+        return "<{self.__class__.__name__} {self.fqin}, command_name={self.command_name}" \
+            ", command_class={self.command_class}, command_module={self.command_module}>".format(self=self)
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -1090,9 +1190,7 @@ class DispatchCommand(DispatchMessage):
 class DispatchReady(DispatchMessage):
 
     async def __call__(self, dispatcher):
-        log.debug("%s - set dispatch ready", self.fqin)
-        evt = dispatcher.pending_dispatches[self.fqin]
-        evt.set()
+        dispatcher.set_dispatch_ready(self.fqin)
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -1114,9 +1212,7 @@ class DispatchException(DispatchMessage):
         self.tb = tb or traceback.format_exc()
 
     async def __call__(self, dispatcher):
-        future = dispatcher.pending_commands[self.fqin]
-        log.error("Dispatch exception for %s:\n%s", self.fqin, self.tb)
-        future.set_exception(self.exception)
+        dispatcher.set_dispatch_exception(self.fqin, self.tb, self.exception)
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -1137,9 +1233,7 @@ class DispatchResult(DispatchMessage):
         self.result = result
 
     async def __call__(self, dispatcher):
-        future = dispatcher.pending_commands[self.fqin]
-        log.debug("Dispatch result of %s", self.fqin)
-        future.set_result(self.result)
+        dispatcher.set_dispatch_result(self.fqin, self.result)
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -1197,6 +1291,8 @@ class NotifyEvent(Command):
 
     """
 
+    log = logging.getLogger(__module__ + '.' + __qualname__)
+
     event = Parameter(default=None, description='the event instance, which has to be de/encodable via message pack')
     dispatch_local = Parameter(default=False, description='if True, the local side will also be notified')
 
@@ -1205,16 +1301,16 @@ class NotifyEvent(Command):
         await context.remote_future
 
         if self.dispatch_local:
-            log.info("Notify local %s", self.event)
+            self.log.info("Notify local %s", self.event)
             await notify_event(self.event)
 
     async def remote(self, context):
         async def notify_after_pending_command_finalized():
-            log.debug("Waiting for finalization of remote task: %s", context.fqin)
+            self.log.debug("Waiting for finalization of remote task: %s", context.fqin)
             await context.pending_remote_task
-            log.debug("Notify remote %s", self.event)
+            self.log.debug("Notify remote %s", self.event)
             await notify_event(self.event)
-        asyncio.ensure_future(notify_after_pending_command_finalized(), loop=self._loop)
+        asyncio.ensure_future(notify_after_pending_command_finalized(), loop=context.loop)
 
 
 class InvokeImport(Command):
@@ -1237,82 +1333,8 @@ class InvokeImport(Command):
         result = await context.remote_future
         return result
 
-    @exclusive
     async def remote(self, context):
         await async_import(self.fullname)
-
-
-class FindModule(Command):
-
-    """Find a module on the remote side."""
-
-    fullname = Parameter(description='The full module name to find.')
-
-    async def local(self, context):
-        module_loaded = await context.remote_future
-
-        return module_loaded
-
-    @staticmethod
-    def _is_namespace(module):
-        # see https://www.python.org/dev/peps/pep-0451/#how-loading-will-work
-        spec = module.__spec__
-        is_namespace = spec.loader is None and spec.submodule_search_locations is not None
-        return is_namespace
-
-    @staticmethod
-    def _is_package(module):
-        is_package = bool(getattr(module, '__path__', None) is not None)
-        return is_package
-
-    @staticmethod
-    def _get_source(module):
-        spec = module.__spec__
-        if isinstance(spec.loader, importlib.abc.InspectLoader):
-            source = spec.loader.get_source(module.__name__)
-        else:
-            try:
-                source = inspect.getsource(module)
-            except OSError:
-                # when source is empty
-                source = ''
-
-        return source
-
-    @staticmethod
-    def _get_source_filename(module):
-        spec = module.__spec__
-        if isinstance(spec.loader, importlib.abc.ExecutionLoader):
-            filename = spec.loader.get_filename(module.__name__)
-        else:
-            filename = inspect.getsourcefile(module)
-
-        return filename
-
-    async def remote(self, context):
-        module = sys.modules.get(self.fullname)
-
-        if module:
-            is_namespace = self._is_namespace(module)
-            is_package = self._is_package(module)
-
-            log.debug("module found: %s", module)
-            remote_module_data = {
-                'name': self.fullname,
-                'is_namespace': is_namespace,
-                'is_package': is_package
-            }
-
-            if not is_namespace:
-                remote_module_data.update({
-                    'source': self._get_source(module),
-                    'source_filename': self._get_source_filename(module)
-                })
-
-            return remote_module_data
-        else:
-            log.warning('Module not loaded: %s', self.fullname)
-            return None
 
 
 class FindSpecData(Command):
@@ -1338,16 +1360,17 @@ class FindSpecData(Command):
             'origin': spec.origin,
             # 'submodule_search_locations': spec.submodule_search_locations,
             'namespace': (spec.loader is None and spec.submodule_search_locations is not None),
+            'package': isinstance(spec.submodule_search_locations, list),
             'source': (spec.loader.get_source(spec.name)
                        if isinstance(spec.loader, importlib.abc.InspectLoader)
-                       else None)
+                       else None),
         }
         return spec_data
 
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
 
-    """Import hook that schedules a `FindModule` coroutine in the main loop.
+    """Import hook that schedules a `FindSpecData` coroutine in the main loop.
 
     The import itself is run in a separate executor thread to keep things async.
 
@@ -1357,83 +1380,62 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
     https://www.python.org/dev/peps/pep-0451/
     """
 
-    def __init__(self, loop, dispatcher):
-        self.main_loop = loop
-        self.dispatcher = dispatcher
+    log = logging.getLogger(__module__ + '.' + __qualname__)
 
-    def _find_remote_module(self, module_name):
-        # ask master for this module
-        log.debug("Module lookup: %s", module_name)
-
-        future = asyncio.run_coroutine_threadsafe(
-            self.dispatcher.execute(FindModule, fullname=module_name),
-            loop=self.main_loop
-        )
-        module_data = future.result()
-
-        return module_data
-
-    def find_spec(self, fullname, path, target=None):
-        log.debug('Path for module %s: %s', fullname, path)
-
-        remote_module_data = self._find_remote_module(fullname)
-
-        if remote_module_data:
-            # FIXME logging blocks
-            # log.debug("Module found for %s: %s", fullname, remote_module_data)
-
-            if remote_module_data['is_namespace']:
-                log.debug("Namespace package found for %s", fullname)
-                spec = importlib.machinery.ModuleSpec(
-                    name=fullname,
-                    loader=None,
-                    origin='remote namespace',
-                    is_package=remote_module_data['is_package']
-                )
-
-            else:
-                log.debug("Module found for %s", fullname)
-                origin = 'remote://{}'.format(remote_module_data.get('source_filename', fullname))
-                is_package = remote_module_data['is_package']
-
-                loader = RemoteModuleLoader(
-                    remote_module_data.get('source', ''),
-                    filename=origin,
-                    is_package=is_package
-                )
-
-                spec = importlib.machinery.ModuleSpec(
-                    name=fullname,
-                    loader=loader,
-                    origin=origin,
-                    is_package=is_package
-                )
-
-            return spec
-
-        else:
-            log.debug("No module found for %s", fullname)
-
-
-class FakeModuleFinder(importlib.abc.MetaPathFinder):
     def __init__(self, dispatcher, *, loop):
-        pass
+        self.dispatcher = dispatcher
+        self.loop = loop
 
     def _find_remote_spec_data(self, fullname):
-        # ask master for this module
-        print("Module lookup: %s", module_name)
 
+        self.log.debug(colored('start coroutine', 'green'))
         future = asyncio.run_coroutine_threadsafe(
-            self.dispatcher.execute(FindModule, fullname=module_name),
-            loop=self.main_loop
+            self.dispatcher.execute(FindSpecData, fullname=fullname),
+            loop=self.loop
         )
-        module_data = future.result()
+        spec_data = future.result()
+        self.log.debug(colored('spec result: %s', 'green'), spec_data)
+        return spec_data
 
-        return module_data
+    def _create_namespace_spec(self, spec_data):
+        spec = importlib.machinery.ModuleSpec(
+            name=spec_data.name,
+            loader=None,
+            origin='remote namespace',
+            is_package=True
+        )
+        return spec
+
+    def _create_remote_module_spec(self, spec_data):
+        self.log.debug("Module found for %s", spec_data)
+        origin = 'remote://{}'.format(spec_data['origin'])
+        is_package = spec_data['package']
+
+        loader = RemoteModuleLoader(
+            spec_data.get('source', ''),
+            filename=origin,
+            is_package=is_package
+        )
+
+        spec = importlib.machinery.ModuleSpec(
+            name=spec_data['name'],
+            loader=loader,
+            origin=origin,
+            is_package=is_package
+        )
+
+        return spec
 
     def find_spec(self, fullname, path, target=None):
-        print('foo', fullname, path, target)
-        pass
+        self.log.debug(colored('find spec: %s', 'green'), fullname)
+        spec_data = self._find_remote_spec_data(fullname)
+        if spec_data is None:
+            spec = None
+        elif spec_data['namespace']:
+            spec = self._create_namespace_spec(spec_data)
+        else:
+            spec = self._create_remote_module_spec(spec_data)
+        return spec
 
 
 class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0223
@@ -1462,7 +1464,10 @@ class RemoteModuleLoader(importlib.abc.ExecutionLoader):    # pylint: disable=W0
         return "<module '{}' (namespace)>".format(module.__name__)
 
 
-async def async_import(fullname):
+async def async_import(fullname, *, loop=None):
+    if loop is None:
+        loop = asyncio.get_event_loop()
+
     def import_stuff():
         thread_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(thread_loop)
@@ -1470,6 +1475,7 @@ async def async_import(fullname):
         try:
             module = importlib.import_module(fullname)
             log.debug("Remotelly imported module: %s", module)
+            return module
 
         except ImportError:
             log.debug("Error when importing %s:\n%s", fullname, traceback.format_exc())
@@ -1479,9 +1485,8 @@ async def async_import(fullname):
             thread_loop.close()
 
     log.debug("Importing module: %s", fullname)
-    loop = asyncio.get_event_loop()
     thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
-    await loop.run_in_executor(thread_pool_executor, import_stuff)
+    return await loop.run_in_executor(thread_pool_executor, import_stuff)
 
 
 class ShutdownRemoteEvent:
@@ -1532,7 +1537,23 @@ class ExecutorConsoleHandler(logging.StreamHandler):
         self.executor.shutdown(wait=True)
 
 
+class Worker:
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(
+            target=self._run_event_loop
+        )
+        self.thread.start()
+
+    def _run_event_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+
 class Core:
+
+    log = logging.getLogger(__module__ + '.' + __qualname__)
+
     def __init__(self, loop, *, echo=None, **kwargs):
         self.loop = loop
         self.echo = echo
@@ -1545,13 +1566,12 @@ class Core:
             fut_enqueue = asyncio.ensure_future(channels.enqueue(), loop=self.loop)
             fut_dispatch = asyncio.ensure_future(dispatcher.dispatch(), loop=self.loop)
 
-            # remote_module_finder = RemoteModuleFinder(self.loop, dispatcher)
-            remote_module_finder = FakeModuleFinder(dispatcher, loop=self.loop)
+            remote_module_finder = RemoteModuleFinder(dispatcher, loop=self.loop)
 
             # shutdown is done via event
             @event_handler(ShutdownRemoteEvent)
             async def _shutdown(event):
-                log.info("Shutdown remote event")
+                self.log.info("Shutdown remote event")
 
                 self.teardown_import_hook(remote_module_finder)
 
@@ -1565,8 +1585,8 @@ class Core:
 
             await asyncio.gather(fut_enqueue, fut_dispatch)
         except asyncio.CancelledError:
-            log.info("Cancelled communicate??")
-        log.info('Communication end.')
+            self.log.info("Cancelled communicate??")
+        self.log.info('Communication end.')
 
     @staticmethod
     def setup_import_hook(module_finder):
@@ -1610,15 +1630,15 @@ class Core:
         logging.config.dictConfig(log_config)
 
         if debug:
-            log.setLevel(logging.DEBUG)
+            self.log.setLevel(logging.DEBUG)
             self.loop.set_debug(debug)
 
     async def connect_sysio(self):
         return await self.connect(stdin=sys.stdin, stdout=sys.stdout)
 
     async def connect(self, *, stdin, stdout, stderr=None):
-        log.info(' *** ' * 5)
-        log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
+        self.log.info(' *** ' * 5)
+        self.log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
         async with Incomming(pipe=stdin) as reader:
             async with Outgoing(pipe=stdout, shutdown=True) as writer:
                 # TODO think about generic handshake
@@ -1633,8 +1653,8 @@ class Core:
     def main(cls, debug=False, log_config=None, *, loop=None, **kwargs):
         loop = loop if loop is not None else asyncio.get_event_loop()
 
-        # thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
-        # loop.set_default_executor(thread_pool_executor)
+        thread_pool_executor = concurrent.futures.ThreadPoolExecutor()
+        loop.set_default_executor(thread_pool_executor)
 
         core = cls(loop, **kwargs)
         core.setup_logging(debug, log_config)
@@ -1644,7 +1664,7 @@ class Core:
         finally:
             loop.close()
             thread_pool_executor.shutdown()
-        log.info("exit")
+        cls.log.info("exit")
 
 
 main = Core.main

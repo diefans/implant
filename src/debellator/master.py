@@ -35,7 +35,7 @@ async def _execute_command(io_queues, line):
     default_lines = {
         b'e\n': (b'debellator.commands:Echo data=bar\n', {}),
         b'i\n': (b'debellator.core:InvokeImport fullname=debellator.commands\n', {}),
-        b'\n': (b'debellator.commands:Echo data=bar\n', {}),
+        b'\n': (b'debellator.commands:SystemLoad data=bar\n', {}),
     }
 
     if line in default_lines:
@@ -145,19 +145,20 @@ def main(debug=False, log_config=None):
         log.setLevel(logging.DEBUG)
 
     console = Console({
-        # testing.PipeConnector(loop=self.loop): {},
-        connect.Local(): {
-            'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-        },
+        # testing.PipeConnector(loop=loop): {},
+        # connect.Local(): {
+        #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+        # },
         # connect.Ssh(hostname='localhost'): {
         #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
         # },
-        # connect.Lxd(
-        #     container='zesty',
-        #     hostname='localhost'
-        # ): {
-        #     'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
-        # },
+        connect.Lxd(
+            container='zesty',
+            hostname='localhost',
+            loop=loop,
+        ): {
+            'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
+        },
     }, loop=loop, **options)
     task = asyncio.ensure_future(console.run())
 
