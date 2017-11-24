@@ -12,11 +12,10 @@ import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
-import inspect
-import io
 import logging
 import logging.config
 import os
+import signal
 import struct
 import sys
 import threading
@@ -42,83 +41,12 @@ def colored(msg, color='red'):
     return colors[color] + msg + colors[None]
 
 
-class MsgpackMeta(abc.ABCMeta):
-    ext_handlers_encode = {}
-    ext_handlers_decode = {}
-    custom_encoders = {}
-
-    def register(cls, data_type=None, ext_code=None):
-        def decorator(handler):
-            if not issubclass(handler, Msgpack):
-                raise TypeError("Msgpack handler must be a subclass"
-                                " of abstract `Msgpack` class: {}".format(handler))
-            if data_type is None:
-                _data_type = handler
-            else:
-                _data_type = data_type
-
-            if ext_code is not None:
-                cls.ext_handlers_encode[_data_type] = \
-                    lambda data: msgpack.Ext(ext_code, handler.__msgpack_encode__(data, _data_type))
-                cls.ext_handlers_decode[ext_code] = \
-                    lambda ext: handler.__msgpack_decode__(ext.data, _data_type)
-            else:
-                cls.custom_encoders[_data_type] = handler
-            return handler
-        return decorator
-
-    def encode(cls, data):
-        encoded_data = msgpack.Encoder.packb(data, ext_handlers=cls.ext_handlers_encode)
-        return encoded_data
-
-    def decode(cls, encoded_data):
-        data = msgpack.Decoder.unpackb(encoded_data, ext_handlers=cls.ext_handlers_decode)
-        return data
-
-    def get_custom_encoder(cls, data_type):
-        if issubclass(data_type, Msgpack):
-            return data_type
-
-        # lookup data types for registered encoders
-        for subclass in data_type.__mro__:
-            try:
-                return cls.custom_encoders[subclass]
-            except KeyError:
-                continue
-        return None
-
-
-class Msgpack(metaclass=MsgpackMeta):
-
-    """Add msgpack en/decoding to a type."""
-
-    @abc.abstractclassmethod
-    def __msgpack_encode__(cls, data, data_type):
-        return None
-
-    @abc.abstractclassmethod
-    def __msgpack_decode__(cls, encoded_data, data_type):
-        return None
-
-    @classmethod
-    def __subclasshook__(cls, C):
-        if cls is Msgpack:
-            if any("__msgpack_encode__" in B.__dict__ for B in C.__mro__) \
-                    and any("__msgpack_decode__" in B.__dict__ for B in C.__mro__):
-                return True
-        return NotImplemented
-
-
-encode = Msgpack.encode
-decode = Msgpack.decode
-
-
-@Msgpack.register(object, 0x01)
+@msgpack.register(object, 0x01)
 class CustomEncoder:
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
         data_type = type(data)
-        encoder = Msgpack.get_custom_encoder(data_type)
+        encoder = msgpack.get_custom_encoder(data_type)
         if encoder is None:
             raise TypeError("There is no custom encoder for this type registered: {}".format(data_type))
 
@@ -127,11 +55,11 @@ class CustomEncoder:
             'module': data_type.__module__,
             'data': encoder.__msgpack_encode__(data, data_type)
         }
-        return encode(wrapped)
+        return msgpack.encode(wrapped)
 
     @classmethod
     def __msgpack_decode__(cls, encoded_data, data_type):
-        wrapped = decode(encoded_data)
+        wrapped = msgpack.decode(encoded_data)
 
         try:
             module = sys.modules[wrapped['module']]
@@ -140,7 +68,7 @@ class CustomEncoder:
             # XXX should we import the module?
 
         data_type = getattr(module, wrapped['type'])
-        encoder = Msgpack.get_custom_encoder(data_type)
+        encoder = msgpack.get_custom_encoder(data_type)
         if encoder is None:
             raise TypeError("There is no custom encoder for this type registered: {}".format(data_type))
 
@@ -148,48 +76,48 @@ class CustomEncoder:
         return data
 
 
-@Msgpack.register(tuple, 0x02)
+@msgpack.register(tuple, 0x02)
 class TupleEncoder:
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode(list(data))
+        return msgpack.encode(list(data))
 
     @classmethod
     def __msgpack_decode__(cls, encoded_data, data_type):
-        return tuple(decode(encoded_data))
+        return tuple(msgpack.decode(encoded_data))
 
 
-@Msgpack.register(set, 0x03)
+@msgpack.register(set, 0x03)
 class SetEncoder:
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode(list(data))
+        return msgpack.encode(list(data))
 
     @classmethod
     def __msgpack_decode__(cls, encoded_data, data_type):
-        return set(decode(encoded_data))
+        return set(msgpack.decode(encoded_data))
 
 
-@Msgpack.register(Exception, 0x04)
+@msgpack.register(Exception, 0x04)
 class ExceptionEncoder:
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode(data.args)
+        return msgpack.encode(data.args)
 
     @classmethod
     def __msgpack_decode__(cls, encoded_data, data_type):
-        return data_type(*decode(encoded_data))
+        return data_type(*msgpack.decode(encoded_data))
 
 
-@Msgpack.register(StopAsyncIteration, 0x05)
+@msgpack.register(StopAsyncIteration, 0x05)
 class StopAsyncIterationEncoder:
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode(data.args)
+        return msgpack.encode(data.args)
 
     @classmethod
     def __msgpack_decode__(cls, encoded_data, data_type):
-        return StopAsyncIteration(*decode(encoded_data))
+        return StopAsyncIteration(*msgpack.decode(encoded_data))
 
 
 class reify:
@@ -329,9 +257,9 @@ class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
         """Shutdown process."""
         super(ShutdownOnConnectionLost, self).connection_lost(exc)
 
-        if exc is not None:
-            log.warning("Connection lost by %s", exc)
-        # log.info("Pending tasks: %s", [task for task in asyncio.Task.all_tasks()])
+        log.warning('Connection lost: %s', exc)
+        pending_tasks = [task for task in asyncio.Task.all_tasks() if task._state == asyncio.futures._PENDING]
+        log.info('Pending tasks: %s', pending_tasks)
         # os.kill(os.getpid(), signal.SIGHUP)
 
 
@@ -550,7 +478,7 @@ class Channels:
         if chunk.flags.eom:
             # put message into channel queue
             if chunk.uid in buffer and chunk.channel_name:
-                msg = decode(buffer[chunk.uid])
+                msg = msgpack.decode(buffer[chunk.uid])
                 try:
                     # try to store message in channel
                     await self.incomming[chunk.channel_name].put(msg)
@@ -635,7 +563,7 @@ class Channels:
         """
         uid = Uid()
         encoded_channel_name = channel_name.encode()
-        encoded_data = encode(data)
+        encoded_data = msgpack.encode(data)
 
         self.log.debug("%s: channel `%s` sends: %s bytes", uid, channel_name, len(encoded_data))
 
@@ -1030,6 +958,10 @@ class _CommandMeta(type):
         return command
 
 
+class RemoteClassNotSetException(Exception):
+    pass
+
+
 class CommandRemote:
 
     """Delegates remote task to another class.
@@ -1056,7 +988,7 @@ class CommandRemote:
         # log.debug(colored('Import: %s', 'green'), self.full_classname)
 
         if self.remote_class is None:
-            raise RuntimeError('set_remote_class must be called before accessing the descriptor')
+            raise RemoteClassNotSetException('set_remote_class must be called before accessing the descriptor')
         # loop = asyncio.get_event_loop()
         # future = asyncio.run_coroutine_threadsafe(async_import(module_name, loop=loop), loop)
         # module = future.result()
@@ -1174,7 +1106,7 @@ class DispatchCommand(DispatchMessage):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode((
+        return msgpack.encode((
             data.fqin,
             data.command_name,
             data.command_class,
@@ -1184,7 +1116,7 @@ class DispatchCommand(DispatchMessage):
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        return cls(*decode(encoded))
+        return cls(*msgpack.decode(encoded))
 
 
 class DispatchReady(DispatchMessage):
@@ -1194,11 +1126,11 @@ class DispatchReady(DispatchMessage):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode(data.fqin)
+        return msgpack.encode(data.fqin)
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        fqin = decode(encoded)
+        fqin = msgpack.decode(encoded)
         return cls(fqin)
 
 
@@ -1216,11 +1148,11 @@ class DispatchException(DispatchMessage):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode((data.fqin, data.exception, data.tb))
+        return msgpack.encode((data.fqin, data.exception, data.tb))
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        fqin, exc, tb = decode(encoded)
+        fqin, exc, tb = msgpack.decode(encoded)
         return cls(fqin, exc, tb)
 
 
@@ -1237,11 +1169,11 @@ class DispatchResult(DispatchMessage):
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
-        return encode((data.fqin, data.result))
+        return msgpack.encode((data.fqin, data.result))
 
     @classmethod
     def __msgpack_decode__(cls, encoded, data_type):
-        return cls(*decode(encoded))
+        return cls(*msgpack.decode(encoded))
 
 
 # events are taken from https://github.com/zopefoundation/zope.event
