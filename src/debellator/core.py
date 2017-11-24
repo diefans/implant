@@ -3,7 +3,6 @@
 It creates default channels and dispatches commands accordingly.
 
 """  # pylint: disable=C0302
-import abc
 import asyncio
 import collections
 import concurrent
@@ -895,7 +894,7 @@ class Dispatcher:
             tb = traceback.format_exc()
             self.log.error("traceback:\n%s", tb)
             asyncio.ensure_future(
-                dispatcher.channel.send(DispatchException(self.fqin, exception=ex, tb=tb))
+                self.channel.send(DispatchException(fqin, exception=ex, tb=tb))
             )
 
 
@@ -1322,7 +1321,6 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         self.loop = loop
 
     def _find_remote_spec_data(self, fullname):
-
         self.log.debug(colored('start coroutine', 'green'))
         future = asyncio.run_coroutine_threadsafe(
             self.dispatcher.execute(FindSpecData, fullname=fullname),
