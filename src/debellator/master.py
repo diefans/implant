@@ -182,6 +182,6 @@ def main(debug=False, log_config=None):
         for task in asyncio.Task.all_tasks():
             if not task.done():
                 log.error("pending: %s", task)
+    log.info(' - '.join(["this is the end"] * 3))
     loop.stop()
     loop.close()
-    log.info(' - '.join(["this is the end"] * 3))
