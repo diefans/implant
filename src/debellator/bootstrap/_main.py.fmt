@@ -16,4 +16,4 @@ debellator.__dict__["core"] = core
 
 c = compile(zlib.decompress(base64.b64decode(b"{code}")), "{code_path}", "exec", dont_inherit=True)
 exec(c, core.__dict__)
-core.main(**core.decode(base64.b64decode(b"{options}")))
+core.main(**msgpack.decode(base64.b64decode(b"{options}")))

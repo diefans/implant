@@ -24,7 +24,7 @@ class Bootstrap(dict):
         if options is None:
             options = {}
 
-        self.options = base64.b64encode(core.encode(options)).decode(),
+        self.options = base64.b64encode(msgpack.encode(options)).decode(),
 
         venv = options.get('venv')
         self.venv = VENV_DEFAULT if venv is True\

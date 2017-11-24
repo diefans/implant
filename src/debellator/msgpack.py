@@ -32,11 +32,11 @@
 #
 """This is a modified Python 3 only version of umsgpack."""
 
-import struct
+import abc
 import collections
-import sys
 import io
-
+import struct
+import sys
 
 ##############################################################################
 # Ext Class
@@ -44,6 +44,7 @@ import io
 
 # Extension type for application-defined types and data
 class Ext:
+
     """
     The Ext class facilitates creating a serializable extension object to store
     an application-defined type and data byte array.
@@ -82,23 +83,17 @@ class Ext:
         self.data = data
 
     def __eq__(self, other):
-        """
-        Compare this Ext object with another for equality.
-        """
+        """Compare this Ext object with another for equality."""
         return (isinstance(other, self.__class__) and
                 self.type == other.type and
                 self.data == other.data)
 
     def __ne__(self, other):
-        """
-        Compare this Ext object with another for inequality.
-        """
+        """Compare this Ext object with another for inequality."""
         return not self.__eq__(other)
 
     def __str__(self):
-        """
-        String representation of this Ext object.
-        """
+        """String representation of this Ext object."""
         s = "Ext Object (Type: 0x%02x, Data: " % self.type
         s += " ".join(["0x%02x" % ord(self.data[i:i + 1])
                        for i in xrange(min(len(self.data), 8))])
@@ -108,15 +103,13 @@ class Ext:
         return s
 
     def __hash__(self):
-        """
-        Provide a hash of this Ext object.
-        """
+        """Provide a hash of this Ext object."""
         return hash((self.type, self.data))
 
 
 class InvalidString(bytes):
+
     """Subclass of bytes to hold invalid UTF-8 strings."""
-    pass
 
 ##############################################################################
 # Exceptions
@@ -125,62 +118,56 @@ class InvalidString(bytes):
 
 # Base Exception classes
 class PackException(Exception):
-    "Base class for exceptions encountered during packing."
-    pass
+
+    """Base class for exceptions encountered during packing."""
 
 
 class UnpackException(Exception):
-    "Base class for exceptions encountered during unpacking."
-    pass
+
+    """Base class for exceptions encountered during unpacking."""
 
 
 # Packing error
 class UnsupportedTypeException(PackException):
-    "Object type not supported for packing."
-    pass
+
+    """Object type not supported for packing."""
 
 
 # Unpacking error
 class InsufficientDataException(UnpackException):
-    "Insufficient data to unpack the serialized object."
-    pass
+
+    """Insufficient data to unpack the serialized object."""
 
 
 class InvalidStringException(UnpackException):
-    "Invalid UTF-8 string encountered during unpacking."
-    pass
+
+    """Invalid UTF-8 string encountered during unpacking."""
 
 
 class ReservedCodeException(UnpackException):
-    "Reserved code encountered during unpacking."
-    pass
+
+    """Reserved code encountered during unpacking."""
 
 
 class UnhashableKeyException(UnpackException):
-    """
-    Unhashable key encountered during map unpacking.
+
+    """Unhashable key encountered during map unpacking.
+
     The serialized map cannot be deserialized into a Python dictionary.
     """
-    pass
 
 
 class DuplicateKeyException(UnpackException):
-    "Duplicate key encountered during map unpacking."
-    pass
 
+    """Duplicate key encountered during map unpacking."""
 
-# Backwards compatibility
-KeyNotPrimitiveException = UnhashableKeyException
-KeyDuplicateException = DuplicateKeyException
 
 class Encoder:
-
     # Auto-detect system float precision
     if sys.float_info.mant_dig == 53:
         _float_precision = "double"
     else:
         _float_precision = "single"
-
 
     ##############################################################################
     # Packing
@@ -367,7 +354,7 @@ class Encoder:
 
     @classmethod
     def packb(cls, obj, **options):
-        """Serialize a Python object into MessagePack bytes.
+        r"""Serialize a Python object into MessagePack bytes.
 
         Args:
             obj: a Python object
@@ -389,9 +376,10 @@ class Encoder:
                 Object type not supported for packing.
 
         Example:
-        >>> umsgpack.packb({u"compact": True, u"schema": 0})
-        b'\x82\xa7compact\xc3\xa6schema\x00'
-        >>>
+            >>> umsgpack.packb({u"compact": True, u"schema": 0})
+            b'\x82\xa7compact\xc3\xa6schema\x00'
+            >>>
+
         """
         fp = io.BytesIO()
         cls.pack(obj, fp, **options)
@@ -638,7 +626,6 @@ class _DecoderMeta(type):
 
 
 class Decoder(metaclass=_DecoderMeta):
-
     @classmethod
     def _unpack(cls, fp, options):
         code = cls._read_except(fp, 1)
@@ -653,3 +640,79 @@ class Decoder(metaclass=_DecoderMeta):
         if not isinstance(s, (bytes, bytearray)):
             raise TypeError("packed data must be type 'bytes' or 'bytearray'")
         return cls._unpack(io.BytesIO(s), options)
+
+
+class MsgpackMeta(abc.ABCMeta):
+
+    """Manages ext handler and custom encoder registration."""
+
+    ext_handlers_encode = {}
+    ext_handlers_decode = {}
+    custom_encoders = {}
+
+    def register(cls, data_type=None, ext_code=None):
+        def decorator(handler):
+            if not issubclass(handler, Msgpack):
+                raise TypeError("Msgpack handler must be a subclass"
+                                " of abstract `Msgpack` class: {}".format(handler))
+            if data_type is None:
+                _data_type = handler
+            else:
+                _data_type = data_type
+
+            if ext_code is not None:
+                cls.ext_handlers_encode[_data_type] = \
+                    lambda data: Ext(ext_code, handler.__msgpack_encode__(data, _data_type))
+                cls.ext_handlers_decode[ext_code] = \
+                    lambda ext: handler.__msgpack_decode__(ext.data, _data_type)
+            else:
+                cls.custom_encoders[_data_type] = handler
+            return handler
+        return decorator
+
+    def encode(cls, data):
+        encoded_data = Encoder.packb(data, ext_handlers=cls.ext_handlers_encode)
+        return encoded_data
+
+    def decode(cls, encoded_data):
+        data = Decoder.unpackb(encoded_data, ext_handlers=cls.ext_handlers_decode)
+        return data
+
+    def get_custom_encoder(cls, data_type):
+        if issubclass(data_type, Msgpack):
+            return data_type
+
+        # lookup data types for registered encoders
+        for subclass in data_type.__mro__:
+            try:
+                return cls.custom_encoders[subclass]
+            except KeyError:
+                continue
+        return None
+
+
+class Msgpack(metaclass=MsgpackMeta):
+
+    """Add msgpack en/decoding to a type."""
+
+    @abc.abstractclassmethod
+    def __msgpack_encode__(cls, data, data_type):
+        return None
+
+    @abc.abstractclassmethod
+    def __msgpack_decode__(cls, encoded_data, data_type):
+        return None
+
+    @classmethod
+    def __subclasshook__(cls, C):
+        if cls is Msgpack:
+            if any("__msgpack_encode__" in B.__dict__ for B in C.__mro__) \
+                    and any("__msgpack_decode__" in B.__dict__ for B in C.__mro__):
+                return True
+        return NotImplemented
+
+
+encode = Msgpack.encode
+decode = Msgpack.decode
+register = Msgpack.register
+get_custom_encoder = Msgpack.get_custom_encoder

@@ -197,20 +197,37 @@ class Uid:
         return cls(bytes=encoded)
 
 
+class ConnectionLostStreamReaderProtocol(asyncio.StreamReaderProtocol):
+    def __init__(self, *args, connection_lost_cb, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.connection_lost_cb = connection_lost_cb
+        log.info('%s', locals())
+
+    def connection_lost(self, exc):
+        super().connection_lost(exc)
+        self.connection_lost_cb(exc)
+
+
 class Incomming(asyncio.StreamReader):
 
     """A context for an incomming pipe."""
 
-    def __init__(self, *, pipe=sys.stdin, loop=None):
+    def __init__(self, *, connection_lost_cb=None, pipe=sys.stdin, loop=None):
         super(Incomming, self).__init__(loop=loop)
         self.pipe = os.fdopen(pipe) if isinstance(pipe, int) else pipe
+        self.connection_lost_cb = connection_lost_cb
 
     async def __aenter__(self):
         await self.connect()
         return self
 
     async def connect(self):
-        protocol = asyncio.StreamReaderProtocol(self)
+        if self.connection_lost_cb:
+            protocol = ConnectionLostStreamReaderProtocol(
+                self, connection_lost_cb=self.connection_lost_cb, loop=self._loop
+            )
+        else:
+            protocol = asyncio.StreamReaderProtocol(self, loop=self._loop)
 
         transport, protocol = await self._loop.connect_read_pipe(
             lambda: protocol,
@@ -249,30 +266,16 @@ class Incomming(asyncio.StreamReader):
         return buffer
 
 
-class ShutdownOnConnectionLost(asyncio.streams.FlowControlMixin):
-
-    """Send SIGHUP when connection is lost."""
-
-    def connection_lost(self, exc):
-        """Shutdown process."""
-        super(ShutdownOnConnectionLost, self).connection_lost(exc)
-
-        log.warning('Connection lost: %s', exc)
-        pending_tasks = [task for task in asyncio.Task.all_tasks() if task._state == asyncio.futures._PENDING]
-        log.info('Pending tasks: %s', pending_tasks)
-        # os.kill(os.getpid(), signal.SIGHUP)
-
-
 class Outgoing:
 
     """A context for an outgoing pipe."""
 
-    def __init__(self, *, pipe=sys.stdout, reader=None, shutdown=False, loop=None):
+    def __init__(self, *, pipe=sys.stdout, reader=None, loop=None):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.pipe = os.fdopen(pipe) if isinstance(pipe, int) else pipe
         self.transport = None
         self.reader = reader
-        self.shutdown = shutdown
+        self.writer = None
 
     async def __aenter__(self):
         writer = await self.connect()
@@ -280,7 +283,7 @@ class Outgoing:
 
     async def connect(self):
         self.transport, protocol = await self.loop.connect_write_pipe(
-            ShutdownOnConnectionLost if self.shutdown else asyncio.streams.FlowControlMixin,
+            asyncio.streams.FlowControlMixin,
             self.pipe
         )
 
@@ -288,7 +291,7 @@ class Outgoing:
             self.transport,
             protocol,
             self.reader,
-            asyncio.get_event_loop()
+            self.loop
         )
         return writer
 
@@ -1489,6 +1492,7 @@ class Core:
     def __init__(self, loop, *, echo=None, **kwargs):
         self.loop = loop
         self.echo = echo
+        self.kill_on_connection_lost = True
 
     async def communicate(self, reader, writer):
         try:
@@ -1503,7 +1507,7 @@ class Core:
             # shutdown is done via event
             @event_handler(ShutdownRemoteEvent)
             async def _shutdown(event):
-                self.log.info("Shutdown remote event")
+                self.log.info("Shutting down...")
 
                 self.teardown_import_hook(remote_module_finder)
 
@@ -1512,6 +1516,7 @@ class Core:
 
                 fut_enqueue.cancel()
                 await fut_enqueue
+                self.log.info('Shutdown end.')
 
             self.setup_import_hook(remote_module_finder)
 
@@ -1519,6 +1524,38 @@ class Core:
         except asyncio.CancelledError:
             self.log.info("Cancelled communicate??")
         self.log.info('Communication end.')
+
+    def handle_connection_lost(self, exc):
+        """We kill the process on connection lost, to avoid orphans."""
+        log.info('Connection lost: exc=%s', exc)
+        if self.kill_on_connection_lost:
+            pending_tasks = [
+                task for task in asyncio.Task.all_tasks()
+                if task._state == asyncio.futures._PENDING
+            ]
+            log.info('Pending tasks: %s', pending_tasks)
+            pid = os.getpid()
+            log.warning('Force shutdown of process: %s', pid)
+            os.kill(pid, signal.SIGHUP)
+
+    async def connect_sysio(self):
+        return await self.connect(stdin=sys.stdin, stdout=sys.stdout)
+
+    async def connect(self, *, stdin, stdout, stderr=None):
+        self.log.info(' *** ' * 5)
+        self.log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
+
+        async with Incomming(pipe=stdin, connection_lost_cb=self.handle_connection_lost) as reader:
+            async with Outgoing(pipe=stdout) as writer:
+                # TODO think about generic handshake
+                # send echo to master to prove behavior
+                if self.echo is not None:
+                    writer.write(self.echo)
+                    await writer.drain()
+
+                await self.communicate(reader, writer)
+                # suspend kill of process, since we have a clean shutdown
+                self.kill_on_connection_lost = False
 
     @staticmethod
     def setup_import_hook(module_finder):
@@ -1564,22 +1601,6 @@ class Core:
         if debug:
             self.log.setLevel(logging.DEBUG)
             self.loop.set_debug(debug)
-
-    async def connect_sysio(self):
-        return await self.connect(stdin=sys.stdin, stdout=sys.stdout)
-
-    async def connect(self, *, stdin, stdout, stderr=None):
-        self.log.info(' *** ' * 5)
-        self.log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
-        async with Incomming(pipe=stdin) as reader:
-            async with Outgoing(pipe=stdout, shutdown=True) as writer:
-                # TODO think about generic handshake
-                # send echo to master to prove behavior
-                if self.echo is not None:
-                    writer.write(self.echo)
-                    await writer.drain()
-
-                await self.communicate(reader, writer)
 
     @classmethod
     def main(cls, debug=False, log_config=None, *, loop=None, **kwargs):

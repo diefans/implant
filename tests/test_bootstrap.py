@@ -49,7 +49,7 @@ def test_bootstrap_iter(inspect, with_venv, venv_lines, options):
         'c = compile(zlib.decompress(base64.b64decode(b"eNpLLC5OLSpRCCkqTQUAGlIEUw==")),'
         ' "remote-string://", "exec", dont_inherit=True)\n',
         'exec(c, core.__dict__)\n',
-        'core.main(**core.decode(base64.b64decode(b"{options}")))\n'.format(
+        'core.main(**msgpack.decode(base64.b64decode(b"{options}")))\n'.format(
             msgpack_code=msgpack_code, options=options)
     ]
 

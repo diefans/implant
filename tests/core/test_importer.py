@@ -70,7 +70,7 @@ async def test_find_spec_data(remote_task, fake_module_finder, fullname, result)
 
 
 @pytest.mark.asyncio
-async def test_invoke_import(remote_task):
+async def _test_invoke_import(remote_task):
     from debellator import core
     import logging
     logging.basicConfig(level=logging.DEBUG)

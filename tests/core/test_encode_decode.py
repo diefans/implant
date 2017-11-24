@@ -25,9 +25,9 @@ class Foo:
 def test_encode_uid(core):
     uid = core.Uid()
 
-    encoded = core.encode(uid)
+    encoded = core.msgpack.encode(uid)
 
-    decoded = core.decode(encoded)
+    decoded = core.msgpack.decode(encoded)
 
     assert uid == decoded
     assert isinstance(uid, core.Uid)
@@ -36,28 +36,28 @@ def test_encode_uid(core):
 def test_default_encoder_exception(core):
     ex = Exception('foobar')
 
-    encoded = core.encode(ex)
+    encoded = core.msgpack.encode(ex)
 
-    decoded = core.decode(encoded)
+    decoded = core.msgpack.decode(encoded)
 
     assert ex.args == decoded.args
 
 
 def test_subclass(core):
-    assert issubclass(Foo, core.Msgpack)
+    assert issubclass(Foo, core.msgpack.Msgpack)
 
 
 def test_encode_decode(core):
     data = (1, 'abc', 2.3, {1, 2, 3}, {1: 2})
-    encoded_data = core.Msgpack.encode(data)
-    decoded_data = core.Msgpack.decode(encoded_data)
+    encoded_data = core.msgpack.encode(data)
+    decoded_data = core.msgpack.decode(encoded_data)
     assert data == decoded_data
 
 
 def test_custom_encoder(core):
     data = Foo(1, 2)
-    encoded_data = core.Msgpack.encode(data)
-    decoded_data = core.Msgpack.decode(encoded_data)
+    encoded_data = core.msgpack.encode(data)
+    decoded_data = core.msgpack.decode(encoded_data)
     assert (data.a, data.b) == (decoded_data.a, decoded_data.b)
 
 
@@ -66,8 +66,8 @@ def test_command(core):
     data = core.Command()
     data.a = 1
     data.b = 2
-    encoded_data = core.encode(data)
-    decoded_data = core.decode(encoded_data)
+    encoded_data = core.msgpack.encode(data)
+    decoded_data = core.msgpack.decode(encoded_data)
 
     assert decoded_data == {'a': 1, 'b': 2}
     assert isinstance(decoded_data, core.Command)
@@ -78,14 +78,14 @@ def test_dispatch_command(core):
     cmd = commands.Echo(foo='bar')
     data = core.DispatchCommand('fqin', *cmd.dispatch_data)
 
-    encoded_data = core.encode(data)
-    decoded_data = core.decode(encoded_data)
+    encoded_data = core.msgpack.encode(data)
+    decoded_data = core.msgpack.decode(encoded_data)
     assert isinstance(decoded_data, core.DispatchCommand)
     assert decoded_data.__dict__ == data.__dict__
 
 
 def test_stop_async_iteration(core):
     data = StopAsyncIteration()
-    encoded_data = core.encode(data)
-    decoded_data = core.decode(encoded_data)
+    encoded_data = core.msgpack.encode(data)
+    decoded_data = core.msgpack.decode(encoded_data)
     assert isinstance(decoded_data, StopAsyncIteration)
