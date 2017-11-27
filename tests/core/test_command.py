@@ -3,9 +3,14 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_remote_descriptor(core):
+    import importlib
+
     class Foo(core.Command):
         foobar = core.Parameter(description='foobar')
         remote = core.CommandRemote('debellator.testing.foobar.Foobar')
+
+    module = importlib.import_module('debellator.testing.foobar')
+    Foo.remote.set_remote_class(module)
 
     foo = Foo()
     foo.foobar = 'foobar'

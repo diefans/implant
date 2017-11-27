@@ -939,24 +939,19 @@ class _CommandMeta(type):
         command_class = cls.commands[command_name]
         return command_class
 
-    def _split_command_name(cls, command_name):
+    def split_command_name(cls, command_name):
         module_name, command_class_name = command_name.split(':')
         return module_name, command_class_name
 
     async def create_command(cls, command_name, params, *, loop):
-        module_name, command_class_name = cls._split_command_name(command_name)
-
+        module_name, command_class_name = cls.split_command_name(command_name)
         module = sys.modules.get(module_name, await async_import(module_name, loop=loop))
-
         command_class = getattr(module, command_class_name)
+
+        if isinstance(command_class.remote, CommandRemote):
+            await command_class.remote.prepare()
+
         command = command_class(**params)
-
-        if isinstance(command.__class__.remote, CommandRemote):
-            remote = command.__class__.remote
-            remote_module_name, _ = remote.full_classname.rsplit('.', 1)
-            remote_module = await async_import(remote_module_name)
-            remote.set_remote_class(remote_module)
-
         return command
 
 
@@ -974,8 +969,8 @@ class CommandRemote:
     log = logging.getLogger(__module__ + '.' + __qualname__)
 
     def __init__(self, full_classname):
-        self.full_classname = full_classname
         self.name = None
+        self.module_name, self.class_name = full_classname.rsplit('.', 1)
         self.remote_class = None
 
     def __set_name__(self, owner, name):
@@ -985,19 +980,8 @@ class CommandRemote:
         if inst is None:
             return self
 
-        # log.debug(colored('Import: %s', 'green'), self.full_classname)
-        # module_name, class_name = self.full_classname.rsplit('.', 1)
-        # log.debug(colored('Import: %s', 'green'), self.full_classname)
-
         if self.remote_class is None:
-            raise RemoteClassNotSetException('set_remote_class must be called before accessing the descriptor')
-        # loop = asyncio.get_event_loop()
-        # future = asyncio.run_coroutine_threadsafe(async_import(module_name, loop=loop), loop)
-        # module = future.result()
-
-        # # module = importlib.import_module(module_name)
-        # log.debug(colored('Import: %s', 'green'), self.full_classname)
-        # remote_class = getattr(module, class_name)
+            raise RemoteClassNotSetException('remote_class must be set before accessing the descriptor')
 
         remote_inst = self.remote_class()
         for name, param in inst:
@@ -1008,9 +992,12 @@ class CommandRemote:
 
         return remote_inst.remote
 
-    def set_remote_class(self, remote_module):
-        module_name, class_name = self.full_classname.rsplit('.', 1)
-        self.remote_class = getattr(remote_module, class_name)
+    def set_remote_class(self, module):
+        self.remote_class = getattr(module, self.class_name)
+
+    async def prepare(self):
+        module = await async_import(self.module_name)
+        self.set_remote_class(module)
 
 
 class NoDefault:
