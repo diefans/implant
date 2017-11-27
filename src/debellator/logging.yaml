@@ -10,8 +10,6 @@ formatters:
 
 handlers:
     console:
-        # FIXME Executor disturbes uvloop
-        #class: debellator.core.ExecutorConsoleHandler
         class: logging.StreamHandler
         level: !!python/name:logging.NOTSET
         #level: DEBUG

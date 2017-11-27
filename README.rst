@@ -13,6 +13,8 @@ Features
 
 - adhoc transferable remote procedures
 
+- remote part of a `Command` may reside in a separate module
+
 - a `Command` specific `Channel` enables arbitrary protocols between local and remote side
 
 - events
@@ -30,8 +32,6 @@ Limitations
 - only pure Python modules are supported for remote import, if no venv is used
 
 - `Commands` must reside in a module other then `__main__`
-
-- local and remote part of a `Command` share the same module
 
 - at the moment sudo must not ask for password
 

@@ -17,27 +17,15 @@ import os
 import signal
 import struct
 import sys
-import threading
 import time
 import traceback
+import uuid
 import weakref
 import zlib
 
 from . import msgpack
 
 log = logging.getLogger(__name__)
-
-
-colors = {
-    'red': '\033[0;31m',
-    'green': '\033[0;32m',
-    'yellow': '\033[1;33m',
-    None: '\033[0m',
-}
-
-
-def colored(msg, color='red'):
-    return colors[color] + msg + colors[None]
 
 
 @msgpack.register(object, 0x01)
@@ -119,73 +107,12 @@ class StopAsyncIterationEncoder:
         return StopAsyncIteration(*msgpack.decode(encoded_data))
 
 
-class reify:
-
-    """Create a property and cache the result."""
-
-    def __init__(self, wrapped):
-        self.wrapped = wrapped
-        functools.update_wrapper(self, wrapped)
-
-    def __get__(self, inst, objtype=None):
-        if inst is None:
-            return self
-
-        val = self.wrapped(inst)
-        setattr(inst, self.wrapped.__name__, val)
-
-        return val
-
-
-class Uid:
-
-    """Represent a unique id."""
-
-    _uid = threading.local()
-
-    def __init__(self, time=None, id=None, tid=None, seq=None, bytes=None):     # noqa
-        fmt = "!dQQQ"
-        all_args = [time, id, tid, seq].count(None) == 0
-
-        if not all_args:
-            if bytes:
-                time, id, tid, seq = struct.unpack(fmt, bytes)
-            else:
-                time, id, tid, seq = self._create_uid()
-
-        self.bytes = bytes or struct.pack(fmt, time, id, tid, seq)
-        self.time = time
-        self.id = id
-        self.tid = tid
-        self.seq = seq
-
-    @classmethod
-    def _create_uid(cls):
-        if getattr(cls._uid, "uid", None) is None:
-            thread = threading.current_thread()
-            cls._uid.tid = thread.ident
-            cls._uid.id = id(thread)
-            cls._uid.uid = 0
-
-        cls._uid.uid += 1
-        uid = (time.time(), cls._uid.id, cls._uid.tid, cls._uid.uid)
-
-        return uid
-
-    def __hash__(self):
-        return hash(self.bytes)
-
-    def __eq__(self, other):
-        if isinstance(other, Uid):
-            return (self.time, self.id, self.tid, self.seq) == (other.time, other.id, other.tid, other.seq)
-
-        return False
-
-    def __str__(self):
-        return '-'.join(map(str, (self.time, self.id, self.tid, self.seq)))
-
-    def __repr__(self):
-        return str(self)
+class Uid(uuid.UUID):
+    def __init__(self, bytes=None):
+        if bytes is None:
+            super().__init__(bytes=os.urandom(16), version=4)
+        else:
+            super().__init__(bytes=bytes, version=4)
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -343,16 +270,19 @@ class ChunkFlags(dict):
         return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
 
 
-HEADER_FMT = '!32sQHI'
+HEADER_FMT = '!16sQHI'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 
 def _encode_header(uid, channel_name=None, data=None, *, flags=None):
     """Create chunk header.
 
-    [header length = 30 bytes]
-    [2 byte] [!16s]     [!Q: 8 bytes]                     [!H: 2 bytes]        [!I: 4 bytes]
-    {type}{data uuid}{flags: compression|eom|stop_iter}{channel_name length}{data length}{channel_name}{data}
+    [!16s]          {data uuid}
+    [!Q: 8 bytes]   {flags: compression|eom|stop_iter}
+    [!H: 2 bytes]   {channel_name length}
+    [!I: 4 bytes]   {data length}
+                    {channel_name}
+                    {data}
 
     """
     assert isinstance(uid, Uid), "uid must be an Uid instance"
@@ -741,7 +671,7 @@ class Dispatcher:
 
         try:
             async for message in self.channel:
-                self.log.debug(colored("%s - received dispatch message: %s", 'yellow'), message.fqin, type(message))
+                self.log.debug("%s - received dispatch message: %s", message.fqin, type(message))
                 fut_message = asyncio.ensure_future(message(self))
                 fut_message.add_done_callback(functools.partial(handle_message_exception, message))
 
@@ -755,10 +685,11 @@ class Dispatcher:
                 await fut
                 del self.pending_commands[fqin]
 
-    def create_command(self, command_name, params):
+    def create_command_fqin(self, command_name, params):
         command_class = Command[command_name] if isinstance(command_name, str) else command_name
+        fqin = command_class.create_fqin()
         command = command_class(**params)
-        return command
+        return command, fqin
 
     async def execute(self, command_name, **params):
         """Execute a command.
@@ -767,8 +698,7 @@ class Dispatcher:
         and second executing its local part.
 
         """
-        command = self.create_command(command_name, params)
-        fqin = command.__class__.create_fqin()
+        command, fqin = self.create_command_fqin(command_name, params)
 
         await self.channel.send(DispatchCommand(fqin, *command.dispatch_data), ack=True)
 
@@ -776,9 +706,9 @@ class Dispatcher:
             context = self.local_context(fqin, future)
             try:
                 evt_dispatch_ready = self.pending_dispatches[fqin]
-                self.log.debug(colored("%s - waiting for dispatch to be ready", 'yellow'), fqin)
+                self.log.debug("%s - waiting for dispatch to be ready", fqin)
                 await evt_dispatch_ready.wait()
-                self.log.debug(colored("%s - execute command: %s", 'yellow'), fqin, command)
+                self.log.debug("%s - execute command: %s", fqin, command)
                 # execute local side of command
                 result = await command.local(context)
                 # get remote_future
@@ -786,7 +716,7 @@ class Dispatcher:
                 return result
 
             except:     # noqa
-                self.log.error(colored("Error while executing command: %s\n%s", 'red'), command, traceback.format_exc())
+                self.log.error("Error while executing command: %s\n%s", command, traceback.format_exc())
                 raise
 
     def remote_future(self, fqin, command):        # noqa
@@ -849,14 +779,14 @@ class Dispatcher:
         # TODO current_task is not a stable API see PyO3/tokio#54
         current_task = asyncio.Task.current_task()
         self.pending_remote_tasks.add(current_task)
-        self.log.debug(colored("%s - starting remote task", 'yellow'), fqin)
+        self.log.debug("%s - starting remote task", fqin)
         context = self.remote_context(fqin, current_task)
         await self.channel.send(DispatchReady(fqin))
         try:
             # execute remote side of command
-            self.log.debug(colored('%s - execute remote side', 'yellow'), fqin)
+            self.log.debug('%s - execute remote side', fqin)
             result = await command.remote(context)
-            self.log.debug(colored('%s - send remote result', 'yellow'), fqin)
+            self.log.debug('%s - send remote result', fqin)
             await self.channel.send(DispatchResult(fqin, result=result))
 
             return result
@@ -885,11 +815,12 @@ class Dispatcher:
 
     async def execute_dispatch_command(self, fqin, command_name, params):
         try:
-            self.log.debug(colored('%s - create command', 'yellow'), fqin)
+            self.log.debug('%s - create command', fqin)
             command = await Command.create_command(command_name, params, loop=self.loop)
-            self.log.debug(colored('%s - start execute_remote', 'yellow'), fqin)
+            self.log.debug('%s - start execute_remote', fqin)
             await self.execute_remote(fqin, command)
-            self.log.debug(colored('%s - finished execute_remote', 'yellow'), fqin)
+            self.log.debug('%s - finished execute_remote', fqin)
+
         except Exception as ex:
             tb = traceback.format_exc()
             self.log.error("traceback:\n%s", tb)
@@ -988,7 +919,7 @@ class CommandRemote:
             setattr(remote_inst, name, param)
 
         setattr(inst, self.name, remote_inst.remote)
-        self.log.debug(colored('Remote of %s outsourced to %s', 'green'), inst, remote_inst.remote)
+        self.log.debug('Remote of %s outsourced to %s', inst, remote_inst.remote)
 
         return remote_inst.remote
 
@@ -1001,7 +932,11 @@ class CommandRemote:
 
 
 class NoDefault:
-    pass
+
+    """Just a marker class to represent no default.
+
+    This is to separate really nothing and `None`.
+    """
 
 
 class Parameter:
@@ -1308,13 +1243,13 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         self.loop = loop
 
     def _find_remote_spec_data(self, fullname):
-        self.log.debug(colored('start coroutine', 'green'))
+        self.log.debug('start coroutine')
         future = asyncio.run_coroutine_threadsafe(
             self.dispatcher.execute(FindSpecData, fullname=fullname),
             loop=self.loop
         )
         spec_data = future.result()
-        self.log.debug(colored('spec result: %s', 'green'), spec_data)
+        self.log.debug('spec result: %s', spec_data)
         return spec_data
 
     def _create_namespace_spec(self, spec_data):
@@ -1347,7 +1282,7 @@ class RemoteModuleFinder(importlib.abc.MetaPathFinder):
         return spec
 
     def find_spec(self, fullname, path, target=None):
-        self.log.debug(colored('find spec: %s', 'green'), fullname)
+        self.log.debug('find spec: %s', fullname)
         spec_data = self._find_remote_spec_data(fullname)
         if spec_data is None:
             spec = None
@@ -1422,54 +1357,6 @@ class ShutdownRemoteEvent:
         return data_type()
 
 
-class ExecutorConsoleHandler(logging.StreamHandler):
-
-    # FIXME TODO Executor seems to disturb uvloop so that it hangs randomly
-
-    """Run logging in a separate executor, to not block on console output."""
-
-    def __init__(self, *args, **kwargs):
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=150)
-
-        super(ExecutorConsoleHandler, self).__init__(*args, **kwargs)
-
-    def emit(self, record):
-        # FIXME is not really working on sys.stdout
-        # logging in thread breaks weakref in Channels
-
-        def _emit():
-            thread_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(thread_loop)
-
-            try:
-                super(ExecutorConsoleHandler, self).emit(record)
-            finally:
-                thread_loop.close()
-
-        # with concurrent.futures.ThreadPoolExecutor() as executor:
-        #     await loop.run_in_executor(executor, import_stuff)
-
-        asyncio.get_event_loop().run_in_executor(
-            self.executor, _emit
-        )
-
-    def __del__(self):
-        self.executor.shutdown(wait=True)
-
-
-class Worker:
-    def __init__(self):
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(
-            target=self._run_event_loop
-        )
-        self.thread.start()
-
-    def _run_event_loop(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
-
-
 class Core:
 
     log = logging.getLogger(__module__ + '.' + __qualname__)
@@ -1518,7 +1405,7 @@ class Core:
                 task for task in asyncio.Task.all_tasks()
                 if task._state == asyncio.futures._PENDING
             ]
-            log.info('Pending tasks: %s', pending_tasks)
+            log.warning('Pending tasks: %s', pending_tasks)
             pid = os.getpid()
             log.warning('Force shutdown of process: %s', pid)
             os.kill(pid, signal.SIGHUP)
@@ -1527,9 +1414,7 @@ class Core:
         return await self.connect(stdin=sys.stdin, stdout=sys.stdout)
 
     async def connect(self, *, stdin, stdout, stderr=None):
-        self.log.info(' *** ' * 5)
         self.log.info("Starting process %s: pid=%s of ppid=%s", __name__, os.getpid(), os.getppid())
-
         async with Incomming(pipe=stdin, connection_lost_cb=self.handle_connection_lost) as reader:
             async with Outgoing(pipe=stdout) as writer:
                 # TODO think about generic handshake
