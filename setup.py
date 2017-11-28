@@ -84,29 +84,10 @@ setup(
         'src',
         exclude=["tests*"]
     ),
+    include_package_data=True,
     entry_points={
         'console_scripts': [
             'debellator=debellator.scripts:run'
-        ],
-        # register modules with rpc classes
-        'debellator.plugins': [
-            '_ = debellator.core',
-            'core = debellator.plugins.core'
-        ],
-        # register yaml constructors
-        'debellator.registry': [
-            'setup = debellator.evolve:setup',
-        ],
-        # register spec packages
-        'debellator.specs': [
-            'default = debellator.specs',
-        ],
-        'debellator.test.specs': [
-            'default = debellator.test_specs.default',
-            'duplicate = debellator.test_specs.duplicate'
-        ],
-        'debellator.assets': [
-            'default = debellator.assets'
         ],
         'pytest11': ['debellator = debellator.testing'],
     },
@@ -123,14 +104,5 @@ setup(
 
     tests_require=['tox'],
     cmdclass={'test': Tox},
-    # tests_require=[
-    #     # tests
-    #     'pytest',
-    #     'pytest-pep8',
-    #     'pytest-cache',
-    #     'pytest-random',
-    #     'mock',
-    #     'docker-py',
-    # ],
     # cmdclass={'test': PyTest},
 )
