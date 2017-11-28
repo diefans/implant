@@ -1,6 +1,9 @@
 debellator
 **********
 
+.. image:: https://travis-ci.org/diefans/debellator.svg?branch=master
+   :target: https://travis-ci.org/diefans/debellator
+
 A proof-of-concept for asynchronous adhoc remote procedure calls in Python.
 
 This is work in progress and serves basically as an exercise.
