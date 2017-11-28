@@ -110,9 +110,14 @@ class StopAsyncIterationEncoder:
 class Uid(uuid.UUID):
     def __init__(self, bytes=None):
         if bytes is None:
-            super().__init__(bytes=os.urandom(16), version=4)
+            super().__init__(bytes=uuid.uuid1().bytes, version=1)
         else:
-            super().__init__(bytes=bytes, version=4)
+            super().__init__(bytes=bytes, version=1)
+
+    @property
+    def time(self):
+        time = (super().time - 0x01b21dd213814000) * 100 / 1e9
+        return time
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -234,94 +239,148 @@ def split_data(data, size=1024):
         start = end
 
 
-class ChunkFlags(dict):
+class OrderedMeta(type):
+    items = []
 
-    """Store flags for a chunk."""
-
-    _masks = {
-        'eom': (1, 0, int, bool),
-        'send_ack': (1, 1, int, bool),
-        'recv_ack': (1, 2, int, bool),
-        'compression': (1, 3, int, bool),
-    }
-
-    def __init__(self, *, send_ack=False, recv_ack=False, eom=False, compression=False):
-        self.__dict__ = self
-        super(ChunkFlags, self).__init__()
-
-        self.eom = eom
-        self.send_ack = send_ack
-        self.recv_ack = recv_ack
-        self.compression = compression
-
-    def encode(self):
-        def _mask_value(k, v):
-            mask, shift, enc, _ = self._masks[k]
-            return (enc(v) & mask) << shift
-
-        return sum(_mask_value(k, v) for k, v in self.items())
+    def __call__(cls, *args, **kwargs):
+        inst = super().__call__(*args, **kwargs)
+        cls.items.append(inst)
+        return inst
 
     @classmethod
-    def decode(cls, value):
-        def _unmask_value(k, v):
-            mask, shift, _, dec = v
-            return dec((value >> shift) & mask)
+    def ordered_items(mcs, dct, cls_order=None):
+        def sort(item):
+            if cls_order is not None:
+                try:
+                    cls_index = cls_order.index(item[1].__class__)
+                except ValueError:
+                    cls_index = None
+                return cls_index, mcs.items.index(item[1])
+            return mcs.items.index(item[1])
 
-        return cls(**{k: _unmask_value(k, v) for k, v in cls._masks.items()})
-
-
-HEADER_FMT = '!16sQHI'
-HEADER_SIZE = struct.calcsize(HEADER_FMT)
-
-
-def _encode_header(uid, channel_name=None, data=None, *, flags=None):
-    """Create chunk header.
-
-    [!16s]          {data uuid}
-    [!Q: 8 bytes]   {flags: compression|eom|stop_iter}
-    [!H: 2 bytes]   {channel_name length}
-    [!I: 4 bytes]   {data length}
-                    {channel_name}
-                    {data}
-
-    """
-    assert isinstance(uid, Uid), "uid must be an Uid instance"
-
-    if flags is None:
-        flags = {}
-
-    if channel_name:
-        encoded_channel_name = channel_name.encode()
-        channel_name_length = len(encoded_channel_name)
-    else:
-        channel_name_length = 0
-
-    data_length = len(data) if data else 0
-    chunk_flags = ChunkFlags(**flags)
-
-    header = struct.pack(
-        HEADER_FMT,
-        uid.bytes, chunk_flags.encode(), channel_name_length, data_length
-    )
-    check = hashlib.md5(header).digest()
-
-    return b''.join((header, check))
+        items = collections.OrderedDict(sorted(
+            (item for item in dct.items() if item[1] in mcs.items),
+            key=sort
+        ))
+        return items
 
 
-def _decode_header(header):
-    assert hashlib.md5(header[:-16]).digest() == header[-16:], "Header checksum mismatch!"
-    (
-        uid_bytes,
-        flags_encoded,
-        channel_name_length,
-        data_length
-    ) = struct.unpack(HEADER_FMT, header[:-16])
+class BaseHeaderItem(metaclass=OrderedMeta):
+    def __init__(self, *, default=None, encoder=None, decoder=None):
+        self.index = None
+        self.name = None
+        self.default = default
+        self.encoder = encoder
+        self.decoder = decoder
 
-    uid = Uid(bytes=uid_bytes)
-    return uid, ChunkFlags.decode(flags_encoded), channel_name_length, data_length
+    def set_index(self, index):
+        self.index = index
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def encode(self, value):
+        if self.encoder:
+            value = self.encoder(value, self)
+        return value
+
+    def decode(self, value):
+        return value
+
+    def __get__(self, inst, cls):
+        if inst is None:
+            return self
+        value = self.decode(inst)
+        if self.decoder:
+            value = self.decoder(value, self)
+        setattr(inst, self.name, value)
+        return value
 
 
-Chunk = collections.namedtuple('Chunk', ('uid', 'flags', 'channel_name', 'data'))
+class HeaderItem(BaseHeaderItem):
+    def __init__(self, fmt, **kwargs):
+        super().__init__(**kwargs)
+        self.fmt = fmt
+
+    @property
+    def size(self):
+        return struct.calcsize(self.fmt)
+
+    def encode(self, value):
+        value = super().encode(value)
+        return struct.pack(self.fmt, value or self.default)
+
+    def decode(self, value):
+        value, = struct.unpack_from(self.fmt, value, self.index)
+        return value
+
+
+class Flag(BaseHeaderItem):
+    def encode(self, value):
+        value = super().encode(value)
+        return 0 if not value else value << self.index
+
+    def decode(self, value):
+        value, = struct.unpack_from('!1B', value, 0)
+        value = value >> self.index & 1
+        return value
+
+
+class HeaderMeta(type):
+    def __new__(mcs, name, bases, dct):
+        items = dct['items'] = OrderedMeta.ordered_items(dct, (Flag, HeaderItem))
+        dct['size'] = mcs.apply_items_index(items)
+        cls = type.__new__(mcs, name, bases, dct)
+        if sys.version_info < (3, 6):
+            for name, item in items.items():
+                item.__set_name__(cls, name)
+        return cls
+
+    @classmethod
+    def apply_items_index(mcs, items):
+        flag_count = 0
+        item_size = 0
+        for name, item in items.items():
+            if isinstance(item, Flag):
+                item.set_index(flag_count)
+                flag_count += 1
+                item_size = (flag_count // 8) + (flag_count % 8 != 0)
+            else:
+                # items are ordered after type
+                item.set_index(item_size)
+                item_size += item.size
+        return item_size
+
+    def __call__(cls, encoded_bytes=None, **items):
+        if encoded_bytes:
+            inst = super().__call__(encoded_bytes)
+            return inst
+
+        flags = 0
+        encoded_items = []
+        for name, item in cls.items.items():
+            if isinstance(item, Flag):
+                flags += item.encode(items.get(name, False))
+            else:
+                encoded_items.append(item.encode(items.get(name, None)))
+        encoded_flags = bytes([flags])
+        encoded_items.insert(0, encoded_flags)
+
+        inst = super().__call__(b''.join(encoded_items))
+        return inst
+
+
+class Header(bytes, metaclass=HeaderMeta):
+    eom = Flag()
+    send_ack = Flag()
+    recv_ack = Flag()
+    compression = Flag()
+    uid = HeaderItem('!16s', encoder=lambda uid, _: uid.bytes, decoder=lambda x, _: Uid(bytes=x))
+    channel_name_len = HeaderItem('!H', default=0)
+    data_len = HeaderItem('!I', default=0)
+
+
+Chunk = collections.namedtuple('Chunk', ('header', 'channel_name', 'data'))
 
 
 class Channels:
@@ -382,65 +441,63 @@ class Channels:
 
     async def _read_chunk(self):
         # read header
-        raw_header = await self.reader.readexactly(HEADER_SIZE + 16)
-        uid, flags, channel_name_length, data_length = _decode_header(raw_header)
-
-        self.log.debug("%s: flags %s", uid, flags)
+        raw_header = await self.reader.readexactly(Header.size)
+        header = Header(raw_header)
 
         # read channel name
-        channel_name = (await self.reader.readexactly(channel_name_length)).decode() \
-            if channel_name_length else None
+        channel_name = (await self.reader.readexactly(header.channel_name_len)).decode() \
+            if header.channel_name_len else None
 
         # read data
-        if data_length:
-            data = await self.reader.readexactly(data_length)
-            if flags.compression:
+        if header.data_len:
+            data = await self.reader.readexactly(header.data_len)
+            if header.compression:
                 data = zlib.decompress(data)
         else:
             data = None
 
-        chunk = Chunk(uid, flags, channel_name, data)
+        chunk = Chunk(header, channel_name, data)
         return chunk
 
     async def _finalize_message(self, buffer, chunk):
-        if chunk.flags.send_ack:
+        if chunk.header.send_ack:
             # we have to acknowledge the reception
-            await self._send_ack(chunk.uid)
+            await self._send_ack(chunk.header.uid)
 
-        if chunk.flags.eom:
+        if chunk.header.eom:
             # put message into channel queue
-            if chunk.uid in buffer and chunk.channel_name:
-                msg = msgpack.decode(buffer[chunk.uid])
+            if chunk.header.uid in buffer and chunk.channel_name:
+                msg = msgpack.decode(buffer[chunk.header.uid])
                 try:
                     # try to store message in channel
                     await self.incomming[chunk.channel_name].put(msg)
                 finally:
-                    del buffer[chunk.uid]
+                    del buffer[chunk.header.uid]
 
             # acknowledge reception
-            ack_future = self.acknowledgements.get(chunk.uid)
-            if ack_future and chunk.flags.recv_ack:
+            ack_future = self.acknowledgements.get(chunk.header.uid)
+            if ack_future and chunk.header.recv_ack:
                 try:
-                    self.log.debug("%s: acknowledge", chunk.uid)
-                    duration = time.time() - chunk.uid.time
-                    ack_future.set_result((chunk.uid, duration))
+                    self.log.debug("%s: acknowledge", chunk.header.uid)
+                    duration = time.time() - chunk.header.uid.time
+                    ack_future.set_result((chunk.header.uid, duration))
                 finally:
-                    del self.acknowledgements[chunk.uid]
+                    del self.acknowledgements[chunk.header.uid]
 
     @classmethod
     def _feed_data(cls, buffer, chunk):
         if chunk.data:
-            if chunk.uid not in buffer:
-                buffer[chunk.uid] = bytearray()
+            if chunk.header.uid not in buffer:
+                buffer[chunk.header.uid] = bytearray()
 
-            buffer[chunk.uid].extend(chunk.data)
+            buffer[chunk.header.uid].extend(chunk.data)
 
         # debug
         if chunk.channel_name:
             cls.log.debug("%s: channel `%s` receives: %s bytes",
-                          chunk.uid, chunk.channel_name, len(chunk.data) if chunk.data else 0)
+                          chunk.header.uid, chunk.channel_name, len(chunk.data) if chunk.data else 0)
         else:
-            cls.log.debug("%s: no channel received: %s", chunk.uid, chunk.flags)
+            cls.log.debug("%s: no channel received: %s", chunk.header.uid, chunk.header)
 
     async def _receive_single_message(self, buffer):
         chunk = await self._read_chunk()
@@ -470,10 +527,7 @@ class Channels:
 
     async def _send_ack(self, uid):
         # no channel_name, no data
-        header = _encode_header(uid, None, None, flags={
-            'eom': True, 'recv_ack': True
-        })
-
+        header = Header(uid=uid, eom=True, recv_ack=True)
         self.log.debug("%s: send acknowledgement", uid)
         await self._send_raw(header)
 
@@ -496,7 +550,7 @@ class Channels:
         uid = Uid()
         encoded_channel_name = channel_name.encode()
         encoded_data = msgpack.encode(data)
-
+        channel_name_len = len(encoded_channel_name)
         self.log.debug("%s: channel `%s` sends: %s bytes", uid, channel_name, len(encoded_data))
 
         for part in split_data(encoded_data, self.chunk_size):
@@ -508,15 +562,15 @@ class Channels:
                 self.log.debug("%s: compression ratio of %s -> %s: %.2f%%",
                                uid, raw_len, comp_len, comp_len * 100 / raw_len)
 
-            header = _encode_header(uid, channel_name, part, flags={
-                'eom': False, 'send_ack': False, 'compression': bool(compress)
-            })
+            header = Header(uid=uid, channel_name_len=channel_name_len, data_len=len(part),
+                            eom=False, send_ack=False, compression=bool(compress)
+            )
 
             await self._send_raw(header, encoded_channel_name, part)
 
-        header = _encode_header(uid, channel_name, None, flags={
-            'eom': True, 'send_ack': ack, 'compression': False
-        })
+        header = Header(uid=uid, channel_name_len=channel_name_len, data_len=0,
+                        eom=True, send_ack=ack, compression=False
+        )
 
         # if acknowledgement is asked for, we await this future and return its result
         # see _receive_reader for resolution of future

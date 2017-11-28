@@ -1,4 +1,5 @@
 """Provide a pytest fixture for testing commands."""
+from async_generator import yield_, async_generator
 import asyncio
 import os
 
@@ -59,10 +60,11 @@ async def create_pipe_remote(stdin_pipe, stdout_pipe, stderr_pipe, *, loop=None)
 
 
 @pytest.fixture
+@async_generator
 async def remote_task(event_loop):
     connector = PipeConnector(loop=event_loop)
     remote = await connector.launch()
     com_remote = asyncio.ensure_future(remote.communicate())
-    yield remote
+    await yield_(remote)
     com_remote.cancel()
     await com_remote
