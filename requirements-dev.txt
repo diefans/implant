@@ -14,3 +14,5 @@ radon
 isort
 ipython
 pdbpp
+colorlog
+tox

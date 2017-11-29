@@ -22,13 +22,21 @@ def run():
               type=click.File('r'),
               default=None,
               help='Logging configuration in yaml format.')
+@click.option('--remote-log-config',
+              type=click.File('r'),
+              default=None,
+              help='Logging configuration in yaml format.')
 # @click.option('--config', '-c', default=None, help='General configuration.')
 @click.pass_context
-def cli(ctx, event_loop, debug, log_config):
+def cli(ctx, event_loop, debug, log_config, remote_log_config):
     if log_config is None:
         log_config = pkg_resources.resource_string('debellator', 'logging.yaml')
 
+    if remote_log_config is None:
+        remote_log_config = pkg_resources.resource_string('debellator', 'remote-logging.yaml')
+
     log_config = yaml.load(log_config)
+    remote_log_config = yaml.load(remote_log_config)
     logging.config.dictConfig(log_config)
 
     if event_loop == 'uvloop':
@@ -60,7 +68,7 @@ def cli(ctx, event_loop, debug, log_config):
             master.core.log.setLevel(logging.DEBUG)
             asyncio.get_event_loop().set_debug(debug)
 
-        master.main(log_config=log_config, debug=debug)
+        master.main(log_config=remote_log_config, debug=debug)
 
     else:
         if debug:

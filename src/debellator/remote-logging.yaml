@@ -5,22 +5,16 @@ disable_existing_loggers: true
 version: 1
 formatters:
     simple:
-        format: '{asctime} - {process}/{thread} - {levelname} - {name} - {message}'
+        #format: '{asctime} - {process}/{thread} - {levelname} - {name} - {message}'
+        format: '{levelname} - {name} - {message}'
         style: '{'
-
-    colored:
-        (): colorlog.TTYColoredFormatter
-        format: '{asctime} - {process}/{thread} - {log_color}{levelname}{reset} - {name} - {message}'
-        #format: '{log_color}{levelname}{reset} - {name} - {message}'
-        style: '{'
-
 
 handlers:
     console:
         class: logging.StreamHandler
         level: !!python/name:logging.NOTSET
         #level: DEBUG
-        formatter: colored
+        formatter: simple
         stream: ext://sys.stderr
 
     logfile:
