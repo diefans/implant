@@ -414,17 +414,16 @@ class Channels:
         :param channel_name: the name of the channel to create
 
         """
-        queue = asyncio.Queue(loop=self.loop)
+        channel = Channel(
+            channel_name,
+            send=functools.partial(self.send, channel_name),
+            loop=self.loop
+        )
         try:
-            channel = Channel(
-                channel_name,
-                send=functools.partial(self.send, channel_name),
-                queue=queue
-            )
             return channel
 
         finally:
-            self.incomming[channel_name] = queue
+            self.incomming[channel_name] = channel
 
     async def enqueue(self):
         """Schedule receive tasks.
@@ -607,11 +606,11 @@ class Channels:
             return acknowledgement
 
 
-class Channel:
+class Channel(asyncio.Queue):
 
     """Channel provides means to send and receive messages bound to a specific channel name."""
 
-    def __init__(self, name=None, *, queue, send):
+    def __init__(self, name=None, *, send, loop=None):
         """Initialize the channel.
 
         :param name: the channel name
@@ -619,34 +618,26 @@ class Channel:
         :param send: the partial send method of Channels
 
         """
+        super().__init__(loop=loop)
         self.name = name
-        self.queue = queue
         self.send = send
 
     def __repr__(self):
         return '<{0.name} {in_size}>'.format(
             self,
-            in_size=self.queue.qsize(),
+            in_size=self.qsize(),
         )
 
-    async def get(self):
-        msg = await self.queue.get()
+    async def pop(self):
+        msg = await super().get()
         try:
             return msg
         finally:
-            self.queue.task_done()
+            self.task_done()
 
     def __await__(self):
         """Receive the next message in this channel."""
-        async def coro():
-            msg = await self.queue.get()
-
-            try:
-                return msg
-            finally:
-                self.queue.task_done()
-
-        return coro().__await__()
+        return self.pop().__await__()
 
     if PY_35:
         if PY_352:
@@ -755,7 +746,7 @@ class Dispatcher:
                 )
         try:
             while True:
-                message = await self.channel.get()
+                message = await self.channel.pop()
                 self.log.debug("[a] %s - received dispatch message: %s", message.fqin, message)
                 fut_message = asyncio.ensure_future(message(self))
                 fut_message.add_done_callback(functools.partial(handle_message_exception, message))
