@@ -7,7 +7,6 @@ import asyncio
 import collections
 import concurrent
 import functools
-import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -33,13 +32,16 @@ log = logging.getLogger(__name__)
 
 @msgpack.register(object, 0x01)
 class CustomEncoder:
+
+    """Encode custom objects registered before."""
+
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
         data_type = type(data)
         encoder = msgpack.get_custom_encoder(data_type)
         if encoder is None:
-            raise TypeError("There is no custom encoder for this type registered: {}".format(data_type))
-
+            raise TypeError("There is no custom encoder for this type registered: {}"
+                            .format(data_type))
         wrapped = {
             'type': data_type.__name__,
             'module': data_type.__module__,
@@ -50,24 +52,21 @@ class CustomEncoder:
     @classmethod
     def __msgpack_decode__(cls, encoded_data, data_type):
         wrapped = msgpack.decode(encoded_data)
-
-        try:
-            module = sys.modules[wrapped['module']]
-        except KeyError:
-            raise
-            # XXX should we import the module?
-
+        module = sys.modules[wrapped['module']]
         data_type = getattr(module, wrapped['type'])
         encoder = msgpack.get_custom_encoder(data_type)
         if encoder is None:
-            raise TypeError("There is no custom encoder for this type registered: {}".format(data_type))
-
+            raise TypeError("There is no custom encoder for this type registered: {}"
+                            .format(data_type))
         data = encoder.__msgpack_decode__(wrapped['data'], data_type)
         return data
 
 
 @msgpack.register(tuple, 0x02)
 class TupleEncoder:
+
+    """Encoder for :py:obj:`tuple`."""
+
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
         return msgpack.encode(list(data))
@@ -79,6 +78,9 @@ class TupleEncoder:
 
 @msgpack.register(set, 0x03)
 class SetEncoder:
+
+    """Encoder for :py:obj:`set`."""
+
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
         return msgpack.encode(list(data))
@@ -90,6 +92,9 @@ class SetEncoder:
 
 @msgpack.register(Exception, 0x04)
 class ExceptionEncoder:
+
+    """Encoder for :py:obj:`Exception`."""
+
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
         return msgpack.encode(data.args)
@@ -101,6 +106,9 @@ class ExceptionEncoder:
 
 @msgpack.register(StopAsyncIteration, 0x05)
 class StopAsyncIterationEncoder:
+
+    """Encoder for :py:obj:`StopAsyncIteration`."""
+
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
         return msgpack.encode(data.args)
@@ -111,7 +119,10 @@ class StopAsyncIterationEncoder:
 
 
 class Uid(uuid.UUID):
-    def __init__(self, bytes=None):
+
+    """A unique id."""
+
+    def __init__(self, bytes=None):     # pylint: disable=W0622
         if bytes is None:
             super().__init__(bytes=uuid.uuid1().bytes, version=1)
         else:
@@ -119,8 +130,8 @@ class Uid(uuid.UUID):
 
     @property
     def time(self):
-        time = (super().time - 0x01b21dd213814000) * 100 / 1e9
-        return time
+        uid_time = (super().time - 0x01b21dd213814000) * 100 / 1e9
+        return uid_time
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -132,6 +143,9 @@ class Uid(uuid.UUID):
 
 
 class ConnectionLostStreamReaderProtocol(asyncio.StreamReaderProtocol):
+
+    """Call a callback on connection_lost."""
+
     def __init__(self, *args, connection_lost_cb, **kwargs):
         super().__init__(*args, **kwargs)
         self.connection_lost_cb = connection_lost_cb
@@ -155,6 +169,7 @@ class Incomming(asyncio.StreamReader):
         return self
 
     async def connect(self):
+        """Connect the pipe."""
         if self.connection_lost_cb:
             protocol = ConnectionLostStreamReaderProtocol(
                 self, connection_lost_cb=self.connection_lost_cb, loop=self._loop
@@ -215,6 +230,7 @@ class Outgoing:
         return writer
 
     async def connect(self):
+        """Connect the pipe."""
         self.transport, protocol = await self.loop.connect_write_pipe(
             asyncio.streams.FlowControlMixin,
             self.pipe
@@ -242,6 +258,9 @@ def split_data(data, size=1024):
 
 
 class OrderedMeta(type):
+
+    """Preserve the order of instance creation."""
+
     items = []
 
     def __call__(cls, *args, **kwargs):
@@ -251,7 +270,8 @@ class OrderedMeta(type):
 
     @classmethod
     def ordered_items(mcs, dct, cls_order=None):
-        def sort(item):
+        """Sort and filter items by type and instance creation."""
+        def _sort(item):
             if cls_order is not None:
                 try:
                     cls_index = cls_order.index(item[1].__class__)
@@ -262,12 +282,15 @@ class OrderedMeta(type):
 
         items = collections.OrderedDict(sorted(
             (item for item in dct.items() if item[1] in mcs.items),
-            key=sort
+            key=_sort
         ))
         return items
 
 
 class BaseHeaderItem(metaclass=OrderedMeta):
+
+    """A base item of a header."""
+
     def __init__(self, *, default=None, encoder=None, decoder=None):
         self.index = None
         self.name = None
@@ -276,17 +299,21 @@ class BaseHeaderItem(metaclass=OrderedMeta):
         self.decoder = decoder
 
     def set_index(self, index):
+        """Set the index of the item in the header."""
         self.index = index
 
     def __set_name__(self, owner, name):
         self.name = name
 
     def encode(self, value):
+        """Encode the value of that item."""
         if self.encoder:
             value = self.encoder(value, self)
         return value
 
-    def decode(self, value):
+    @staticmethod
+    def decode(value):
+        """Decode the value of that item."""
         return value
 
     def __get__(self, inst, cls):
@@ -300,12 +327,16 @@ class BaseHeaderItem(metaclass=OrderedMeta):
 
 
 class HeaderItem(BaseHeaderItem):
+
+    """An item of a header."""
+
     def __init__(self, fmt, **kwargs):
         super().__init__(**kwargs)
         self.fmt = fmt
 
     @property
     def size(self):
+        """The size of the item."""
         return struct.calcsize(self.fmt)
 
     def encode(self, value):
@@ -318,6 +349,9 @@ class HeaderItem(BaseHeaderItem):
 
 
 class Flag(BaseHeaderItem):
+
+    """A boolean flag of a header."""
+
     def encode(self, value):
         value = super().encode(value)
         return 0 if not value else value << self.index
@@ -329,20 +363,24 @@ class Flag(BaseHeaderItem):
 
 
 class HeaderMeta(type):
+
+    """Order items and set the size of the header."""
+
     def __new__(mcs, name, bases, dct):
         items = dct['items'] = OrderedMeta.ordered_items(dct, (Flag, HeaderItem))
         dct['size'] = mcs.apply_items_index(items)
         cls = type.__new__(mcs, name, bases, dct)
         if sys.version_info < (3, 6):
-            for name, item in items.items():
-                item.__set_name__(cls, name)
+            for item_name, item in items.items():
+                item.__set_name__(cls, item_name)
         return cls
 
     @classmethod
     def apply_items_index(mcs, items):
+        """Apply the index of each item."""
         flag_count = 0
         item_size = 0
-        for name, item in items.items():
+        for item in items.values():
             if isinstance(item, Flag):
                 item.set_index(flag_count)
                 flag_count += 1
@@ -373,6 +411,9 @@ class HeaderMeta(type):
 
 
 class Header(bytes, metaclass=HeaderMeta):
+
+    """The chunk header with flags and items."""
+
     eom = Flag()
     send_ack = Flag()
     recv_ack = Flag()
@@ -382,7 +423,8 @@ class Header(bytes, metaclass=HeaderMeta):
     data_len = HeaderItem('!I', default=0)
 
     def __repr__(self):
-        return '<Header {self.uid} {eom} {self.data_len}>'.format(self=self, eom=' eom' if self.eom else '')
+        return '<Header {self.uid} {eom} {self.data_len}>'\
+            .format(self=self, eom=' eom' if self.eom else '')
 
 
 Chunk = collections.namedtuple('Chunk', ('header', 'channel_name', 'data'))
