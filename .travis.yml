@@ -4,6 +4,6 @@ python:
   - "3.5"
   - "3.6"
   - "3.7-dev"
-  - "pypy3.5"
+  - "pypy3"
 install: pip install tox-travis
 script: tox
