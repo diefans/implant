@@ -59,12 +59,15 @@ def mocked_meta_path(request, fake_module_finder):
     })
 ])
 @pytest.mark.usefixtures('mocked_meta_path')
-async def test_find_spec_data(remote_task, fake_module_finder, fullname, result):
+async def test_find_spec_data(remote_task, fake_module_finder, fullname,
+                              result):
     from debellator import core
 
     with mock.patch('debellator.testing.foobar.__spec__.origin', 'origin'), \
-            mock.patch('debellator.testing.foobar.__spec__.loader.get_source', return_value='source'):
-        spec_data = await remote_task.execute(core.FindSpecData, fullname=fullname)
+            mock.patch('debellator.testing.foobar.__spec__.loader.get_source',
+                       return_value='source'):
+        spec_data = await remote_task.execute(core.FindSpecData,
+                                              fullname=fullname)
 
     assert spec_data == result
 
@@ -75,5 +78,6 @@ async def _test_invoke_import(remote_task):
     import logging
     logging.basicConfig(level=logging.DEBUG)
 
-    result = await remote_task.execute(core.InvokeImport, fullname='debellator.commands')
+    result = await remote_task.execute(core.InvokeImport,
+                                       fullname='debellator.commands')
     assert result is not None
