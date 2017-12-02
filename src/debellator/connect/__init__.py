@@ -15,7 +15,9 @@ log = logging.getLogger(__name__)
 
 class RemoteMisbehavesError(Exception):
 
-    """Exception is raised, when a remote process seems to be not what we expect."""
+    """Exception is raised, when a remote process seems to be not what
+    we expect.
+    """
 
 
 class Remote(metaclass=abc.ABCMeta):
@@ -28,18 +30,20 @@ class Remote(metaclass=abc.ABCMeta):
         self.stdout = stdout
         self.stderr = stderr
 
-        self.channels = core.Channels(reader=stdout, writer=stdin, loop=self.loop)
+        self.channels = core.Channels(reader=stdout, writer=stdin,
+                                      loop=self.loop)
         self.dispatcher = core.Dispatcher(self.channels, loop=self.loop)
 
         self._lck_communicate = asyncio.Lock(loop=self.loop)
 
     async def execute(self, *args, **kwargs):
+        """Just call dispatcher.execute."""
         # forward to dispatcher
         return await self.dispatcher.execute(*args, **kwargs)
 
     @abc.abstractmethod
     async def wait(self):
-        pass
+        """Wait for Remote to finish."""
 
     async def _shutdown(self, *futures):
         log.info("Send shutdown: %s", self)
@@ -54,23 +58,24 @@ class Remote(metaclass=abc.ABCMeta):
         await self.wait()
 
     async def communicate(self):
+        """Schedule the dispatcher."""
         async with self._lck_communicate:
             never_ending = asyncio.Future(loop=self.loop)
 
-            async def enqueue():
+            async def _enqueue():
                 try:
                     await self.channels.enqueue()
                 except Exception as ex:     # pylint: disable=W0703
                     never_ending.set_exception(ex)
 
-            async def dispatch():
+            async def _dispatch():
                 try:
                     await self.dispatcher.dispatch()
                 except Exception as ex:     # pylint: disable=W0703
                     never_ending.set_exception(ex)
 
-            fut_enqueue = asyncio.ensure_future(enqueue(), loop=self.loop)
-            fut_dispatch = asyncio.ensure_future(dispatch(), loop=self.loop)
+            fut_enqueue = asyncio.ensure_future(_enqueue(), loop=self.loop)
+            fut_dispatch = asyncio.ensure_future(_dispatch(), loop=self.loop)
 
             try:
                 await never_ending
@@ -79,7 +84,8 @@ class Remote(metaclass=abc.ABCMeta):
                 await self._shutdown(fut_dispatch, fut_enqueue)
 
             except Exception:
-                log.error("Error while processing:\n%s", traceback.format_exc())
+                log.error("Error while processing:\n%s",
+                          traceback.format_exc())
                 raise
 
 
@@ -103,6 +109,7 @@ class SubprocessRemote(Remote):
 
     @property
     def returncode(self):
+        """The exit code of the process."""
         return self._transport.get_returncode()
 
     async def wait(self):
@@ -110,17 +117,21 @@ class SubprocessRemote(Remote):
         return await self._transport._wait()    # pylint: disable=W0212
 
     def send_signal(self, signal):
+        """Send a sgnal to the process."""
         self._transport.send_signal(signal)
 
     def terminate(self):
+        """Terminate the process."""
         self._transport.terminate()
 
     def kill(self):
+        """Kill the process."""
         self._transport.kill()
 
 
 class Connector:
-    pass
+
+    """Base Connector class."""
 
 
 class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
@@ -133,7 +144,8 @@ class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
         self.loop = loop if loop is None else asyncio.get_event_loop()
 
     def __hash__(self):
-        return hash(frozenset(map(lambda k: (k, getattr(self, k)), self.__slots__)))
+        return hash(frozenset(map(lambda k: (k, getattr(self, k)),
+                                  self.__slots__)))
 
     def __eq__(self, other):
         return hash(self) == hash(other)
@@ -155,7 +167,8 @@ class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
 
         """
 
-    async def launch(self, *, code=None, options=None, python_bin=sys.executable, **kwargs):
+    async def launch(self, *, code=None, options=None,
+                     python_bin=sys.executable, **kwargs):
         """Launch a remote process.
 
         :param code: the python module to bootstrap
@@ -175,23 +188,27 @@ class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
         )
         log.debug("Connector arguments: %s", ' '.join(command_args))
 
-        remote = await create_subprocess_remote(*command_args, bootstrap_code, loop=self.loop, **kwargs)
+        remote = await create_subprocess_remote(*command_args, bootstrap_code,
+                                                loop=self.loop, **kwargs)
 
         # TODO protocol needs improvement
-        # some kind of a handshake, which is independent of sending echo via process options
+        # some kind of a handshake, which is independent
+        # of sending echo via process options
         try:
             # wait for remote behavior to echo
             remote_echo = await remote.stdout.readexactly(len(echo))
             assert echo == remote_echo, "Remote process misbehaves!"
 
         except AssertionError:
-            raise RemoteMisbehavesError("Remote does not echo `{}`!".format(echo))
+            raise RemoteMisbehavesError(
+                "Remote does not echo `{}`!".format(echo))
 
         except EOFError:
             errors = []
             async for line in remote.stderr:
                 errors.append(line)
-            log.error("Remote close stdout on bootstrap:\n%s", (b''.join(errors)).decode('utf-8'))
+            log.error("Remote close stdout on bootstrap:\n%s",
+                      (b''.join(errors)).decode('utf-8'))
             raise RemoteMisbehavesError("Remote closed stdout!", errors)
 
         log.info("Started remote process: %s", remote)
@@ -201,24 +218,27 @@ class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
 _DEFAULT_LIMIT = 2 ** 16
 
 
-async def create_subprocess_remote(program, *args, loop=None, limit=_DEFAULT_LIMIT, **kwds):
+async def create_subprocess_remote(program, *args, loop=None,
+                                   limit=_DEFAULT_LIMIT, **kwds):
+    """Create a remote subprocess."""
     if loop is None:
         loop = asyncio.events.get_event_loop()
 
-    def preexec_detach_from_parent():
+    def _preexec_detach_from_parent():
         # prevents zombie processes via ssh
         os.setpgrp()
 
-    def protocol_factory():
-        return asyncio.subprocess.SubprocessStreamProtocol(limit=limit, loop=loop)
+    def _protocol_factory():
+        return asyncio.subprocess.SubprocessStreamProtocol(limit=limit,
+                                                           loop=loop)
 
     transport, protocol = await loop.subprocess_exec(
-        protocol_factory,
+        _protocol_factory,
         program, *args,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        preexec_fn=preexec_detach_from_parent,
+        preexec_fn=_preexec_detach_from_parent,
         **kwds
     )
     return SubprocessRemote(transport, protocol)
@@ -293,7 +313,8 @@ class Lxd(Ssh):
 
     __slots__ = ('sudo', 'hostname', 'user', 'container')
 
-    def __init__(self, *, container, hostname=None, user=None, sudo=None, loop=None):
+    def __init__(self, *, container, hostname=None, user=None, sudo=None,
+                 loop=None):
         super().__init__(hostname=hostname, user=user, sudo=sudo, loop=loop)
         self.container = container
 
@@ -303,7 +324,9 @@ class Lxd(Ssh):
         )
 
         yield from ssh_arguments
-        yield from shlex.split('''lxc exec {self.container} {python_bin} -- -c'''.format(**locals()))
+        yield from shlex.split(
+            '''lxc exec {self.container} {python_bin} -- -c'''
+            .format(**locals()))
         yield bootstrap_code
         # yield from (
         #     '(', 'lxc', 'exec', self.container,

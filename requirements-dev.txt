@@ -2,7 +2,6 @@ async_generator
 pytest
 pytest-asyncio
 pytest-xdist
-pytest-sugar
 pytest-random
 pytest-cov
 pytest-benchmark

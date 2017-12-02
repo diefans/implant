@@ -1,4 +1,6 @@
-def test_header(core):
+def test_header():
+    from debellator import core
+
     uid = core.Uid()
     h = core.Header(
         uid=uid,

@@ -38,10 +38,10 @@ import io
 import struct
 import sys
 
+
 ##############################################################################
 # Ext Class
 ##############################################################################
-
 # Extension type for application-defined types and data
 class Ext:
 
@@ -96,7 +96,7 @@ class Ext:
         """String representation of this Ext object."""
         s = "Ext Object (Type: 0x%02x, Data: " % self.type
         s += " ".join(["0x%02x" % ord(self.data[i:i + 1])
-                       for i in xrange(min(len(self.data), 8))])
+                       for i in range(min(len(self.data), 8))])
         if len(self.data) > 8:
             s += " ..."
         s += ")"
@@ -162,23 +162,25 @@ class DuplicateKeyException(UnpackException):
     """Duplicate key encountered during map unpacking."""
 
 
+##############################################################################
+# Packing
+##############################################################################
+
+# You may notice struct.pack("B", obj) instead of the simpler chr(obj) in the
+# code below. This is to allow for seamless Python 2 and 3 compatibility, as
+# chr(obj) has a str return type instead of bytes in Python 3, and
+# struct.pack(...) has the right return type in both versions.
 class Encoder:
+
+    """Provides methods for msgpack packing."""
+
     # Auto-detect system float precision
     if sys.float_info.mant_dig == 53:
         _float_precision = "double"
     else:
         _float_precision = "single"
 
-    ##############################################################################
-    # Packing
-    ##############################################################################
-
-    # You may notice struct.pack("B", obj) instead of the simpler chr(obj) in the
-    # code below. This is to allow for seamless Python 2 and 3 compatibility, as
-    # chr(obj) has a str return type instead of bytes in Python 3, and
-    # struct.pack(...) has the right return type in both versions.
-
-    @classmethod
+    @classmethod                        # noqa
     def _pack_integer(cls, obj, fp, options):
         if obj < 0:
             if obj >= -32:
@@ -217,7 +219,8 @@ class Encoder:
 
     @classmethod
     def _pack_float(cls, obj, fp, options):
-        float_precision = options.get('force_float_precision', cls._float_precision)
+        float_precision = options.get('force_float_precision',
+                                      cls._float_precision)
 
         if float_precision == "double":
             fp.write(b"\xcb" + struct.pack(">d", obj))
@@ -276,13 +279,16 @@ class Encoder:
             fp.write(b"\xd8" + struct.pack("B", obj.type & 0xff) + obj.data)
         elif len(obj.data) <= 2**8 - 1:
             fp.write(b"\xc7" +
-                     struct.pack("BB", len(obj.data), obj.type & 0xff) + obj.data)
+                     struct.pack("BB", len(obj.data), obj.type & 0xff)
+                     + obj.data)
         elif len(obj.data) <= 2**16 - 1:
             fp.write(b"\xc8" +
-                     struct.pack(">HB", len(obj.data), obj.type & 0xff) + obj.data)
+                     struct.pack(">HB", len(obj.data), obj.type & 0xff)
+                     + obj.data)
         elif len(obj.data) <= 2**32 - 1:
             fp.write(b"\xc9" +
-                     struct.pack(">IB", len(obj.data), obj.type & 0xff) + obj.data)
+                     struct.pack(">IB", len(obj.data), obj.type & 0xff)
+                     + obj.data)
         else:
             raise UnsupportedTypeException("huge ext data")
 
@@ -315,8 +321,9 @@ class Encoder:
             cls.pack(k, fp, **options)
             cls.pack(v, fp, **options)
 
-    # Pack for Python 3, with unicode 'str' type, 'bytes' type, and no 'long' type
-    @classmethod
+    # Pack for Python 3, with unicode 'str' type, 'bytes' type,
+    # and no 'long' type
+    @classmethod                # noqa
     def pack(cls, obj, fp, **options):
         # pylint: disable=W0212
         ext_handlers = options.get("ext_handlers")
@@ -360,9 +367,9 @@ class Encoder:
             obj: a Python object
 
         Kwargs:
-            ext_handlers (dict): dictionary of Ext handlers, mapping a custom type
-                                 to a callable that packs an instance of the type
-                                 into an Ext object
+            ext_handlers (dict): dictionary of Ext handlers,
+                                 mapping a custom type to a callable that packs
+                                 an instance of the type into an Ext object
             force_float_precision (str): "single" to force packing floats as
                                          IEEE-754 single-precision floats,
                                          "double" to force packing floats as
@@ -394,22 +401,26 @@ class _DecoderMeta(type):
 
     _unpack_dispatch_table = {}
 
-    def __new__(mcs, name, bases, dct):
+    def __new__(mcs, name, bases, dct):     # noqa
         cls = type.__new__(mcs, name, bases, dct)
 
         # Build a dispatch table for fast lookup of unpacking function
         # Fix uint
         for code in range(0, 0x7f + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_integer
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_integer
         # Fix map
         for code in range(0x80, 0x8f + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_map
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_map
         # Fix array
         for code in range(0x90, 0x9f + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_array
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_array
         # Fix str
         for code in range(0xa0, 0xbf + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_string
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_string
         # Nil
         cls._unpack_dispatch_table[b'\xc0'] = cls._unpack_nil
         # Reserved
@@ -419,25 +430,31 @@ class _DecoderMeta(type):
         cls._unpack_dispatch_table[b'\xc3'] = cls._unpack_boolean
         # Bin
         for code in range(0xc4, 0xc6 + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_binary
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_binary
         # Ext
         for code in range(0xc7, 0xc9 + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_ext
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_ext
         # Float
         cls._unpack_dispatch_table[b'\xca'] = cls._unpack_float
         cls._unpack_dispatch_table[b'\xcb'] = cls._unpack_float
         # Uint
         for code in range(0xcc, 0xcf + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_integer
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_integer
         # Int
         for code in range(0xd0, 0xd3 + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_integer
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_integer
         # Fixext
         for code in range(0xd4, 0xd8 + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_ext
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_ext
         # String
         for code in range(0xd9, 0xdb + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_string
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_string
         # Array
         cls._unpack_dispatch_table[b'\xdc'] = cls._unpack_array
         cls._unpack_dispatch_table[b'\xdd'] = cls._unpack_array
@@ -446,17 +463,19 @@ class _DecoderMeta(type):
         cls._unpack_dispatch_table[b'\xdf'] = cls._unpack_map
         # Negative fixint
         for code in range(0xe0, 0xff + 1):
-            cls._unpack_dispatch_table[struct.pack("B", code)] = cls._unpack_integer
+            cls._unpack_dispatch_table[struct.pack("B", code)]\
+                = cls._unpack_integer
 
         return cls
 
-    def _read_except(cls, fp, n):
+    @staticmethod
+    def _read_except(fp, n):
         data = fp.read(n)
         if len(data) < n:
             raise InsufficientDataException()
         return data
 
-    def _unpack_integer(cls, code, fp, options):
+    def _unpack_integer(cls, code, fp, options):    # noqa
         if (ord(code) & 0xe0) == 0xe0:
             return struct.unpack("b", code)[0]
         elif code == b'\xd0':
@@ -479,19 +498,22 @@ class _DecoderMeta(type):
             return struct.unpack(">Q", cls._read_except(fp, 8))[0]
         raise Exception("logic error, not int: 0x%02x" % ord(code))
 
-    def _unpack_reserved(cls, code, fp, options):
+    @staticmethod
+    def _unpack_reserved(code, fp, options):
         if code == b'\xc1':
             raise ReservedCodeException(
                 "encountered reserved code: 0x%02x" % ord(code))
         raise Exception(
             "logic error, not reserved code: 0x%02x" % ord(code))
 
-    def _unpack_nil(cls, code, fp, options):
+    @staticmethod
+    def _unpack_nil(code, fp, options):
         if code == b'\xc0':
             return None
         raise Exception("logic error, not nil: 0x%02x" % ord(code))
 
-    def _unpack_boolean(cls, code, fp, options):
+    @staticmethod
+    def _unpack_boolean(code, fp, options):
         if code == b'\xc2':
             return False
         elif code == b'\xc3':
@@ -542,7 +564,7 @@ class _DecoderMeta(type):
 
         return cls._read_except(fp, length)
 
-    def _unpack_ext(cls, code, fp, options):
+    def _unpack_ext(cls, code, fp, options):        # noqa
         if code == b'\xd4':
             length = 1
         elif code == b'\xd5':
@@ -585,7 +607,7 @@ class _DecoderMeta(type):
 
     def _deep_list_to_tuple(cls, obj):
         if isinstance(obj, list):
-            return tuple([cls._deep_list_to_tuple(e) for e in obj])
+            return tuple([cls._deep_list_to_tuple(e) for e in obj]) # noqa
         return obj
 
     def _unpack_map(cls, code, fp, options):
@@ -606,13 +628,15 @@ class _DecoderMeta(type):
 
             if isinstance(k, list):
                 # Attempt to convert list into a hashable tuple
-                k = cls._deep_list_to_tuple(k)
+                k = cls._deep_list_to_tuple(k)      # noqa
             elif not isinstance(k, collections.Hashable):
                 raise UnhashableKeyException(
-                    "encountered unhashable key: %s, %s" % (str(k), str(type(k))))
+                    "encountered unhashable key: %s, %s"
+                    % (str(k), str(type(k))))
             elif k in d:
                 raise DuplicateKeyException(
-                    "encountered duplicate key: %s, %s" % (str(k), str(type(k))))
+                    "encountered duplicate key: %s, %s"
+                    % (str(k), str(type(k))))
 
             # Unpack value
             v = cls._unpack(fp, options)
@@ -653,8 +677,9 @@ class MsgpackMeta(abc.ABCMeta):
     def register(cls, data_type=None, ext_code=None):
         def decorator(handler):
             if not issubclass(handler, Msgpack):
-                raise TypeError("Msgpack handler must be a subclass"
-                                " of abstract `Msgpack` class: {}".format(handler))
+                raise TypeError(
+                    "Msgpack handler must be a subclass of abstract `Msgpack`"
+                    " class: {}".format(handler))
             if data_type is None:
                 _data_type = handler
             else:
@@ -662,20 +687,24 @@ class MsgpackMeta(abc.ABCMeta):
 
             if ext_code is not None:
                 cls.ext_handlers_encode[_data_type] = \
-                    lambda data: Ext(ext_code, handler.__msgpack_encode__(data, _data_type))
+                    lambda data: Ext(
+                        ext_code, handler.__msgpack_encode__(data, _data_type))
                 cls.ext_handlers_decode[ext_code] = \
-                    lambda ext: handler.__msgpack_decode__(ext.data, _data_type)
+                    lambda ext: handler.__msgpack_decode__(ext.data,
+                                                           _data_type)
             else:
                 cls.custom_encoders[_data_type] = handler
             return handler
         return decorator
 
     def encode(cls, data):
-        encoded_data = Encoder.packb(data, ext_handlers=cls.ext_handlers_encode)
+        encoded_data = Encoder.packb(data,
+                                     ext_handlers=cls.ext_handlers_encode)
         return encoded_data
 
     def decode(cls, encoded_data):
-        data = Decoder.unpackb(encoded_data, ext_handlers=cls.ext_handlers_decode)
+        data = Decoder.unpackb(encoded_data,
+                               ext_handlers=cls.ext_handlers_decode)
         return data
 
     def get_custom_encoder(cls, data_type):
@@ -707,7 +736,8 @@ class Msgpack(metaclass=MsgpackMeta):
     def __subclasshook__(cls, C):
         if cls is Msgpack:
             if any("__msgpack_encode__" in B.__dict__ for B in C.__mro__) \
-                    and any("__msgpack_decode__" in B.__dict__ for B in C.__mro__):
+                    and any("__msgpack_decode__" in B.__dict__
+                            for B in C.__mro__):
                 return True
         return NotImplemented
 

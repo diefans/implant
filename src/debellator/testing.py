@@ -1,9 +1,9 @@
 """Provide a pytest fixture for testing commands."""
-from async_generator import yield_, async_generator
 import asyncio
 import os
 
 import pytest
+from async_generator import async_generator, yield_
 
 from debellator import connect, core
 
@@ -25,7 +25,9 @@ class RemoteTask(connect.Remote):
 
 class PipeConnector(connect.Connector):
 
-    """A connector which executes the remote core in a task in the current process."""
+    """A connector which executes the remote core
+    in a task in the current process.
+    """
 
     def __init__(self, *, loop=None):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
@@ -34,18 +36,21 @@ class PipeConnector(connect.Connector):
         self.stderr_pipe = os.pipe()
 
     async def launch(self, *args, **kwargs):
-        remote = await create_pipe_remote(self.stdin_pipe, self.stdout_pipe, self.stderr_pipe, loop=self.loop)
+        """Launch the remote."""
+        remote = await create_pipe_remote(self.stdin_pipe, self.stdout_pipe,
+                                          self.stderr_pipe, loop=self.loop)
         return remote
 
 
-async def create_pipe_remote(stdin_pipe, stdout_pipe, stderr_pipe, *, loop=None):
+async def create_pipe_remote(stdin_pipe, stdout_pipe, stderr_pipe,
+                             *, loop=None):
     """Launch remote core as a background task."""
     if loop is None:
         loop = asyncio.events.get_event_loop()
 
     stdin_r, stdin_w = stdin_pipe
     stdout_r, stdout_w = stdout_pipe
-    stderr_r, stderr_w = stderr_pipe
+    _, stderr_w = stderr_pipe
 
     remote_core = core.Core(loop=loop)
     remote_core_fut = asyncio.ensure_future(
@@ -62,6 +67,7 @@ async def create_pipe_remote(stdin_pipe, stdout_pipe, stderr_pipe, *, loop=None)
 @pytest.fixture
 @async_generator
 async def remote_task(event_loop):
+    """Create the remote task as a fixture."""
     connector = PipeConnector(loop=event_loop)
     remote = await connector.launch()
     com_remote = asyncio.ensure_future(remote.communicate())

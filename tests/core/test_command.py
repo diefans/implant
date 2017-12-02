@@ -2,14 +2,16 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_remote_descriptor(core):
+@pytest.mark.usefixtures('mocked_meta_path')
+async def test_remote_descriptor():
     import importlib
+    from debellator import core
 
     class Foo(core.Command):
         foobar = core.Parameter(description='foobar')
-        remote = core.CommandRemote('debellator.testing.foobar.Foobar')
+        remote = core.CommandRemote('foobar_module.Foobar')
 
-    module = importlib.import_module('debellator.testing.foobar')
+    module = importlib.import_module('foobar_module')
     Foo.remote.set_remote_class(module)
 
     foo = Foo()
@@ -18,7 +20,9 @@ async def test_remote_descriptor(core):
     assert await foo.remote(None) == 'foobar'
 
 
-def test_parameter(core):
+def test_parameter():
+    from debellator import core
+
     class Foo(core.Command):
         foo = core.Parameter(default='bar')
         bar = core.Parameter()
@@ -36,7 +40,9 @@ def test_parameter(core):
     assert dict(foo) == {'bar': 'baz', 'foo': 'bar'}
 
 
-def test_parameter_attrib_error(core):
+def test_parameter_attrib_error():
+    from debellator import core
+
     class Foo(core.Command):
         bar = core.Parameter()
 

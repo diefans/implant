@@ -17,6 +17,9 @@ VENV_DEFAULT = '~/.debellator'
 
 
 class Bootstrap(dict):
+
+    """Provide an iterator over the bootstrap code."""
+
     def __init__(self, code, options=None):
         super(Bootstrap, self).__init__()
         self.__dict__ = self
@@ -46,10 +49,14 @@ class Bootstrap(dict):
                   raw_len, comp_len, comp_len * 100 / raw_len)
 
         msgpack_code_source = inspect.getsource(msgpack).encode()
-        self.msgpack_code_path = 'remote://{}'.format(inspect.getsourcefile(msgpack))
-        self.msgpack_code = base64.b64encode(zlib.compress(msgpack_code_source, 9)).decode(),
+        self.msgpack_code_path = 'remote://{}'.format(
+            inspect.getsourcefile(msgpack))
+        self.msgpack_code = base64.b64encode(
+            zlib.compress(msgpack_code_source, 9)).decode(),
 
     def formatsourcelines(self, lines):
+        """Remove full line comments."""
+        # TODO think about using pyminifier
         # lines, _ = inspect.getsourcelines(module)
         for line in map(lambda l: l.decode('utf-8', 'replace'), lines):
             stripped = line.strip()
@@ -58,7 +65,8 @@ class Bootstrap(dict):
 
     def __iter__(self):
         if self.venv:
-            _with_venv_fmt = pkg_resources.resource_stream(__name__, '_with_venv.py.fmt')
+            _with_venv_fmt = pkg_resources.resource_stream(
+                __name__, '_with_venv.py.fmt')
             yield from self.formatsourcelines(_with_venv_fmt.readlines())
 
         _main_fmt = pkg_resources.resource_stream(__name__, '_main.py.fmt')
