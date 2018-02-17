@@ -3,12 +3,13 @@ import abc
 import asyncio
 import logging
 import os
+import re
 import shlex
 import sys
 import traceback
+import urllib
 
-from debellator import core, bootstrap
-
+from debellator import bootstrap, core
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,9 @@ class SubprocessRemote(Remote):
 
     async def wait(self):
         """Wait until the process exit and return the process return code."""
+        log.info('Waiting for Remote to finish: %s, %s', self.pid, self.returncode)
+        # TODO if we use loops in threads, we have to redirect the watcher
+        # of the main loop to the thread loop
         return await self._transport._wait()    # pylint: disable=W0212
 
     def send_signal(self, signal):
@@ -129,19 +133,74 @@ class SubprocessRemote(Remote):
         self._transport.kill()
 
 
-class Connector:
+re_sudo_user = re.compile(r'(?:(?P<sudo>.*)(?=!)(?:!))?(?P<user>.*)')
+
+
+class ConnectorMeta(abc.ABCMeta):
+
+    """Connector meta base."""
+
+    base = None
+    connectors = {}
+
+    def __new__(mcs, name, bases, dct):
+        cls = super().__new__(mcs, name, bases, dct)
+        if mcs.base is None:
+            mcs.base = cls
+        elif not cls.__abstractmethods__:
+            mcs.connectors[name.lower()] = cls
+        return cls
+
+    @staticmethod
+    def parse_connection_string(connection_str):
+        """Parse the connection string into its parts."""
+        p = urllib.parse.urlparse(connection_str)
+        connector_name, _, container_name, *_ = p
+        sudo, user = False, None
+        if p.username:
+            m = re_sudo_user.match(p.username)
+            if m:
+                sudo, user = m.groups()
+
+        return (
+            connector_name,
+            True if sudo == '' else False if sudo is None else sudo,
+            None if not user else user,
+            p.hostname,
+            None if not container_name else container_name[1:]
+        )
+
+    def create_connector(cls, connection_str):
+        """Lookup the connector for that string."""
+        (scheme, sudo, user, hostname,
+         container) = cls.parse_connection_string(connection_str)
+        kwargs = {
+            'sudo': sudo,
+            'user': user,
+            'hostname': hostname,
+            'container': container
+        }
+
+        # just create the connector by filtering args via slots
+        connector_cls = cls.connectors[scheme]
+        connector = connector_cls(
+            **{
+                k: v for k, v in kwargs.items() if k in connector_cls.__slots__
+            }
+        )
+        return connector
+
+
+class Connector(metaclass=ConnectorMeta):
 
     """Base Connector class."""
 
 
-class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
+class SubprocessConnector(Connector):
 
     """A `Connector` uniquely defines a remote target."""
 
     __slots__ = ()
-
-    def __init__(self, *, loop=None):
-        self.loop = loop if loop is None else asyncio.get_event_loop()
 
     def __hash__(self):
         return hash(frozenset(map(lambda k: (k, getattr(self, k)),
@@ -167,7 +226,7 @@ class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
 
         """
 
-    async def launch(self, *, code=None, options=None,
+    async def launch(self, *, loop=None, code=None, options=None,
                      python_bin=sys.executable, **kwargs):
         """Launch a remote process.
 
@@ -177,6 +236,7 @@ class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
         :param kwargs: further arguments to create the process
 
         """
+        loop = loop if loop is not None else asyncio.get_event_loop()
         if options is None:
             options = {}
 
@@ -189,7 +249,7 @@ class SubprocessConnector(Connector, metaclass=abc.ABCMeta):
         log.debug("Connector arguments: %s", ' '.join(command_args))
 
         remote = await create_subprocess_remote(*command_args, bootstrap_code,
-                                                loop=self.loop, **kwargs)
+                                                loop=loop, **kwargs)
 
         # TODO protocol needs improvement
         # some kind of a handshake, which is independent
@@ -250,8 +310,8 @@ class Local(SubprocessConnector):
 
     __slots__ = ('sudo',)
 
-    def __init__(self, *, sudo=None, loop=None):
-        super().__init__(loop=loop)
+    def __init__(self, *, sudo=None):
+        super().__init__()
         self.sudo = sudo
 
     def arguments(self, *, code=None, options=None, python_bin=sys.executable):
@@ -276,8 +336,8 @@ class Ssh(Local):
 
     __slots__ = ('sudo', 'hostname', 'user')
 
-    def __init__(self, *, hostname=None, user=None, sudo=None, loop=None):
-        super().__init__(sudo=sudo, loop=loop)
+    def __init__(self, *, hostname=None, user=None, sudo=None):
+        super().__init__(sudo=sudo)
         self.hostname = hostname
         self.user = user
 
@@ -313,9 +373,8 @@ class Lxd(Ssh):
 
     __slots__ = ('sudo', 'hostname', 'user', 'container')
 
-    def __init__(self, *, container, hostname=None, user=None, sudo=None,
-                 loop=None):
-        super().__init__(hostname=hostname, user=user, sudo=sudo, loop=loop)
+    def __init__(self, *, container, hostname=None, user=None, sudo=None):
+        super().__init__(hostname=hostname, user=user, sudo=sudo)
         self.container = container
 
     def arguments(self, *, code=None, options=None, python_bin=sys.executable):

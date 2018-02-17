@@ -101,7 +101,7 @@ class Console:
                 log.warning('Process for %s already launched! Skipping...', connector)
                 continue
             remote = await connector.launch(
-                options=self.options, **default_args
+                options=self.options, **default_args, loop=self.loop
             )
             fut_remote = asyncio.ensure_future(remote.communicate(), loop=self.loop)
             error_log = asyncio.ensure_future(log_remote_stderr(remote), loop=self.loop)
@@ -114,9 +114,17 @@ class Console:
 
         remotes = await self.connect()
         feeder = asyncio.ensure_future(self.feed_stdin_to_remotes(remotes), loop=self.loop)
+
+        def _sigint_handler():
+            log.info('SIGINT...')
+            never_ending.cancel()
+
+        self.loop.add_signal_handler(signal.SIGINT, _sigint_handler)
+
         try:
             await never_ending
         except asyncio.CancelledError:
+            log.debug('Cancelled')
             pass
 
         feeder.cancel()
@@ -155,17 +163,11 @@ def main(debug=False, log_config=None):
         connect.Lxd(
             container='zesty',
             hostname='localhost',
-            loop=loop,
         ): {
             'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
         },
     }, loop=loop, **options)
     task = asyncio.ensure_future(console.run())
-
-    def sigint_handler():
-        log.info('SIGINT...')
-        task.cancel()
-    loop.add_signal_handler(signal.SIGINT, sigint_handler)
 
     try:
         loop.run_until_complete(task)

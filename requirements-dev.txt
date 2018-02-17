@@ -1,10 +1,12 @@
 async_generator
 pytest
+pytest-cache
 pytest-asyncio
-pytest-xdist
 pytest-random
 pytest-cov
 pytest-benchmark
+pytest-watch
+pytest-testmon
 pylama
 pylama-pylint
 pycodestyle
