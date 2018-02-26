@@ -6,7 +6,7 @@ import logging.config
 
 import click
 import pkg_resources
-import yaml
+from ruamel import yaml
 
 from debellator import connect, core, pool
 
@@ -199,7 +199,7 @@ def cli_cmd(ctx, dotted_command_name, command_params_file, remote_uri):
 
     # lookup command
     command_cls = resolve_command_class(dotted_command_name)
-    command_params = yaml.load(command_params_file.read())
+    command_params = yaml.load(command_params_file.read(), Loader=yaml.Loader)
     options = {
         'log_config': ctx.obj['remote_log_config'],
         'debug': ctx.obj['debug']
