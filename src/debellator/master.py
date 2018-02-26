@@ -149,8 +149,8 @@ def main(debug=False, log_config=None):
         # 'venv': '~/.debellator',
     }
 
-    if debug:
-        log.setLevel(logging.DEBUG)
+    # if debug:
+    #     log.setLevel(logging.DEBUG)
 
     console = Console({
         # testing.PipeConnector(loop=loop): {},

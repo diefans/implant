@@ -195,6 +195,8 @@ class Connector(metaclass=ConnectorMeta):
 
     """Base Connector class."""
 
+    __slots__ = ()
+
 
 class SubprocessConnector(Connector):
 

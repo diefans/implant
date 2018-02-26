@@ -45,9 +45,10 @@ loggers:
         handlers: [console, logfile]
         propagate: no
 
-    root:
-        level: DEBUG
-        handlers: [console]
-
     debellator.evolve.specs:
         level: INFO
+
+root:
+    level: DEBUG
+    handlers: [console]
+

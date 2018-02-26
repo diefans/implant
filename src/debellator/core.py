@@ -816,8 +816,8 @@ class Dispatcher:
         try:
             while True:
                 message = await self.channel.pop()
-                self.log.debug("[a] %s - received dispatch message: %s",
-                               message.fqin, message)
+                self.log.info("[a] %s - received dispatch message: %s",
+                              message.fqin, message)
                 fut_message = asyncio.ensure_future(message(self))
                 fut_message.add_done_callback(
                     functools.partial(_handle_message_exception, message))
@@ -1635,37 +1635,26 @@ class Core:
         if log_config is None:
             log_config = {
                 'version': 1,
-                'formatters': {
-                    'simple': {
-                        'format':
-                        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-                    }
-                },
-                'handlers': {
-                    'console': {
-                        'class': 'logging.StreamHandler',
-                        'formatter': 'simple',
-                        'level': 'DEBUG',
-                        'stream': 'ext://sys.stderr'
-                    }
-                },
-                'logs': {
-                    'debellator': {
-                        'handlers': ['console'],
-                        'level': 'DEBUG',
-                        'propagate': False
-                    }
-                },
-                'root': {
-                    'handlers': ['console'],
-                    'level': 'WARNING'
-                },
+                'disable_existing_loggers': False,
+                'formatters': {'simple': {
+                    'format': ('{asctime} - {process}/{thread} - '
+                               '{levelname} - {name} - {message}'),
+                    'style': '{'}},
+                'handlers': {'console': {'class': 'logging.StreamHandler',
+                                         'formatter': 'simple',
+                                         'level': logging.NOTSET,
+                                         'stream': 'ext://sys.stderr'},
+                             'logfile': {'class': 'logging.FileHandler',
+                                         'filename': '/tmp/debellator.log',
+                                         'formatter': 'simple',
+                                         'level': logging.NOTSET}},
+                'root': {'handlers': ['console'], 'level':
+                         logging.DEBUG if debug else logging.INFO},
             }
 
         logging.config.dictConfig(log_config)
 
         if debug:
-            self.log.setLevel(logging.DEBUG)
             self.loop.set_debug(debug)
 
     @classmethod
