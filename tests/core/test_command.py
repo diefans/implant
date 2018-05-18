@@ -55,3 +55,8 @@ def test_parameter_attrib_error():
     foo = Foo()
     with pytest.raises(AttributeError):
         foo.bar     # pylint: disable=W0104
+
+
+def test_cls_params():
+    from debellator import core
+

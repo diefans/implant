@@ -1,4 +1,2 @@
 click
 ruamel.yaml
-u-msgpack-python
-zope.component

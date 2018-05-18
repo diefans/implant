@@ -5,13 +5,11 @@ import logging
 import logging.config
 
 import click
-import pkg_resources
 from ruamel import yaml
 
 from debellator import connect, core, pool
 
 log = logging.getLogger(__name__)
-
 
 LOGGING_LEVEL_NAMES = map(logging.getLevelName, sorted((
     logging.NOTSET, logging.DEBUG, logging.INFO,

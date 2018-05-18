@@ -154,18 +154,18 @@ def main(debug=False, log_config=None):
 
     console = Console({
         # testing.PipeConnector(loop=loop): {},
-        # connect.Local(): {
-        #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
-        # },
+        connect.Local(): {
+            'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
+        },
         # connect.Ssh(hostname='localhost'): {
         #     'python_bin': pathlib.Path('~/.pyenv/versions/3.5.2/bin/python').expanduser(),
         # },
-        connect.Lxd(
-            container='zesty',
-            hostname='localhost',
-        ): {
-            'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
-        },
+        # connect.Lxd(
+        #     container='zesty',
+        #     hostname='localhost',
+        # ): {
+        #     'python_bin': pathlib.Path('/usr/bin/python3').expanduser()
+        # },
     }, loop=loop, **options)
     task = asyncio.ensure_future(console.run())
 

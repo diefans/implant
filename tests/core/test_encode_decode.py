@@ -7,6 +7,8 @@ def core():
     return core
 
 
+# we need to have this class in the module since the custom encoder
+# must be able to import that class, which is not possible as a fixture
 class Foo:
     def __init__(self, a, b):
         self.a = a

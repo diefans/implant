@@ -31,6 +31,19 @@ PY_352 = sys.version_info >= (3, 5, 2)
 log = logging.getLogger(__name__)
 
 
+class reify:
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        functools.update_wrapper(self, wrapped)
+
+    def __get__(self, inst, objtype=None):
+        if inst is None:
+            return self
+        val = self.wrapped(inst)
+        setattr(inst, self.wrapped.__name__, val)
+        return val
+
+
 @msgpack.register(object, 0x01)
 class CustomEncoder:
 
@@ -438,7 +451,7 @@ Chunk = collections.namedtuple('Chunk', ('header', 'channel_name', 'data'))
 
 class Channels:
 
-    """Hold references to all channel queues."""
+    """Hold references to all channel queues and route messages accordingly."""
 
     chunk_size = 0x8000
 
@@ -451,6 +464,7 @@ class Channels:
     def __init__(self, reader, writer, *, loop=None):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.incomming = weakref.WeakValueDictionary()
+        """A collection of all active channels."""
 
         self.reader = reader
         self.writer = writer
@@ -771,9 +785,15 @@ class Dispatcher:
     def __init__(self, channels, *, loop=None):
         self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.channels = channels
+        """The collection of all channels."""
+
         self.channel = self.channels.get_channel(DISPATCHER_CHANNEL_NAME)
+        """A channel for the dispatcher itself."""
+
         self.pending_commands = collections.defaultdict(
             functools.partial(asyncio.Future, loop=self.loop))
+        """Futures of `Command`s which are not finished yet."""
+
         self.pending_dispatches = collections.defaultdict(
             functools.partial(asyncio.Event, loop=self.loop))
         self.pending_remote_tasks = set()
@@ -835,15 +855,6 @@ class Dispatcher:
                 await fut
                 del self.pending_commands[fqin]
 
-    @staticmethod
-    def create_command_fqin(command_name, params):
-        """Create a command and its fully qualified instance name."""
-        command_class = (Command[command_name]
-                         if isinstance(command_name, str) else command_name)
-        fqin = command_class.create_fqin()
-        command = command_class(**params)
-        return command, fqin
-
     async def execute(self, command_name, **params):
         """Execute a command.
 
@@ -851,7 +862,7 @@ class Dispatcher:
         and second executing its local part.
 
         """
-        command, fqin = self.create_command_fqin(command_name, params)
+        command, fqin = Command.create_command_fqin(command_name, params)
 
         self.log.info('[1] %s - send command', fqin)
         await self.channel.send(DispatchCommand(fqin, *command.dispatch_data))
@@ -990,13 +1001,13 @@ class Dispatcher:
 
 
 class _CommandMeta(type):
-    base = None
-    commands = {}
+    __command_base__ = None
+    __commands__ = {}
 
     def __new__(mcs, name, bases, dct):
         """Create Command class.
 
-        Add command_name as __module__:__name__
+        Add command_name as __module__:__qualname__
         Collect parameters
         """
         dct['command_name'] = dct['__module__'] + ':' + dct['__qualname__']
@@ -1006,21 +1017,28 @@ class _CommandMeta(type):
 
         cls = type.__new__(mcs, name, bases, dct)
 
+        cls.__params__ = params = collections.OrderedDict()
+        for base in reversed(cls.__mro__):
+            base_params = [(n, p) for (n, p) in base.__dict__.items()
+                           if isinstance(p, Parameter)]
+            if base_params:
+                params.update(base_params)
+
         # set parameter names in python < 3.6
         if sys.version_info < (3, 6):
-            for attr_name, parameter in cls.parameters.items():
-                parameter.__set_name__(cls, attr_name)
+            for name, param in params.items():
+                param.__set_name__(cls, name)
 
             # check for remote outsourcing
-            if mcs.base is not None and isinstance(cls.remote, CommandRemote):
+            if hasattr(cls, 'remote')\
+                    and isinstance(cls.remote, CommandRemote):
                 cls.remote.__set_name__(cls, 'remote')
 
-        if mcs.base is None:
-            mcs.base = cls
+        if mcs.__command_base__ is None:
+            mcs.__command_base__ = cls
         else:
             # only register classes except base class
-            mcs.commands[cls.command_name] = cls
-
+            mcs.__commands__[cls.command_name] = cls
         return cls
 
     def create_fqin(cls):
@@ -1029,9 +1047,13 @@ class _CommandMeta(type):
         fqin = cls.command_name + '/' + str(uid)
         return fqin
 
-    def __getitem__(cls, command_name):
-        command_class = cls.commands[command_name]
-        return command_class
+    def create_command_fqin(cls, command_name, params):
+        """Create a command and its fully qualified instance name."""
+        command_class = (cls.__commands__[command_name]
+                         if isinstance(command_name, str) else command_name)
+        fqin = command_class.create_fqin()
+        command = command_class(**params)
+        return command, fqin
 
     async def create_command(cls, command_name, params, *, loop):
         """Create a command."""
@@ -1146,7 +1168,7 @@ class Command(metaclass=_CommandMeta):
 
     def __iter__(self):
         return iter((name, getattr(self, name))
-                    for name in self.__class__.parameters)
+                    for name in self.__class__.__params__)
 
     def __repr__(self):
         _repr = super().__repr__()

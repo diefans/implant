@@ -150,3 +150,25 @@ An example Echo Command
                 'remote_self': self,
                 'pid': os.getpid()
             }
+
+
+Internals
+=========
+
+.. code-block::
+
+    master <-----------------------------------------> remote
+                                |
+                           stdin/stdout
+                                |
+                              chunks
+                                |
+                             channels
+                                |
+        --> send ---> |                   |  --> queue -->
+                      | module:class/fqin |
+        <-- queue <-- |                   |  <--- send <--
+
+
+        dispatch_command
+            -> pending_commands
