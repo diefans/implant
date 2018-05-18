@@ -1,6 +1,7 @@
 """Remote connection is established by a `Connector`."""
 import abc
 import asyncio
+import collections
 import logging
 import os
 import re
@@ -136,6 +137,75 @@ class SubprocessRemote(Remote):
 re_sudo_user = re.compile(r'(?:(?P<sudo>.*)(?=!)(?:!))?(?P<user>.*)')
 
 
+class ConnectorParams(
+        collections.namedtuple('ConnectorParams', [
+            'scheme', 'sudo', 'user', 'hostname', 'container'])):
+
+    __slots__ = ()
+
+    def __new__(cls, scheme,
+                sudo=None, user=None, hostname=None, container=None):
+        return super().__new__(cls, scheme, sudo, user, hostname, container)
+
+    @classmethod
+    def parse(cls, connection_str):
+        """Parse the connection string into its parts."""
+        p = urllib.parse.urlparse(connection_str)
+        connector_name, _, container_name, *_ = p
+        sudo, user = False, None
+        if p.username:
+            m = re_sudo_user.match(p.username)
+            if m:
+                sudo, user = m.groups()
+
+        return cls(
+            connector_name,
+            True if sudo == '' else False if sudo is None else sudo,
+            None if not user else user,
+            p.hostname,
+            None if not container_name else container_name[1:]
+        )
+
+    def unparse(self):
+        return ''.join([
+            self.scheme,
+            '://',
+            '' if not self.sudo else
+            '!' if self.sudo is True else self.sudo +'!',
+            '' if not self.user else self.user,
+            '@' if (self.sudo or self.user) else '',
+            '' if not self.hostname else self.hostname,
+            '' if not self.container else '/' + self.container
+        ])
+
+    @classmethod
+    def create(cls, connector):
+        connector_cls = connector.__class__
+        params = cls(connector_cls.scheme,
+                     *(getattr(connector, k) for k in ('sudo', 'user', 'hostname', 'container')
+                       if k in connector_cls.__slots__)
+                     )
+        return params
+
+    def create_connector(self):
+        """Lookup the connector for that string."""
+        kwargs = {
+            'sudo': self.sudo,
+            'user': self.user,
+            'hostname': self.hostname,
+            'container': self.container
+        }
+
+        # just create the connector by filtering args via slots
+        connector_cls = Connector.connectors[self.scheme]
+        connector = connector_cls(
+            **{
+                k: v for k, v in kwargs.items() if k in connector_cls.__slots__
+            }
+        )
+        return connector
+
+
 class ConnectorMeta(abc.ABCMeta):
 
     """Connector meta base."""
@@ -148,47 +218,12 @@ class ConnectorMeta(abc.ABCMeta):
         if mcs.base is None:
             mcs.base = cls
         elif not cls.__abstractmethods__:
-            mcs.connectors[name.lower()] = cls
+            mcs.connectors[cls.scheme] = cls
         return cls
 
-    @staticmethod
-    def parse_connection_string(connection_str):
-        """Parse the connection string into its parts."""
-        p = urllib.parse.urlparse(connection_str)
-        connector_name, _, container_name, *_ = p
-        sudo, user = False, None
-        if p.username:
-            m = re_sudo_user.match(p.username)
-            if m:
-                sudo, user = m.groups()
-
-        return (
-            connector_name,
-            True if sudo == '' else False if sudo is None else sudo,
-            None if not user else user,
-            p.hostname,
-            None if not container_name else container_name[1:]
-        )
-
-    def create_connector(cls, connection_str):
-        """Lookup the connector for that string."""
-        (scheme, sudo, user, hostname,
-         container) = cls.parse_connection_string(connection_str)
-        kwargs = {
-            'sudo': sudo,
-            'user': user,
-            'hostname': hostname,
-            'container': container
-        }
-
-        # just create the connector by filtering args via slots
-        connector_cls = cls.connectors[scheme]
-        connector = connector_cls(
-            **{
-                k: v for k, v in kwargs.items() if k in connector_cls.__slots__
-            }
-        )
-        return connector
+    @property
+    def scheme(cls):
+        return cls.__name__.lower()
 
 
 class Connector(metaclass=ConnectorMeta):
@@ -196,6 +231,12 @@ class Connector(metaclass=ConnectorMeta):
     """Base Connector class."""
 
     __slots__ = ()
+
+    def __repr__(self):
+        connector_params = ConnectorParams.create(self)
+        print(connector_params)
+
+        return connector_params.unparse()
 
 
 class SubprocessConnector(Connector):

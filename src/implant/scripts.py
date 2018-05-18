@@ -6,6 +6,7 @@ import logging.config
 
 import click
 from ruamel import yaml
+import json
 
 from implant import connect, core, pool
 
@@ -202,7 +203,9 @@ def cli_cmd(ctx, dotted_command_name, command_params_file, remote_uri):
         'log_config': ctx.obj['remote_log_config'],
         'debug': ctx.obj['debug']
     }
-    connector = connect.Connector.create_connector(remote_uri)
+    connector_params = connect.ConnectorParams.parse(remote_uri)
+    connector = connector_params.create_connector()
+
     task = run_command_on_remotes(
         connector,
         options=options,
@@ -212,6 +215,8 @@ def cli_cmd(ctx, dotted_command_name, command_params_file, remote_uri):
     )
 
     results = loop.run_until_complete(task)
+    # for connector, result in results.items():
+    #     print(connector, result)
     print(yaml.dump(results))
     loop.stop()
     loop.close()
