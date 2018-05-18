@@ -13,7 +13,7 @@ from .. import core, msgpack
 log = logging.getLogger(__name__)
 
 
-VENV_DEFAULT = '~/.debellator'
+VENV_DEFAULT = '~/.implant'
 
 
 class Bootstrap(dict):

@@ -23,7 +23,7 @@ import pytest
 @pytest.mark.usefixtures('mocked_meta_path')
 async def test_find_spec_data(remote_task, fake_module_finder, fullname,
                               result):
-    from debellator import core
+    from implant import core
 
     spec_data = await remote_task.execute(core.FindSpecData,
                                           fullname=fullname)
@@ -33,7 +33,7 @@ async def test_find_spec_data(remote_task, fake_module_finder, fullname,
 
 @pytest.mark.asyncio
 async def _test_invoke_import(remote_task):
-    from debellator import core
+    from implant import core
     result = await remote_task.execute(core.InvokeImport,
-                                       fullname='debellator.commands')
+                                       fullname='implant.commands')
     assert result is not None

@@ -5,14 +5,14 @@ import os
 import pytest
 from async_generator import async_generator, yield_
 
-from debellator import connect, core
+from implant import connect, core
 
 
 class RemoteTask(connect.Remote):
 
     """In-process remote task.
 
-    Useful to run debellator for testing.
+    Useful to run implant for testing.
     """
 
     def __init__(self, remote_core_fut, *, stdin, stdout):

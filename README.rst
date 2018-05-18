@@ -1,8 +1,8 @@
-debellator
+implant
 **********
 
-.. image:: https://travis-ci.org/diefans/debellator.svg?branch=master
-   :target: https://travis-ci.org/diefans/debellator
+.. image:: https://travis-ci.org/diefans/implant.svg?branch=master
+   :target: https://travis-ci.org/diefans/implant
 
 A proof-of-concept for asynchronous adhoc remote procedure calls in Python.
 
@@ -52,7 +52,7 @@ General application
     import asyncio
     import pathlib
 
-    from debellator import core, connect, commands
+    from implant import core, connect, commands
 
 
     async def remote_tasks():
@@ -96,7 +96,7 @@ An example Echo Command
     import logging
     import os
 
-    from debellator import core
+    from implant import core
 
 
     log = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ An example Echo Command
         async def local(self, context):
             """The local side of the RPC.
 
-               :param context: :py:obj:`debellator.core.DispatchLocalContext`
+               :param context: :py:obj:`implant.core.DispatchLocalContext`
             """
             # custom protocol
             # first: send
@@ -133,7 +133,7 @@ An example Echo Command
         async def remote(self, context):
             """The remote side of the RPC.
 
-               :param context: :py:obj:`debellator.core.DispatchRemoteContext`
+               :param context: :py:obj:`implant.core.DispatchRemoteContext`
             """
             # first: receive
             from_local = []

@@ -19,22 +19,22 @@ handlers:
 
     logfile:
         class: logging.FileHandler
-        filename: /tmp/debellator.log
+        filename: /tmp/implant.log
         formatter: simple
         level: !!python/name:logging.NOTSET
 
 loggers:
-    debellator:
+    implant:
         level: DEBUG
         handlers: [console, logfile]
         propagate: no
 
-    debellator.core:
+    implant.core:
         level: DEBUG
         handlers: [console, logfile]
         propagate: no
 
-    debellator.core.Channels:
+    implant.core.Channels:
         level: INFO
         handlers: [console, logfile]
         propagate: no
@@ -43,5 +43,5 @@ loggers:
         level: DEBUG
         handlers: [console]
 
-    debellator.evolve.specs:
+    implant.evolve.specs:
         level: INFO

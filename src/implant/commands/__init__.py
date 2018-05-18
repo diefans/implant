@@ -8,7 +8,7 @@ import logging
 import os
 import time
 
-from debellator import core
+from implant import core
 
 
 log = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class Echo(core.Command):
         result.update(remote_result)
         return result
 
-    remote = core.CommandRemote('debellator.commands.remotes.Echo')
+    remote = core.CommandRemote('implant.commands.remotes.Echo')
 
 
 class SystemLoad(core.Command):

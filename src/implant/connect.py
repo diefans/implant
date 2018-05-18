@@ -9,7 +9,7 @@ import sys
 import traceback
 import urllib
 
-from debellator import bootstrap, core
+from implant import bootstrap, core
 
 log = logging.getLogger(__name__)
 
@@ -243,7 +243,7 @@ class SubprocessConnector(Connector):
             options = {}
 
         # TODO handshake
-        options['echo'] = echo = b''.join((b'Debellator', os.urandom(64)))
+        options['echo'] = echo = b''.join((b'implant', os.urandom(64)))
 
         *command_args, bootstrap_code = self.arguments(
             code=code, options=options, python_bin=python_bin

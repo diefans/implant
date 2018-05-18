@@ -3,7 +3,7 @@ import pytest
 
 @pytest.fixture
 def core():
-    from debellator import core
+    from implant import core
     return core
 
 
@@ -76,7 +76,7 @@ def test_command(core):
 
 
 def test_dispatch_command(core):
-    from debellator import commands
+    from implant import commands
     cmd = commands.Echo(foo='bar')
     data = core.DispatchCommand('fqin', *cmd.dispatch_data)
 

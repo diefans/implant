@@ -1,7 +1,7 @@
 import logging
 import os
 
-from debellator import commands, core
+from implant import commands, core
 
 log = logging.getLogger(__name__)
 

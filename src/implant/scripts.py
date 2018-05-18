@@ -7,7 +7,7 @@ import logging.config
 import click
 from ruamel import yaml
 
-from debellator import connect, core, pool
+from implant import connect, core, pool
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def setup_logging(debug, log_config, remote_log_config,
                                  'level': logging.NOTSET,
                                  'stream': 'ext://sys.stderr'},
                      'logfile': {'class': 'logging.FileHandler',
-                                 'filename': '/tmp/debellator.log',
+                                 'filename': '/tmp/implant.log',
                                  'formatter': 'simple',
                                  'level': logging.NOTSET}},
         'root': {'handlers': ['console', 'logfile'], 'level': log_level},
@@ -56,7 +56,7 @@ def setup_logging(debug, log_config, remote_log_config,
                                  'level': logging.NOTSET,
                                  'stream': 'ext://sys.stderr'},
                      'logfile': {'class': 'logging.FileHandler',
-                                 'filename': '/tmp/debellator.log',
+                                 'filename': '/tmp/implant.log',
                                  'formatter': 'simple',
                                  'level': logging.NOTSET}},
         'root': {'handlers': ['console'], 'level': log_level},
@@ -83,7 +83,7 @@ def find_loop_specs():
 
 def run():
     """Main entry point."""
-    return cli(obj={}, auto_envvar_prefix='DEBELLATOR')     # noqa
+    return cli(obj={}, auto_envvar_prefix='IMPLANT')     # noqa
 
 
 @click.group(invoke_without_command=True)
@@ -135,7 +135,7 @@ def cli(ctx, event_loop, debug, log_config, remote_log_config, log_level):
         # which may use exclusive decorator,
         # which tries to get the actual loop,
         # which is only set after running set_event_loop_policy
-        from debellator import master
+        from implant import master
 
         if debug:
             log.info("Enable asyncio debug")
@@ -186,13 +186,13 @@ async def run_command_on_remotes(*connectors,
 
 @cli.command('cmd')
 @click.option('dotted_command_name', '-c', '--command', required=True,
-              help='the path to a debellator command')
+              help='the path to a implant command')
 @click.option('command_params_file', '-p', '--params', type=click.File('rb'))
 @click.option('remote_uri', '-r', '--remote', help='The remote connection',
               default='local://')
 @click.pass_context
 def cli_cmd(ctx, dotted_command_name, command_params_file, remote_uri):
-    """Execute a :py:obj:`debellator.core.Command` in a remote process."""
+    """Execute a :py:obj:`implant.core.Command` in a remote process."""
     loop = asyncio.get_event_loop()
 
     # lookup command

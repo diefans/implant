@@ -1667,7 +1667,7 @@ class Core:
                                          'level': logging.NOTSET,
                                          'stream': 'ext://sys.stderr'},
                              'logfile': {'class': 'logging.FileHandler',
-                                         'filename': '/tmp/debellator.log',
+                                         'filename': '/tmp/implant.log',
                                          'formatter': 'simple',
                                          'level': logging.NOTSET}},
                 'root': {'handlers': ['console'], 'level':

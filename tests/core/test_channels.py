@@ -23,7 +23,7 @@ async def test_send(event_loop):
     import asyncio
     import os
 
-    from debellator import core
+    from implant import core
 
     uid = core.Uid()
 
@@ -62,7 +62,7 @@ async def test_communicate(event_loop):
     import time
     import asyncio
     import uuid
-    from debellator import core
+    from implant import core
 
     r_pipe, w_pipe = os.pipe()
 

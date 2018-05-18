@@ -20,7 +20,7 @@ def event_loop():
 @pytest.mark.asyncio
 async def test_ssh(event_loop):
     import asyncio
-    from debellator import core, connect
+    from implant import core, connect
 
     connector = connect.Ssh()
 
@@ -30,8 +30,8 @@ async def test_ssh(event_loop):
     com_remote = asyncio.ensure_future(remote.communicate())
     try:
         result = await remote.execute(core.InvokeImport,
-                                      fullname='debellator.commands')
-        result = await remote.execute('debellator.commands:Echo',
+                                      fullname='implant.commands')
+        result = await remote.execute('implant.commands:Echo',
                                       data='foobar')
 
         assert result['remote_data'] == 'foobar'
@@ -60,7 +60,7 @@ async def test_ssh(event_loop):
     ('lxd://host/container', ('lxd', False, None, 'host', 'container')),
 ])
 def test_parse_connection_string(con_str, result):
-    from debellator import connect
+    from implant import connect
 
     r = connect.Connector.parse_connection_string(con_str)
     assert r == result

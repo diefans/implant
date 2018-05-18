@@ -1,5 +1,5 @@
 def test_uid_eq():
-    from debellator import core
+    from implant import core
 
     u1 = core.Uid()
 

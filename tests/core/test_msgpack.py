@@ -2,7 +2,7 @@ import pytest
 
 
 def test_register():
-    from debellator import msgpack
+    from implant import msgpack
 
     class Foo:
         @classmethod
@@ -18,7 +18,7 @@ def test_register():
 
 
 def test_register_wrong_type():
-    from debellator import msgpack
+    from implant import msgpack
 
     class Foo:
         pass
@@ -34,7 +34,7 @@ def test_register_wrong_type():
     None, True, False, -1, 2**64-1, 1.2345, 'text', b'binary', [1, 2, 3], (1, 2, 3), {'foo': 'bar'}
 ])
 def test_default_types(value):
-    from debellator import msgpack
+    from implant import msgpack
     encoded = msgpack.encode(value)
     decoded = msgpack.decode(encoded)
     assert decoded == value

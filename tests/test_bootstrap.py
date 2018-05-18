@@ -6,7 +6,7 @@ import pytest
     (False, [], '(\'gaR2ZW52wg==\',)'),
     (True, [
         'import os, sys, site, pkg_resources\n',
-        'venv_path = os.path.expanduser("~/.debellator")\n',
+        'venv_path = os.path.expanduser("~/.implant")\n',
         'entry = site.getsitepackages([venv_path])[0]\n',
         'if not os.path.isdir(entry):\n',
         '    import venv\n',
@@ -23,9 +23,9 @@ import pytest
         '    pip.main(["install", "--prefix", venv_path, "-q", "u-msgpack-python"])\n'
     ], '(\'gaR2ZW52ww==\',)')
 ])
-@mock.patch('debellator.bootstrap.inspect')
+@mock.patch('implant.bootstrap.inspect')
 def test_bootstrap_iter(inspect, with_venv, venv_lines, options):
-    from debellator import bootstrap
+    from implant import bootstrap
     import zlib
     import base64
 
@@ -35,17 +35,17 @@ def test_bootstrap_iter(inspect, with_venv, venv_lines, options):
 
     lines = [
         'import sys, imp, base64, zlib\n',
-        'sys.modules["debellator"] = debellator = imp.new_module("debellator")\n',
-        'setattr(debellator, "__path__", [])\n',
+        'sys.modules["implant"] = implant = imp.new_module("implant")\n',
+        'setattr(implant, "__path__", [])\n',
         'try:\n',
-        '    from debellator import msgpack\n',
+        '    from implant import msgpack\n',
         'except ImportError:\n',
-        '    sys.modules["debellator.msgpack"] = msgpack = imp.new_module("debellator.msgpack")\n',
+        '    sys.modules["implant.msgpack"] = msgpack = imp.new_module("implant.msgpack")\n',
         '    c = compile(zlib.decompress(base64.b64decode(b"{msgpack_code}")),'
         ' "remote://msgpack-source-file", "exec")\n'.format(**locals()),
         '    exec(c, msgpack.__dict__)\n',
-        'sys.modules["debellator.core"] = core = imp.new_module("debellator.core")\n',
-        'debellator.__dict__["core"] = core\n',
+        'sys.modules["implant.core"] = core = imp.new_module("implant.core")\n',
+        'implant.__dict__["core"] = core\n',
         'c = compile(zlib.decompress(base64.b64decode(b"eNpLLC5OLSpRCCkqTQUAGlIEUw==")),'
         ' "remote-string://", "exec", dont_inherit=True)\n',
         'exec(c, core.__dict__)\n',

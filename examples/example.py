@@ -1,7 +1,7 @@
 import asyncio
 import pathlib
 
-from debellator import core, connect, commands
+from implant import core, connect, commands
 
 
 async def remote_tasks():
@@ -20,7 +20,7 @@ async def remote_tasks():
     com_remote = asyncio.ensure_future(remote.communicate())
     try:
         # import commands in remote side
-        cmd_import = core.InvokeImport(fullname='debellator.commands')
+        cmd_import = core.InvokeImport(fullname='implant.commands')
         result = await remote.execute(cmd_import)
 
         # execute command

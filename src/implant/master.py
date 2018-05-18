@@ -8,10 +8,10 @@ import signal
 import sys
 import traceback
 
-from debellator import commands, connect, core, testing
+from implant import commands, connect, core, testing
 
 log = logging.getLogger(__name__)
-PLUGINS_ENTRY_POINT_GROUP = 'debellator.plugins'
+PLUGINS_ENTRY_POINT_GROUP = 'implant.plugins'
 
 
 def parse_command(line):
@@ -33,9 +33,9 @@ def parse_command(line):
 
 async def _execute_command(io_queues, line):
     default_lines = {
-        b'e\n': (b'debellator.commands:Echo data=bar\n', {}),
-        b'i\n': (b'debellator.core:InvokeImport fullname=debellator.commands\n', {}),
-        b'\n': (b'debellator.commands:SystemLoad data=bar\n', {}),
+        b'e\n': (b'implant.commands:Echo data=bar\n', {}),
+        b'i\n': (b'implant.core:InvokeImport fullname=implant.commands\n', {}),
+        b'\n': (b'implant.commands:SystemLoad data=bar\n', {}),
     }
 
     if line in default_lines:
@@ -146,7 +146,7 @@ def main(debug=False, log_config=None):
         'log_config': log_config,
         # 'venv': False,
         # 'venv': True,
-        # 'venv': '~/.debellator',
+        # 'venv': '~/.implant',
     }
 
     # if debug:

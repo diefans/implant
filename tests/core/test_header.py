@@ -1,5 +1,5 @@
 def test_header():
-    from debellator import core
+    from implant import core
 
     uid = core.Uid()
     h = core.Header(

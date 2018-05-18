@@ -5,7 +5,7 @@ import pytest
 @pytest.mark.usefixtures('mocked_meta_path')
 async def test_remote_descriptor():
     import importlib
-    from debellator import core
+    from implant import core
 
     class Foo(core.Command):
         foobar = core.Parameter(description='foobar')
@@ -21,7 +21,7 @@ async def test_remote_descriptor():
 
 
 def test_parameter():
-    from debellator import core
+    from implant import core
 
     class Foo(core.Command):
         foo = core.Parameter(default='bar')
@@ -41,7 +41,7 @@ def test_parameter():
 
 
 def test_parameter_attrib_error():
-    from debellator import core
+    from implant import core
 
     class Foo(core.Command):
         bar = core.Parameter()
@@ -58,5 +58,5 @@ def test_parameter_attrib_error():
 
 
 def test_cls_params():
-    from debellator import core
+    from implant import core
 

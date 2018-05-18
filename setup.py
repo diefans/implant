@@ -14,10 +14,10 @@ def read(*paths):
 
 
 setup(
-    name="Debellator",
+    name="implant",
     author="Oliver Berger",
     author_email="diefans@gmail.com",
-    url="https://github.com/diefans/debellator",
+    url="https://github.com/diefans/implant",
     description='Remote execution via stdin/stdout messaging.',
     long_description=read('README.rst'),
     version=__version__,
@@ -39,7 +39,7 @@ setup(
     " injection stdin stdout messaging",
 
     package_dir={'': 'src'},
-    # namespace_packages=['debellator'],
+    # namespace_packages=['implant'],
     packages=find_packages(
         'src',
         exclude=["tests*"]
@@ -47,9 +47,9 @@ setup(
     include_package_data=True,
     entry_points={
         'console_scripts': [
-            'debellator=debellator.scripts:run'
+            'implant=implant.scripts:run'
         ],
-        'pytest11': ['debellator = debellator.testing'],
+        'pytest11': ['implant = implant.testing'],
     },
 
     install_requires=read('requirements.txt').split('\n'),
