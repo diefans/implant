@@ -170,7 +170,7 @@ class DuplicateKeyException(UnpackException):
 # code below. This is to allow for seamless Python 2 and 3 compatibility, as
 # chr(obj) has a str return type instead of bytes in Python 3, and
 # struct.pack(...) has the right return type in both versions.
-class Encoder:
+class EncoderMeta(type):
 
     """Provides methods for msgpack packing."""
 
@@ -180,7 +180,6 @@ class Encoder:
     else:
         _float_precision = "single"
 
-    @classmethod                        # noqa
     def _pack_integer(cls, obj, fp, options):
         if obj < 0:
             if obj >= -32:
@@ -209,15 +208,12 @@ class Encoder:
             else:
                 raise UnsupportedTypeException("huge unsigned int")
 
-    @classmethod
     def _pack_nil(cls, obj, fp, options):
         fp.write(b"\xc0")
 
-    @classmethod
     def _pack_boolean(cls, obj, fp, options):
         fp.write(b"\xc3" if obj else b"\xc2")
 
-    @classmethod
     def _pack_float(cls, obj, fp, options):
         float_precision = options.get('force_float_precision',
                                       cls._float_precision)
@@ -229,7 +225,6 @@ class Encoder:
         else:
             raise ValueError("invalid float precision")
 
-    @classmethod
     def _pack_string(cls, obj, fp, options):
         obj = obj.encode('utf-8')
         if len(obj) <= 31:
@@ -243,7 +238,6 @@ class Encoder:
         else:
             raise UnsupportedTypeException("huge string")
 
-    @classmethod
     def _pack_binary(cls, obj, fp, options):
         if len(obj) <= 2**8 - 1:
             fp.write(b"\xc4" + struct.pack("B", len(obj)) + obj)
@@ -254,7 +248,6 @@ class Encoder:
         else:
             raise UnsupportedTypeException("huge binary string")
 
-    @classmethod
     def _pack_oldspec_raw(cls, obj, fp, options):
         if len(obj) <= 31:
             fp.write(struct.pack("B", 0xa0 | len(obj)) + obj)
@@ -265,7 +258,6 @@ class Encoder:
         else:
             raise UnsupportedTypeException("huge raw string")
 
-    @classmethod
     def _pack_ext(cls, obj, fp, options):
         if len(obj.data) == 1:
             fp.write(b"\xd4" + struct.pack("B", obj.type & 0xff) + obj.data)
@@ -292,7 +284,6 @@ class Encoder:
         else:
             raise UnsupportedTypeException("huge ext data")
 
-    @classmethod
     def _pack_array(cls, obj, fp, options):
         if len(obj) <= 15:
             fp.write(struct.pack("B", 0x90 | len(obj)))
@@ -306,7 +297,6 @@ class Encoder:
         for e in obj:
             cls.pack(e, fp, **options)
 
-    @classmethod
     def _pack_map(cls, obj, fp, options):
         if len(obj) <= 15:
             fp.write(struct.pack("B", 0x80 | len(obj)))
@@ -323,7 +313,6 @@ class Encoder:
 
     # Pack for Python 3, with unicode 'str' type, 'bytes' type,
     # and no 'long' type
-    @classmethod                # noqa
     def pack(cls, obj, fp, **options):
         # pylint: disable=W0212
         ext_handlers = options.get("ext_handlers")
@@ -359,7 +348,6 @@ class Encoder:
             raise UnsupportedTypeException(
                 "unsupported type: %s" % str(type(obj)))
 
-    @classmethod
     def packb(cls, obj, **options):
         r"""Serialize a Python object into MessagePack bytes.
 
@@ -395,6 +383,10 @@ class Encoder:
     # Map packb and unpackb to the appropriate version
     dump = pack
     dumps = packb
+
+
+class Encoder(metaclass=EncoderMeta):
+    pass
 
 
 class _DecoderMeta(type):
@@ -666,6 +658,19 @@ class Decoder(metaclass=_DecoderMeta):
         return cls._unpack(io.BytesIO(s), options)
 
 
+# Copyright 2018 Oliver Berger
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 class MsgpackMeta(abc.ABCMeta):
 
     """Manages ext handler and custom encoder registration."""
@@ -720,6 +725,19 @@ class MsgpackMeta(abc.ABCMeta):
         return None
 
 
+# Copyright 2018 Oliver Berger
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 class Msgpack(metaclass=MsgpackMeta):
 
     """Add msgpack en/decoding to a type."""
