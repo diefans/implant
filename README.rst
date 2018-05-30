@@ -1,6 +1,8 @@
 implant
 **********
 
+.. inclusion-marker-do-not-remove
+
 .. image:: https://travis-ci.org/diefans/implant.svg?branch=master
    :target: https://travis-ci.org/diefans/implant
 
@@ -12,7 +14,7 @@ This is work in progress and serves basically as an exercise.
 Features
 ========
 
-- Python 3.5 asyncio
+- Python >= 3.5 asyncio
 
 - adhoc transferable remote procedures
 
@@ -30,7 +32,7 @@ Features
 Limitations
 ===========
 
-- Python 3.5
+- Python >= 3.5
 
 - only pure Python modules are supported for remote import, if no venv is used
 
@@ -155,7 +157,7 @@ An example Echo Command
 Internals
 =========
 
-.. code-block::
+::
 
     master <-----------------------------------------> remote
                                 |
@@ -169,6 +171,3 @@ Internals
                       | module:class/fqin |
         <-- queue <-- |                   |  <--- send <--
 
-
-        dispatch_command
-            -> pending_commands

@@ -1,9 +1,24 @@
-"""The core module is transfered to the remote processand will bootstrap
+# Copyright 2018 Oliver Berger
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The core module is transfered to the remote process and will bootstrap
 pipe communication.
 
 It creates default channels and dispatches commands accordingly.
 
 """  # pylint: disable=C0302
+import abc
 import asyncio
 import collections
 import concurrent
@@ -32,6 +47,9 @@ log = logging.getLogger(__name__)
 
 
 class reify:
+
+    """Taken from pyramid: create a cached property."""
+
     def __init__(self, wrapped):
         self.wrapped = wrapped
         functools.update_wrapper(self, wrapped)
@@ -136,7 +154,7 @@ class StopAsyncIterationEncoder:
 
 class Uid(uuid.UUID):
 
-    """A unique id."""
+    """A unique id, which is basically a :py:obj:`python:uuid.uuid1` instance."""
 
     def __init__(self, bytes=None):     # pylint: disable=W0622
         if bytes is None:
@@ -146,6 +164,7 @@ class Uid(uuid.UUID):
 
     @property
     def time(self):
+        """The timestamp of the uuid1."""
         uid_time = (super().time - 0x01b21dd213814000) * 100 / 1e9
         return uid_time
 
@@ -455,14 +474,21 @@ class Channels:
 
     chunk_size = 0x8000
 
-    acknowledgements = {}
-    """Global acknowledgment futures distinctive by uid."""
-
     # pylint: disable=E0602
     log = logging.getLogger(__module__ + '.' + __qualname__)
 
     def __init__(self, reader, writer, *, loop=None):
+        """Create a :py:obj:`Channels` instance which delegates incomming
+        messages into their appropriate :py:obj:`Channel` queues.
+
+        :param reader: :py:obj:`python:asyncio.StreamReader`
+        :param writer: :py:obj:`python:asyncio.StreamWriter`
+        :param loop: the event loop
+        """
         self.loop = loop if loop is not None else asyncio.get_event_loop()
+        self.acknowledgements = {}
+        """Global acknowledgment futures distinctive by uid."""
+
         self.incomming = weakref.WeakValueDictionary()
         """A collection of all active channels."""
 
@@ -475,6 +501,7 @@ class Channels:
         """Create a channel and weakly register its queue.
 
         :param channel_name: the name of the channel to create
+        :returns: :py:obj:`Channel` instance with a bound send method
 
         """
         channel = Channel(
@@ -509,6 +536,7 @@ class Channels:
             await fut_receive_reader
 
     async def _read_chunk(self):
+        """Read a single chunk from the :py:obj:`Channel.reader`."""
         # read header
         raw_header = await self.reader.readexactly(Header.size)
         header = Header(raw_header)
@@ -533,6 +561,12 @@ class Channels:
         return chunk
 
     async def _finalize_message(self, buffer, chunk):
+        """Finalize the message if :py:obj:`Header.eom`
+        is :py:obj:`True`.
+
+        This will also acknowledge the message
+        if :py:obj:`Header.send_ack` is :py:obj:`True`.
+        """
         if chunk.header.send_ack:
             # we have to acknowledge the reception
             await self._send_ack(chunk.header.uid)
@@ -596,6 +630,7 @@ class Channels:
             self.log.debug('\t%s: %s', key, queue.qsize())
 
     async def _receive_reader(self):
+        """Start reception of messages."""
         # receive incomming data into queues
         self.log.info("Start receiving from %s...", self.reader)
         buffer = {}
@@ -617,6 +652,10 @@ class Channels:
             raise
 
     async def _send_ack(self, uid):
+        """Send an acknowledgement message.
+
+        :param uid: :py:obj:`Uid`
+        """
         # no channel_name, no data
         header = Header(uid=uid, eom=True, recv_ack=True)
         self.log.debug("%s: send acknowledgement", uid)
@@ -631,12 +670,12 @@ class Channels:
     async def send(self, channel_name, data, ack=False, compress=6):
         """Send data in a encoded form to the channel.
 
+        :param channel_name: the name of the channel
         :param data: the python object to send
         :param ack: request acknowledgement of the reception of that message
         :param compress: compress the data with zlib
 
         Messages are split into chunks and put into the outgoing queue.
-
         """
         uid = Uid()
         encoded_channel_name = channel_name.encode()
@@ -691,13 +730,16 @@ class Channel(asyncio.Queue):
         """Initialize the channel.
 
         :param name: the channel name
-        :param queue: the incomming queue
         :param send: the partial send method of Channels
+        :param loop: the event loop
 
         """
         super().__init__(loop=loop)
         self.name = name
         self.send = send
+        """The send method bound to this channel's name.
+        See :py:func:`Channels.send` for details.
+        """
 
     def __repr__(self):
         return '<{0.name} {in_size}>'.format(
@@ -772,17 +814,21 @@ DISPATCHER_CHANNEL_NAME = 'Dispatcher'
 
 class Dispatcher:
 
-    """Enables execution of `Command`s.
+    """Enables execution of :py:obj:`Command` s.
 
-    A `Command` is split into local and remote part, where a context with
-    a dedicated `Channel` is provided to enable streaming of arbitrary data.
-    The local part also gets a remote future passed, which resolves to the
-    result of the remote part of the `Command`.
+    A :py:obj:`Command` is split into local and remote part, where a context
+    with a dedicated :py:obj:`Channel` is provided to enable streaming of
+    arbitrary data. The local part also gets a remote future passed, which
+    resolves to the result of the remote part of the :py:obj:`Command`.
     """
 
     log = logging.getLogger(__module__ + '.' + __qualname__)    # noqa
 
     def __init__(self, channels, *, loop=None):
+        """Create a dispatcher, which executes messages on its own
+        :py:obj:`Channel` to enable Command execution and communication via
+        distinct :py:obj:`Channel` s.
+        """
         self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.channels = channels
         """The collection of all channels."""
@@ -792,10 +838,12 @@ class Dispatcher:
 
         self.pending_commands = collections.defaultdict(
             functools.partial(asyncio.Future, loop=self.loop))
-        """Futures of `Command`s which are not finished yet."""
+        """Futures of :py:obj:`Command` s which are not finished yet."""
 
         self.pending_dispatches = collections.defaultdict(
             functools.partial(asyncio.Event, loop=self.loop))
+        """A collection of dispatches, which are still not finished."""
+
         self.pending_remote_tasks = set()
 
         self._lock_dispatch = asyncio.Lock(loop=self.loop)
@@ -819,7 +867,7 @@ class Dispatcher:
             await fut_execute_channels
 
     async def _execute_channels(self):
-        """Execute messages sent via our `Dispatcher.channel`."""
+        """Execute messages sent via our :py:obj:`Dispatcher.channel`."""
         self.log.info("Listening on channel %s for command dispatch...",
                       self.channel)
 
@@ -902,9 +950,10 @@ class Dispatcher:
         return _context()
 
     def local_context(self, fqin, remote_future):
-        """Create a local context to pass to a `Command`s local part.
+        """Create a local context to pass to a :py:obj:`Command` s local part.
 
-        The `Channel` is built via a fully qualified instance name (fqin).
+        The :py:obj:`Channel` is built via a fully qualified instance name
+        (fqin).
 
         """
         channel = self.channels.get_channel(fqin)
@@ -918,9 +967,10 @@ class Dispatcher:
         return context
 
     def remote_context(self, fqin, pending_remote_task):
-        """Create a remote context to pass to a `Command`s remote part.
+        """Create a remote context to pass to a :py:obj:`Command` s remote part.
 
-        The `Channel` is built via a fully qualified instance name (fqin).
+        The :py:obj:`Channel` is built via a fully qualified instance name
+        (fqin).
 
         """
         channel = self.channels.get_channel(fqin)
@@ -1187,7 +1237,8 @@ class Command(metaclass=_CommandMeta):
         )
 
 
-class DispatchMessage:
+
+class DispatchMessage(metaclass=abc.ABCMeta):
 
     """Base class for command dispatch communication."""
 
@@ -1199,6 +1250,11 @@ class DispatchMessage:
     def __repr__(self):
         return "<{self.__class__.__name__} {self.fqin}>".format(
             **locals())
+
+    @abc.abstractmethod
+    async def __call__(self, dispatcher):
+        """Executes appropriate :py:obj:`Dispatcher` methods to implement the
+        core protocol."""
 
 
 class DispatchCommand(DispatchMessage):
@@ -1428,15 +1484,14 @@ class FindSpecData(Command):
 
 class RemoteModuleFinder(importlib.abc.MetaPathFinder):
 
-    """Import hook that schedules a `FindSpecData` coroutine in the main loop.
+    """Import hook that execute a :py:obj:`FindSpecData` command in the main
+    loop.
 
-    The import itself is run in a separate executor thread to keep
-    things async.
+    See `pep-0302`_, `pep-0420`_ and `pep-0451`_ for internals.
 
-    http://stackoverflow.com/questions/32059732/send-asyncio-tasks-to-loop-running-in-other-thread
-    https://www.python.org/dev/peps/pep-0302/
-    https://www.python.org/dev/peps/pep-0420/
-    https://www.python.org/dev/peps/pep-0451/
+    .. _pep-0302: https://www.python.org/dev/peps/pep-0302/
+    .. _pep-0420: https://www.python.org/dev/peps/pep-0420/
+    .. _pep-0451: https://www.python.org/dev/peps/pep-0451/
     """
 
     log = logging.getLogger(__module__ + '.' + __qualname__)    # noqa
@@ -1547,7 +1602,11 @@ async def async_import(fullname, *, loop=None):
 
 class ShutdownRemoteEvent:
 
-    """A Shutdown event."""
+    """A Shutdown event.
+
+    Shutting down a remote connection is done by gracefully
+    canceling all remote tasks. See :py:obj:`Core.communicate` for details.
+    """
 
     @classmethod
     def __msgpack_encode__(cls, data, data_type):
@@ -1570,8 +1629,14 @@ class Core:
         self.kill_on_connection_lost = True
 
     async def communicate(self, reader, writer):
-        """Start the dispatcher and register
-        the :py:obj:`ShutdownRemoteEvent`.
+        """Start the dispatcher and register the :py:obj:`ShutdownRemoteEvent`.
+
+        On shutdown:
+            1. the import hook is removed
+
+            2. the :py:obj:`Dispatcher.dispatch` task is stopped
+
+            3. the :py:obj:`Channels.enqueue` task is stopped
         """
         try:
             channels = Channels(reader=reader, writer=writer, loop=self.loop)

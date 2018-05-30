@@ -34,12 +34,9 @@ setup(
         'Framework :: AsyncIO',
     ],
     license='Apache License Version 2.0',
-
     keywords="asyncio ssh RPC Remote execution dependency"
     " injection stdin stdout messaging",
-
     package_dir={'': 'src'},
-    # namespace_packages=['implant'],
     packages=find_packages(
         'src',
         exclude=["tests*"]
@@ -51,14 +48,16 @@ setup(
         ],
         'pytest11': ['implant = implant.testing'],
     },
-
     install_requires=read('requirements.txt').split('\n'),
     extras_require={
         'dev': read('requirements-dev.txt').split('\n'),
         'uvloop': read('requirements-uvloop.txt').split('\n'),
         'tokio': read('requirements-tokio.txt').split('\n'),
+        'docs': read('requirements-docs.txt').split('\n'),
     },
     dependency_links=[
         'git+https://github.com/PyO3/tokio#egg=tokio-0.99.0'
     ],
+    python_requires='>= 3.5.0.0, < 4.0.0.0',
+    zip_safe=False,
 )
