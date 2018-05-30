@@ -18,7 +18,7 @@ Features
 
 - adhoc transferable remote procedures
 
-- remote part of a :py:obj:`implat.core.Command` may reside in a separate module
+- remote part of a :py:obj:`implant.core.Command` may reside in a separate module
 
 - a :py:obj:`implant.core.Command` specific :py:obj:`implant.core.Channel`
   enables arbitrary protocols between local and remote side
