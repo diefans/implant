@@ -237,6 +237,7 @@ class ConnectorMeta(abc.ABCMeta):
 
     @property
     def scheme(cls):
+        """The unique connector scheme is the lowered class name."""
         return cls.__name__.lower()
 
 
@@ -275,16 +276,16 @@ class SubprocessConnector(Connector):
         return bootstrap_code
 
     @abc.abstractmethod
-    def arguments(self, *, code=None, options=None, python_bin=sys.executable):
+    def arguments(self, *, code=None, options=None, python_bin=None):
         """Iterate over the arguments to start a process.
 
         :param code: the code to bootstrap the remote process
         :param options: options for the remote process
-
+        :param python_bin: the path to the python binary
         """
 
     async def launch(self, *, loop=None, code=None, options=None,
-                     python_bin=sys.executable, **kwargs):
+                     python_bin=None, **kwargs):
         """Launch a remote process.
 
         :param code: the python module to bootstrap
@@ -293,6 +294,8 @@ class SubprocessConnector(Connector):
         :param kwargs: further arguments to create the process
 
         """
+        if python_bin is None:
+            python_bin = sys.executable
         loop = loop if loop is not None else asyncio.get_event_loop()
         if options is None:
             options = {}
@@ -371,7 +374,9 @@ class Local(SubprocessConnector):
         super().__init__()
         self.sudo = sudo
 
-    def arguments(self, *, code=None, options=None, python_bin=sys.executable):
+    def arguments(self, *, code=None, options=None, python_bin=None):
+        if python_bin is None:
+            python_bin = sys.executable
         bootstrap_code = self.bootstrap_code(code, options)
 
         # sudo
@@ -398,7 +403,7 @@ class Ssh(Local):
         self.hostname = hostname
         self.user = user
 
-    def arguments(self, *, code=None, options=None, python_bin=sys.executable):
+    def arguments(self, *, code=None, options=None, python_bin=None):
         *local_arguments, _, _, bootstrap_code = super().arguments(
             code=code, options=options, python_bin=python_bin
         )
@@ -434,7 +439,7 @@ class Lxd(Ssh):
         super().__init__(hostname=hostname, user=user, sudo=sudo)
         self.container = container
 
-    def arguments(self, *, code=None, options=None, python_bin=sys.executable):
+    def arguments(self, *, code=None, options=None, python_bin=None):
         *ssh_arguments, _, _, bootstrap_code = super().arguments(
             code=code, options=options, python_bin=python_bin
         )

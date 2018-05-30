@@ -1,4 +1,10 @@
-"""Provide a pytest fixture for testing commands."""
+"""Provide a pytest fixture for testing commands.
+
+The :py:obj:`implant_remote_task` fixture is provided as if it is a running
+:py:obj:`implant.connect.Remote` instance. You can execute a
+:py:obj:`implant.core.Command` passing the whole stack.
+
+"""
 import asyncio
 import os
 
@@ -66,8 +72,25 @@ async def create_pipe_remote(stdin_pipe, stdout_pipe, stderr_pipe,
 
 @pytest.fixture
 @async_generator
-async def remote_task(event_loop):
-    """Create the remote task as a fixture."""
+async def implant_remote_task(event_loop):
+    """Create the remote task as a fixture.
+
+    You use it like:
+
+    .. code-block:: python
+
+        @pytest.mark.asyncio
+        async def test_testing(implant_remote_task):
+            from implant import core
+
+            result = await implant_remote_task.execute(
+                core.InvokeImport, fullname='implant.commands')
+            result = await implant_remote_task.execute(
+                'implant.commands:Echo', data='foobar')
+
+            assert result['remote_data'] == 'foobar'
+
+    """
     connector = PipeConnector(loop=event_loop)
     remote = await connector.launch()
     com_remote = asyncio.ensure_future(remote.communicate())

@@ -18,9 +18,10 @@ Features
 
 - adhoc transferable remote procedures
 
-- remote part of a `Command` may reside in a separate module
+- remote part of a :py:obj:`implat.core.Command` may reside in a separate module
 
-- a `Command` specific `Channel` enables arbitrary protocols between local and remote side
+- a :py:obj:`implant.core.Command` specific :py:obj:`implant.core.Channel`
+  enables arbitrary protocols between local and remote side
 
 - events
 
@@ -36,7 +37,7 @@ Limitations
 
 - only pure Python modules are supported for remote import, if no venv is used
 
-- `Commands` must reside in a module other then `__main__`
+- :py:obj:`implant.core.Command` s must reside in a module other then `__main__`
 
 - at the moment sudo must not ask for password
 

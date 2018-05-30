@@ -92,7 +92,9 @@ html_theme = 'alabaster'
 #
 html_theme_options = {
     'fixed_sidebar': True,
-    'code_font_family': "'Consolas', 'Menlo', 'Deja Vu Sans Mono', 'Bitstream Vera Sans Mono', monospace",
+    'code_font_family': "'Fantasque Sans Mono', 'Inconsolata', 'Consolas', 'Menlo', 'Deja Vu Sans Mono', 'Bitstream Vera Sans Mono', monospace",
+    'font_family': "'athiti', 'goudy old style', 'minion pro', 'bell mt', Georgia, 'Hiragino Mincho Pro', serif",
+    'head_font_family': "'Garamond', 'Georgia', serif"
 }
 
 # Add any paths that contain custom static files (such as style sheets) here,

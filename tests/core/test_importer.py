@@ -21,19 +21,19 @@ import pytest
     })
 ])
 @pytest.mark.usefixtures('mocked_meta_path')
-async def test_find_spec_data(remote_task, fake_module_finder, fullname,
+async def test_find_spec_data(implant_remote_task, fake_module_finder, fullname,
                               result):
     from implant import core
 
-    spec_data = await remote_task.execute(core.FindSpecData,
+    spec_data = await implant_remote_task.execute(core.FindSpecData,
                                           fullname=fullname)
 
     assert spec_data == result
 
 
 @pytest.mark.asyncio
-async def _test_invoke_import(remote_task):
+async def _test_invoke_import(implant_remote_task):
     from implant import core
-    result = await remote_task.execute(core.InvokeImport,
+    result = await implant_remote_task.execute(core.InvokeImport,
                                        fullname='implant.commands')
     assert result is not None
