@@ -1,3 +1,7 @@
+.. image:: implant.png
+   :alt: implant
+   :align: right
+
 implant
 **********
 
