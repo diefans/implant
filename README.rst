@@ -1,10 +1,11 @@
+.. image:: https://travis-ci.org/diefans/implant.svg?branch=master
+   :target: https://travis-ci.org/diefans/implant
+   :align: right
+
 .. image:: implant.png
    :alt: implant
    :align: left
 
-.. image:: https://travis-ci.org/diefans/implant.svg?branch=master
-   :target: https://travis-ci.org/diefans/implant
-   :align: right
 
 implant
 **********
