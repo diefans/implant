@@ -12,6 +12,10 @@
        :target: https://pypi.org/project/implant/
        :alt: PyPI
 
+    .. image:: https://img.shields.io/readthedocs/pip.svg
+       :target: http://docs.implant.codes
+       :alt: Read the Docs
+
 ----
 
 .. image:: implant.png
