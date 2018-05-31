@@ -4,6 +4,14 @@
        :target: https://travis-ci.org/diefans/implant
        :align: right
 
+    .. image:: https://img.shields.io/pypi/pyversions/implant.svg
+       :target: https://pypi.org/project/implant/
+       :alt: PyPI - Python Version
+
+    .. image:: https://img.shields.io/pypi/v/implant.svg
+       :target: https://pypi.org/project/implant/
+       :alt: PyPI
+
 ----
 
 .. image:: implant.png
