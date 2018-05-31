@@ -2,12 +2,13 @@
    :alt: implant
    :align: left
 
+.. image:: https://travis-ci.org/diefans/implant.svg?branch=master
+   :target: https://travis-ci.org/diefans/implant
+   :align: right
+
 implant
 **********
 
-
-.. image:: https://travis-ci.org/diefans/implant.svg?branch=master
-   :target: https://travis-ci.org/diefans/implant
 
 
 A proof-of-concept for asynchronous adhoc remote procedure calls in Python.
