@@ -5,14 +5,17 @@
 implant
 **********
 
-.. inclusion-marker-do-not-remove
 
 .. image:: https://travis-ci.org/diefans/implant.svg?branch=master
    :target: https://travis-ci.org/diefans/implant
 
+
 A proof-of-concept for asynchronous adhoc remote procedure calls in Python.
 
 This is work in progress and serves basically as an exercise.
+
+
+.. inclusion-marker-do-not-remove
 
 
 Features

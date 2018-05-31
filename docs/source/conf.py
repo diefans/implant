@@ -93,11 +93,12 @@ html_theme = 'alabaster'
 html_theme_options = {
     'github_user': 'diefans',
     'github_repo': 'implant',
+    'travis_button': 'true',
     'logo': 'implant.png',
-    'logo_name': True,
+    'logo_name': 'true',
     'logo_text_align': 'center',
     'description': 'Asyncio adhoc transfered remote procedure calls.',
-    'fixed_sidebar': True,
+    'fixed_sidebar': 'true',
     'code_font_family': "'Fantasque Sans Mono', 'Inconsolata', 'Consolas', 'Menlo', 'Deja Vu Sans Mono', 'Bitstream Vera Sans Mono', monospace",
     'font_family': "'athiti', 'goudy old style', 'minion pro', 'bell mt', Georgia, 'Hiragino Mincho Pro', serif",
     'head_font_family': "'Garamond', 'Georgia', serif"
