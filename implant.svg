@@ -9,8 +9,8 @@
    xmlns="http://www.w3.org/2000/svg"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
-   width="129"
-   height="129"
+   width="100"
+   height="100"
    viewBox="0 0 0 1052.3622"
    id="svg5995"
    version="1.1"
@@ -28,9 +28,9 @@
      borderopacity="1.0"
      inkscape:pageopacity="0.0"
      inkscape:pageshadow="2"
-     inkscape:zoom="1"
-     inkscape:cx="84.585522"
-     inkscape:cy="47.718047"
+     inkscape:zoom="4"
+     inkscape:cx="55.62966"
+     inkscape:cy="81.415929"
      inkscape:document-units="px"
      inkscape:current-layer="layer1"
      showgrid="false"
@@ -57,14 +57,16 @@
      inkscape:label="Layer 1"
      inkscape:groupmode="layer"
      id="layer1"
-     transform="translate(0,-923.36216)">
+     transform="translate(0,-952.36216)">
     <g
        id="g5242-9-3-7"
-       transform="matrix(0.78124999,0,0,0.78124999,-964.56208,459.14433)">
+       transform="matrix(0.77645979,0,0,0.77645979,-958.43928,462.74265)"
+       inkscape:export-xdpi="90"
+       inkscape:export-ydpi="90">
       <circle
          r="63.999996"
-         cy="694.85571"
-         cx="1299.2795"
+         cy="695.36902"
+         cx="1298.7656"
          id="path4865-4-3-6-1-5-8"
          style="opacity:1;fill:#000000;fill-opacity:1;stroke:#ffffff;stroke-width:0;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
       <path
