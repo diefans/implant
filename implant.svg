@@ -15,7 +15,10 @@
    id="svg5995"
    version="1.1"
    inkscape:version="0.91 r13725"
-   sodipodi:docname="implant.svg">
+   sodipodi:docname="implant.svg"
+   inkscape:export-filename="/home/olli/code/da/implant/implant.png"
+   inkscape:export-xdpi="90"
+   inkscape:export-ydpi="90">
   <defs
      id="defs5997" />
   <sodipodi:namedview
@@ -25,7 +28,7 @@
      borderopacity="1.0"
      inkscape:pageopacity="0.0"
      inkscape:pageshadow="2"
-     inkscape:zoom="2.8"
+     inkscape:zoom="1"
      inkscape:cx="84.585522"
      inkscape:cy="47.718047"
      inkscape:document-units="px"
@@ -57,7 +60,7 @@
      transform="translate(0,-923.36216)">
     <g
        id="g5242-9-3-7"
-       transform="translate(-1234.7795,293.14463)">
+       transform="matrix(0.78124999,0,0,0.78124999,-964.56208,459.14433)">
       <circle
          r="63.999996"
          cy="694.85571"

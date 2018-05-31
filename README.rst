@@ -1,6 +1,6 @@
 .. image:: implant.png
    :alt: implant
-   :align: right
+   :align: left
 
 implant
 **********

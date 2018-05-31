@@ -91,6 +91,12 @@ html_theme = 'alabaster'
 # documentation.
 #
 html_theme_options = {
+    'github_user': 'diefans',
+    'github_repo': 'implant',
+    'logo': 'implant.png',
+    'logo_name': True,
+    'logo_text_align': 'center',
+    'description': 'Asyncio adhoc transfered remote procedure calls.',
     'fixed_sidebar': True,
     'code_font_family': "'Fantasque Sans Mono', 'Inconsolata', 'Consolas', 'Menlo', 'Deja Vu Sans Mono', 'Bitstream Vera Sans Mono', monospace",
     'font_family': "'athiti', 'goudy old style', 'minion pro', 'bell mt', Georgia, 'Hiragino Mincho Pro', serif",
@@ -110,7 +116,13 @@ html_static_path = ['_static']
 # default: ``['localtoc.html', 'relations.html', 'sourcelink.html',
 # 'searchbox.html']``.
 #
-# html_sidebars = {}
+html_sidebars = {
+    '**': [
+        'about.html',
+        'navigation.html',
+        'searchbox.html',
+    ]
+}
 
 
 # -- Options for HTMLHelp output ---------------------------------------------
