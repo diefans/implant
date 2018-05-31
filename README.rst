@@ -16,6 +16,9 @@
        :target: http://docs.implant.codes
        :alt: Read the Docs
 
+    .. image:: https://codecov.io/gh/diefans/implant/branch/master/graph/badge.svg
+       :target: https://codecov.io/gh/diefans/implant
+
 ----
 
 .. image:: implant.png
