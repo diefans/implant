@@ -1,6 +1,10 @@
-.. image:: https://travis-ci.org/diefans/implant.svg?branch=master
-   :target: https://travis-ci.org/diefans/implant
-   :align: right
+.. container:: bagdes
+
+    .. image:: https://travis-ci.org/diefans/implant.svg?branch=master
+       :target: https://travis-ci.org/diefans/implant
+       :align: right
+
+----
 
 .. image:: implant.png
    :alt: implant
@@ -9,8 +13,6 @@
 
 implant
 **********
-
-
 
 A proof-of-concept for asynchronous adhoc remote procedure calls in Python.
 
