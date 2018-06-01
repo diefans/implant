@@ -26,11 +26,11 @@ setup(
         'License :: OSI Approved :: Apache Software License',
         'Intended Audience :: Developers',
         'Programming Language :: Python',
-        'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
-        'Topic :: Internet :: WWW/HTTP',
+        'Topic :: Internet',
+        'Topic :: System :: Software Distribution',
         'Framework :: AsyncIO',
     ],
     license='Apache License Version 2.0',
@@ -51,9 +51,9 @@ setup(
     install_requires=read('requirements.txt').split('\n'),
     extras_require={
         'dev': read('requirements-dev.txt').split('\n'),
+        'docs': read('requirements-docs.txt').split('\n'),
         'uvloop': read('requirements-uvloop.txt').split('\n'),
         'tokio': read('requirements-tokio.txt').split('\n'),
-        'docs': read('requirements-docs.txt').split('\n'),
     },
     dependency_links=[
         'git+https://github.com/PyO3/tokio#egg=tokio-0.99.0'
