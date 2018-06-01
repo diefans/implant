@@ -93,7 +93,8 @@ html_theme = 'alabaster'
 html_theme_options = {
     'github_user': 'diefans',
     'github_repo': 'implant',
-    'travis_button': 'true',
+    'travis_button': True,
+    'codecov_button': True,
     'logo': 'implant.png',
     'logo_name': 'true',
     'logo_text_align': 'center',
