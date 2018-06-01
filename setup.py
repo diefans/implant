@@ -4,7 +4,7 @@ import os
 
 from setuptools import find_packages, setup
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 def read(*paths):
@@ -58,6 +58,6 @@ setup(
     dependency_links=[
         'git+https://github.com/PyO3/tokio#egg=tokio-0.99.0'
     ],
-    python_requires='>= 3.5.0.0, < 4.0.1.1',
+    python_requires='>= 3.5.0.0, < 4.0.1.2',
     zip_safe=False,
 )
